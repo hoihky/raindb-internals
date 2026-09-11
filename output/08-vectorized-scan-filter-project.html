@@ -1,0 +1,1221 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Chapter 8: Vectorized Scan, Filter, and Project · Building an OLAP Database Engine from Scratch with RainDB</title>
+  <meta name="description" content="Generated documentation site">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="assets/css/site.css">
+  <link rel="stylesheet" href="assets/vendor/atom-one-dark.min.css">
+</head>
+<body>
+  <div class="site">
+    <header class="topbar">
+      <button class="sidebar-toggle" id="sidebar-toggle" aria-label="Toggle navigation">☰</button>
+      <a href="index.html" class="brand">Building an OLAP Database Engine from Scratch with RainDB</a>
+      <div class="search-wrap">
+        <input type="search" id="search" placeholder="Search docs…" autocomplete="off">
+      </div>
+    </header>
+
+    <div class="layout">
+      <aside class="sidebar" id="sidebar">
+        <nav class="nav" aria-label="Documentation">
+          <ul class="nav-list">
+            
+                        <li class="nav-item depth-0">
+                          
+                            <a href="index.html" class="nav-link">Building an OLAP Database Engine from Scratch</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="01-olap-fundamentals.html" class="nav-link">Chapter 1: OLAP Fundamentals</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="02-architecture-and-modules.html" class="nav-link">Chapter 2: Architecture and Modules</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="03-columnar-storage-model.html" class="nav-link">Chapter 3: Columnar Storage Model</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="04-chunk-data-structures.html" class="nav-link">Chapter 4: Chunk Data Structures</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="05-catalog-and-tables.html" class="nav-link">Chapter 5: Catalog and Tables</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="06-buffer-management.html" class="nav-link">Chapter 6: Buffer Management</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="07-execution-pipeline.html" class="nav-link">Chapter 7: Execution Pipeline</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0 is-active">
+                          
+                            <a href="08-vectorized-scan-filter-project.html" class="nav-link">Chapter 8: Vectorized Scan, Filter, and Project</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="09-global-aggregates.html" class="nav-link">Chapter 9: Global Aggregates</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="10-hash-aggregation.html" class="nav-link">Chapter 10: Hash Aggregation</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="11-joins.html" class="nav-link">Chapter 11: Joins</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="12-sort-and-limit.html" class="nav-link">Chapter 12: Sort and Limit</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="13-sql-compilation.html" class="nav-link">Chapter 13: SQL Compilation</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="14-persistence.html" class="nav-link">Chapter 14: Persistence</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="15-future-extensions.html" class="nav-link">Chapter 15: Future Extensions</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="16-mmap-io.html" class="nav-link">Chapter 16: mmap I/O</a>
+                            
+                        </li>
+                        
+          </ul>
+        </nav>
+      </aside>
+
+      <main class="content">
+        <article class="doc">
+          <header class="doc-header">
+            <h1>Chapter 8: Vectorized Scan, Filter, and Project</h1>
+          </header>
+          <div class="doc-body"><h1 id="chapter-8-vectorized-scan-filter-and-project">Chapter 8: Vectorized Scan, Filter, and Project</h1>
+<p>Selection (σ) and projection (π) show up in almost every analytical query. Columnar engines implement them as <strong>scan</strong> (pull batches from storage), <strong>filter</strong> (evaluate predicates), and <strong>project</strong> (copy output columns) — usually fused into one vectorized pipeline per batch. Parallel workers chew through <strong>morsels</strong> (independent batch units) while a fixed output slot per batch index keeps results deterministic.</p>
+<p><strong>Part I</strong> covers the algebra, selectivity, predicate pushdown, selection vectors, conjunctive predicates, short-circuit behavior, gather/scatter mechanics, and morsel-driven parallelism. <strong>Part II</strong> follows RainDB's <code>VectorizedScanEngine</code>, <code>SelectionEvaluator</code>, <code>FixedWidthSelectionKernels</code>, and <code>ProjectGather</code> through the source tree.</p>
+<hr />
+<h1 id="part-i-concepts-and-theory">Part I: Concepts and Theory</h1>
+<h2 id="selection-and-projection">8.1 Selection (σ) and projection (π)</h2>
+<p>Relational algebra models query fragments as operations on relations.</p>
+<h3 id="selection">Selection</h3>
+<p><strong>Selection</strong> σ_P(R) returns the subset of R where predicate P is true:</p>
+<pre><code>σ_{amount &gt; 100}(Sales)
+</code></pre>
+<p>Key properties:</p>
+<ul>
+<li><strong>Arity unchanged</strong> — same columns in and out</li>
+<li><strong>Row count non-increasing</strong> — |σ_P(R)| ≤ |R|</li>
+<li><strong>Projection commute</strong> — pushing π below σ is safe only when the predicate references columns you keep</li>
+</ul>
+<p>SQL maps selection to <code>WHERE</code>.</p>
+<h3 id="projection">Projection</h3>
+<p><strong>Projection</strong> π_C(R) keeps columns in C and drops the rest:</p>
+<pre><code>π_{region, amount}(Sales)
+</code></pre>
+<p>Key properties:</p>
+<ul>
+<li><strong>Column count may shrink</strong> — row count does not grow (duplicate elimination aside)</li>
+<li><strong>Set vs bag</strong> — relational π is a set; SQL retains duplicate rows unless <code>DISTINCT</code></li>
+</ul>
+<p>SQL maps projection to the <code>SELECT</code> column list (excluding aggregates).</p>
+<h3 id="composition">Composition</h3>
+<p>The usual pattern:</p>
+<pre><code>π_{region, amount}( σ_{amount &gt; 100}( Sales ) )
+</code></pre>
+<p>Run <strong>filter before project</strong> when you can — copying fewer rows saves bandwidth downstream.</p>
+<h3 id="pseudocode-algebra-to-operators">Pseudocode: algebra to operators</h3>
+<pre><code>function execute(query):
+rel = scan(table)
+rel = select(rel, predicate)   // σ
+rel = project(rel, columns)    // π
+return rel
+</code></pre>
+<p>RainDB implements this fusion in <code>ProcessOneBatch</code>: <code>SelectionEvaluator</code> first, then <code>ProjectGather</code>.</p>
+<hr />
+<h2 id="selectivity-and-predicate-pushdown">8.2 Selectivity and predicate pushdown</h2>
+<p><strong>Selectivity</strong> measures how aggressively a predicate thins the input:</p>
+<pre><code>selectivity(P) = |σ_P(R)| / |R|
+</code></pre>
+<p>On uniform data across 10 countries, <code>country = 'US'</code> yields selectivity ≈ 0.1.</p>
+<h3 id="why-selectivity-matters">Why selectivity matters</h3>
+<table class="table">
+<thead>
+<tr>
+<th>Selectivity</th>
+<th>Filter impact</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>High (0.9)</td>
+<td>Little row reduction; scan dominates</td>
+</tr>
+<tr>
+<td>Low (0.01)</td>
+<td>Early shrink; cheap downstream operators</td>
+</tr>
+</tbody>
+</table>
+<p>Optimizers feed selectivity into join ordering, index choice, and broadcast-versus-shuffle decisions.</p>
+<h3 id="predicate-pushdown">Predicate pushdown</h3>
+<p><strong>Predicate pushdown</strong> places filters as close to the data as possible — scan operator, storage layer, or remote worker — so upstream operators see fewer rows.</p>
+<pre><code>Without pushdown:
+  Scan(all rows) → Join → Filter
+
+With pushdown:
+  Scan → Filter → Join   (only matching rows join)
+</code></pre>
+<p>Columnar systems commonly:</p>
+<ul>
+<li>Evaluate predicates <strong>inside scan</strong> on each batch</li>
+<li>Hand <strong>filters to I/O</strong> (zone maps, row-group min/max skip whole stripes)</li>
+<li>Skip Parquet row groups using <strong>column statistics</strong></li>
+</ul>
+<p>RainDB Phase 1 runs filters inside <code>VectorizedScanEngine</code> per batch — logical pushdown without storage-level zone maps.</p>
+<h3 id="conjunctive-selectivity-estimation">Conjunctive selectivity estimation</h3>
+<p>Assuming independent predicates P and Q:</p>
+<pre><code>selectivity(P AND Q) ≈ selectivity(P) × selectivity(Q)
+</code></pre>
+<p>Correlated columns break the product rule; production optimizers use histograms and multi-column stats. RainDB emits conjuncts in binder order and does not reorder them yet.</p>
+<hr />
+<h2 id="selection-vectors-in-columnar-execution">8.3 Selection vectors in columnar execution</h2>
+<p>Row stores evaluate predicates on assembled <strong>row structs</strong>. Columnar engines build <strong>selection vectors</strong> — dense lists of passing row indices.</p>
+<h3 id="dense-index-list">Dense index list</h3>
+<p>Filter a batch of n rows, then record survivors:</p>
+<pre><code>selectedRows = [0, 3, 7, 7, ...]   // length = selectedCount
+selectedCount = k
+</code></pre>
+<p>Each downstream operator uses <code>selectedRows[o]</code> to index every column chunk at source row <code>r</code>.</p>
+<h3 id="versus-bitmasks">Versus bitmasks</h3>
+<table class="table">
+<thead>
+<tr>
+<th>Representation</th>
+<th>Pros</th>
+<th>Cons</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Bitmask (n bits)</td>
+<td>Compact when k ≈ n</td>
+<td>Often must convert to indices before gather</td>
+</tr>
+<tr>
+<td>Dense indices (k ints)</td>
+<td>Ready for gather loops</td>
+<td>4 bytes per surviving row</td>
+</tr>
+</tbody>
+</table>
+<p>RainDB rents a dense <code>int[]</code> from <code>ArrayPool&lt;int&gt;</code> and passes it straight into <code>ProjectGather</code>.</p>
+<h3 id="pseudocode">Pseudocode</h3>
+<pre><code>function filterBatch(batch, pred, dest: int[]):
+count = 0
+for r in 0 .. batch.rowCount-1:
+    if pred(batch, r):
+        dest[count++] = r
+return count
+</code></pre>
+<h3 id="identity-fast-path">Identity fast path</h3>
+<p>No filter means no index list — row <code>o</code> maps implicitly to source row <code>o</code>. RainDB sets <code>useRowSelection: false</code> when <code>plan.Filters</code> is empty.</p>
+<hr />
+<h2 id="conjunctive-predicates-cnf">8.4 Conjunctive predicates (CNF)</h2>
+<p><code>WHERE</code> clauses usually chain predicates with <strong>AND</strong> — a <strong>conjunction</strong>. Full CNF is AND of OR clauses; the everyday case is a flat AND list:</p>
+<pre><code>WHERE amount &gt; 100 AND region = 'US' AND active = true
+</code></pre>
+<h3 id="sequential-intersection-algorithm">Sequential intersection algorithm</h3>
+<ol>
+<li>Run the first predicate → fill buffer, count = k₁</li>
+<li>For each later predicate, <strong>compact in place</strong> — keep indices that still pass, count = k₂ ≤ k₁</li>
+</ol>
+<pre><code>indices = filter(col_amount, &gt;100, buffer)     // k=5000
+indices = intersect(col_region, ='US', buffer, k)  // k=500
+indices = intersect(col_active, =true, buffer, k)  // k=450
+</code></pre>
+<p>In-place intersection avoids k-sized temporary bitmasks.</p>
+<p>RainDB entry point: <code>SelectionEvaluator.FillSelectedRowsConjunctive</code>.</p>
+<h3 id="disjunction-or">Disjunction (OR)</h3>
+<p><code>OR</code> needs set union or merged bitmasks — harder and not in RainDB Phase 1's <code>ColumnCompareFilter[]</code> AND focus.</p>
+<h3 id="reordering-conjuncts">Reordering conjuncts</h3>
+<p>Classic optimizer advice: evaluate the cheapest or most selective predicate first to shrink work on later conjuncts. RainDB keeps textual order until a cost model arrives.</p>
+<hr />
+<h2 id="short-circuit-evaluation">8.5 Short-circuit evaluation</h2>
+<p><strong>Short-circuit</strong> logic stops as soon as the boolean result is determined.</p>
+<h3 id="sql-three-valued-logic">SQL three-valued logic</h3>
+<p>SQL distinguishes <strong>TRUE, FALSE, UNKNOWN (NULL)</strong>. <code>WHERE</code> retains only TRUE.</p>
+<pre><code>NULL AND FALSE  → FALSE
+TRUE OR UNKNOWN → TRUE
+</code></pre>
+<p>For <code>P AND Q</code>, a FALSE <code>P</code> means <code>Q</code> can be skipped in row-at-a-time evaluation.</p>
+<h3 id="columnar-batch-evaluation">Columnar batch evaluation</h3>
+<p>Vectorized engines typically evaluate <strong>one predicate across all candidates</strong> per step, not literal row-by-row short-circuit. <strong>Conjunctive intersection</strong> still mimics the benefit: each step runs on a shrinking index list.</p>
+<p>Row-at-a-time:</p>
+<pre><code>if not P(row): continue
+if not Q(row): continue
+</code></pre>
+<p>Columnar conjunctive:</p>
+<pre><code>candidates = all rows
+candidates = filter P on candidates
+candidates = filter Q on candidates   // |Q| = |candidates|, not |all|
+</code></pre>
+<p>RainDB's fill is <strong>column-at-a-time</strong>; shrinking <code>count</code> between conjuncts is the performance lever.</p>
+<h3 id="null-in-comparisons">NULL in comparisons</h3>
+<p><code>NULL = 5</code> is UNKNOWN, so the row drops out of <code>WHERE</code>. RainDB's <code>SelectionEvaluator.IsNull</code> excludes null cells before comparison — they never land in the selection vector.</p>
+<hr />
+<h2 id="gather-and-scatter-in-vectorized-engines">8.6 Gather and scatter in vectorized engines</h2>
+<p>Columnar layout stores values <strong>per column</strong>. Filtering yields sparse indices; projection must <strong>gather</strong> into dense output buffers.</p>
+<h3 id="gather">Gather</h3>
+<p>Copy selected elements into contiguous output:</p>
+<pre><code>for o in 0 .. selectedCount-1:
+r = selectedRows[o]
+outValues[o] = srcValues[r]
+</code></pre>
+<p>Fixed-width types: per-row copy or SIMD gather. UTF-8: copy payloads and rebuild offsets — costlier.</p>
+<h3 id="scatter">Scatter</h3>
+<p>Write values to non-contiguous destinations — gather's inverse:</p>
+<pre><code>for o in 0 .. selectedCount-1:
+dest[selectedRows[o]] = values[o]
+</code></pre>
+<p>Hash builds and in-place filters use scatter. RainDB's scan path <strong>gathers into fresh pooled chunks</strong> so input batches stay read-only.</p>
+<h3 id="full-column-copy-fast-path">Full-column copy fast path</h3>
+<p>When every row passes (<code>selectedCount == rowCount</code> without a selection vector), one bulk copy suffices:</p>
+<pre><code>outValues.copyFrom(srcValues)
+</code></pre>
+<p>RainDB: <code>ProjectGather.CopyEntireFixedWidthColumn</code>.</p>
+<hr />
+<h2 id="morsel-driven-parallelism">8.7 Morsel-driven parallelism</h2>
+<p><strong>Morsel-driven parallelism</strong> (Leis et al., 2014) hands small table partitions (<strong>morsels</strong>) to worker threads for dynamic load balance.</p>
+<h3 id="static-versus-dynamic-morsels">Static versus dynamic morsels</h3>
+<table class="table">
+<thead>
+<tr>
+<th>Strategy</th>
+<th>Behavior</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Static</td>
+<td>Pre-partition batch indices — simple, skew-prone</td>
+</tr>
+<tr>
+<td>Dynamic queue</td>
+<td>Workers dequeue next morsel — better balance</td>
+</tr>
+</tbody>
+</table>
+<p>RainDB defaults to <strong>one batch per morsel</strong>, optionally feeding batch indices through a <strong><code>Channel&lt;int&gt;</code></strong> when <code>UseChannelScheduler</code> is enabled.</p>
+<h3 id="deterministic-output-with-parallel-morsels">Deterministic output with parallel morsels</h3>
+<p>Never let parallel workers append to one shared list — order would depend on scheduling. <strong>Fixed slots:</strong></p>
+<pre><code>output[batchIndex] = process(table.batches[batchIndex])
+</code></pre>
+<p>Workers may finish in any order; <code>output[i]</code> always corresponds to input batch <code>i</code>.</p>
+<h3 id="morsel-granularity-trade-off">Morsel granularity trade-off</h3>
+<table class="table">
+<thead>
+<tr>
+<th>Morsel size</th>
+<th>Pros</th>
+<th>Cons</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Small (1K rows)</td>
+<td>Fine load balance</td>
+<td>Scheduler overhead</td>
+</tr>
+<tr>
+<td>Large (1M rows)</td>
+<td>Low overhead</td>
+<td>Skew on uneven batches</td>
+</tr>
+</tbody>
+</table>
+<p>RainDB morsel size equals <strong>ingested batch size</strong> — <code>VectorChunkLimits</code> sets the knob.</p>
+<h3 id="pipeline-within-morsel">Pipeline within morsel</h3>
+<p>Each morsel runs <strong>filter → project</strong> (or a partial aggregate) independently — embarrassingly parallel until a global combine step.</p>
+<hr />
+<h2 id="integration-with-global-aggregates">8.8 Integration with global aggregates</h2>
+<p><code>SELECT SUM(x) FROM t WHERE p</code> filters inside each batch, accumulates <strong>partial aggregates</strong> per batch, then <strong>combines in fixed order</strong>:</p>
+<pre><code>partials[i] = sum(filter(batch[i], p))
+total = sum(partials[0..n-1])   // ordered combine
+</code></pre>
+<p><code>VectorizedScanEngine</code> shares the morsel scheduler between project and aggregate paths.</p>
+<hr />
+<h2 id="summary-part-i-checklist">8.9 Summary: Part I checklist</h2>
+<ol>
+<li><strong>σ and π</strong> — filter rows, subset columns; prefer filter before project.</li>
+<li><strong>Selectivity</strong> — drives cost models; push predicates toward scan.</li>
+<li><strong>Selection vectors</strong> — dense indices feeding gather loops.</li>
+<li><strong>CNF / AND</strong> — in-place intersection of index lists.</li>
+<li><strong>Short-circuit</strong> — shrink candidates between conjuncts; NULL rows excluded.</li>
+<li><strong>Gather/scatter</strong> — gather into new columns; bulk copy when unfiltered.</li>
+<li><strong>Morsels</strong> — parallel batches with index-stable output slots.</li>
+</ol>
+<hr />
+<h1 id="transition-to-part-ii-raindb-implementation">Transition to Part II: RainDB Implementation</h1>
+<p>Phase 1 scan/filter/project/aggregate lives in <strong><code>VectorizedScanEngine</code></strong> over <strong><code>IColumnarTableSource.Batches</code></strong>. <strong><code>SelectionEvaluator</code></strong> builds conjunctive selection vectors. <strong><code>FixedWidthSelectionKernels</code></strong> vectorizes <code>Int32</code> equality. <strong><code>ProjectGather</code></strong> materializes <strong><code>PooledFixedWidthColumnChunk</code></strong> outputs. Parallelism uses <strong><code>Parallel.For</code></strong> or a bounded <strong><code>Channel&lt;int&gt;</code></strong> scheduler writing deterministic <code>outArr[i]</code> slots.</p>
+<hr />
+<h1 id="part-ii-raindb-implementation">Part II: RainDB Implementation</h1>
+<h2 id="entry-point-and-control-flow">8.11 Entry point and control flow</h2>
+<pre><code class="language-csharp">// src/RainDB.Query/Execution/VectorizedScanEngine.cs
+public static class VectorizedScanEngine
+{
+    public static async ValueTask&lt;IQueryResult&gt; ExecuteAsync(
+        VectorizedScanPhysicalPlan plan,
+        IColumnarTableSource table,
+        IExecutionContext context)
+    {
+        ArgumentNullException.ThrowIfNull(plan);
+        ArgumentNullException.ThrowIfNull(table);
+        ArgumentNullException.ThrowIfNull(context);
+        ValidatePlan(plan, table);
+
+        if (plan.Aggregate is { } agg)
+            return await ComputeAggregateAsync(plan, table, agg, context).ConfigureAwait(false);
+
+        var batches = await ProjectAllBatchesAsync(plan, table, context).ConfigureAwait(false);
+        return new ColumnarMaterializedQueryResult(batches);
+    }
+}
+</code></pre>
+<p><strong>Two top-level paths:</strong></p>
+<ol>
+<li><strong>Aggregate path</strong> — <code>plan.Aggregate != null</code> → <code>ComputeAggregateAsync</code> → <code>IAggregateQueryResult</code></li>
+<li><strong>Project path</strong> — no aggregate → <code>ProjectAllBatchesAsync</code> → <code>ColumnarMaterializedQueryResult</code></li>
+</ol>
+<p>Both paths share batch iteration, parallelism options, and filter evaluation via <code>SelectionEvaluator</code>.</p>
+<hr />
+<h2 id="validateplan-fail-fast-before-parallel-work">8.12 ValidatePlan: fail fast before parallel work</h2>
+<pre><code class="language-csharp">private static void ValidatePlan(VectorizedScanPhysicalPlan plan, IColumnarTableSource table)
+{
+    if (plan.TableId != table.Id)
+        throw new ArgumentException(&quot;Physical plan table id does not match resolved table.&quot;, nameof(table));
+
+    var colCount = table.Schema.Columns.Count;
+    foreach (var idx in plan.OutputColumnIndices)
+    {
+        if ((uint)idx &gt;= (uint)colCount)
+            throw new ArgumentException($&quot;Output column index {idx} is out of range.&quot;, nameof(plan));
+    }
+
+    if (plan.Filters is { } fa)
+    {
+        foreach (var f in fa)
+        {
+            if ((uint)f.ColumnIndex &gt;= (uint)colCount)
+                throw new ArgumentException(&quot;Filter column index is out of range.&quot;, nameof(plan));
+        }
+    }
+
+    if (plan.Aggregate is { } a)
+    {
+        // bounds + supported AggregateKind/type pairs
+    }
+}
+</code></pre>
+<p>Unsupported type/kind pairs throw <code>NotSupportedException</code> before any parallel worker starts — avoiding partial results from mid-query failures.</p>
+<hr />
+<h2 id="projectallbatchesasync-morsel-parallelism">8.13 ProjectAllBatchesAsync: morsel parallelism</h2>
+<pre><code class="language-csharp">private static async ValueTask&lt;IReadOnlyList&lt;IColumnarBatch&gt;&gt; ProjectAllBatchesAsync(
+    VectorizedScanPhysicalPlan plan,
+    IColumnarTableSource table,
+    IExecutionContext context)
+{
+    var batches = table.Batches;
+    var n = batches.Count;
+    if (n == 0)
+        return Array.Empty&lt;IColumnarBatch&gt;();
+
+    var dop = EffectiveDop(plan.Options.MaxDegreeOfParallelism);
+    var outArr = new IColumnarBatch[n];
+    var ct = context.CancellationToken;
+
+    if (dop &lt;= 1 || n == 1)
+    {
+        for (var i = 0; i &lt; n; i++)
+            outArr[i] = ProcessOneBatch(plan, batches[i], context);
+    }
+    else if (plan.Options.UseChannelScheduler)
+    {
+        await RunChannelMorselsAsync(n, dop,
+            i =&gt; outArr[i] = ProcessOneBatch(plan, batches[i], context), ct)
+            .ConfigureAwait(false);
+    }
+    else
+    {
+        Parallel.For(0, n,
+            new ParallelOptions { MaxDegreeOfParallelism = dop, CancellationToken = ct },
+            i =&gt; outArr[i] = ProcessOneBatch(plan, batches[i], context));
+    }
+
+    return outArr;
+}
+</code></pre>
+<p><strong>Morsel model:</strong> Each batch is an independent <strong>morsel</strong> — filter + project with no cross-batch state. Output batch <code>i</code> depends only on input batch <code>i</code>.</p>
+<p><strong>Deterministic ordering:</strong> <code>outArr[i]</code> assignment by index preserves table batch order in the result list even when parallel workers finish out of order.</p>
+<p><strong>Empty table:</strong> Returns <code>Array.Empty&lt;IColumnarBatch&gt;()</code> without allocating <code>outArr</code>.</p>
+<hr />
+<h2 id="channel-morsel-scheduler">8.14 Channel morsel scheduler</h2>
+<pre><code class="language-csharp">private static async ValueTask RunChannelMorselsAsync(
+    int batchCount,
+    int dop,
+    Action&lt;int&gt; body,
+    CancellationToken cancellationToken)
+{
+    var ch = Channel.CreateBounded&lt;int&gt;(
+        new BoundedChannelOptions(Math.Max(16, dop * 4))
+        {
+            SingleWriter = true,
+            SingleReader = false,
+            FullMode = BoundedChannelFullMode.Wait,
+        });
+
+    var workers = new Task[dop];
+    for (var w = 0; w &lt; dop; w++)
+    {
+        workers[w] = Task.Run(async () =&gt;
+        {
+            while (await ch.Reader.WaitToReadAsync(cancellationToken).ConfigureAwait(false))
+            {
+                while (ch.Reader.TryRead(out var idx))
+                    body(idx);
+            }
+        }, cancellationToken);
+    }
+
+    for (var i = 0; i &lt; batchCount; i++)
+        await ch.Writer.WriteAsync(i, cancellationToken).ConfigureAwait(false);
+
+    ch.Writer.Complete();
+    await Task.WhenAll(workers).ConfigureAwait(false);
+}
+</code></pre>
+<table class="table">
+<thead>
+<tr>
+<th>Option</th>
+<th>Value</th>
+<th>Rationale</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Capacity</td>
+<td><code>max(16, dop * 4)</code></td>
+<td>Back-pressure</td>
+</tr>
+<tr>
+<td><code>SingleWriter</code> / multi-reader</td>
+<td></td>
+<td>Workers compete for batch indices</td>
+</tr>
+</tbody>
+</table>
+<p><strong>vs <code>Parallel.For</code>:</strong> Channels integrate cleanly with async cancellation; <code>Parallel.For</code> has lower overhead for uniform CPU-bound loops.</p>
+<p>The aggregate path (<code>ComputeAggregateAsync</code>) reuses the same scheduler with <code>partials[i] = AccumulateAggregateBatch(...)</code>.</p>
+<hr />
+<h2 id="processonebatch-filter-then-project">8.15 ProcessOneBatch: filter then project</h2>
+<pre><code class="language-csharp">private static IColumnarBatch ProcessOneBatch(
+    VectorizedScanPhysicalPlan plan,
+    IColumnarBatch batch,
+    IExecutionContext context)
+{
+    context.CancellationToken.ThrowIfCancellationRequested();
+    var rent = ArrayPool&lt;int&gt;.Shared.Rent(batch.RowCount);
+    try
+    {
+        var span = rent.AsSpan(0, batch.RowCount);
+        int selected;
+        var hasFilters = plan.Filters is { Length: &gt; 0 };
+        if (hasFilters)
+            selected = SelectionEvaluator.FillSelectedRowsConjunctive(
+                batch, plan.Filters!, span);
+        else
+            selected = batch.RowCount;
+
+        return ProjectGather.Project(
+            batch,
+            plan.OutputColumnIndices.AsSpan(),
+            useRowSelection: hasFilters,
+            selectedRows: hasFilters ? span[..selected] : ReadOnlySpan&lt;int&gt;.Empty,
+            selectedCount: selected,
+            context.BufferPool,
+            context.AlignedBufferPool);
+    }
+    finally
+    {
+        ArrayPool&lt;int&gt;.Shared.Return(rent);
+    }
+}
+</code></pre>
+<p><strong><code>useRowSelection</code> semantics:</strong></p>
+<ul>
+<li><code>true</code> when any filter present — <code>ProjectGather</code> reads <code>selectedRows[o]</code> to find source row</li>
+<li><code>false</code> when no filters — <code>selectedCount == batch.RowCount</code>, gather uses identity mapping</li>
+</ul>
+<p><strong>Note:</strong> When filters exist but select all rows, <code>selected == batch.RowCount</code> and <code>useRowSelection</code> is still <code>true</code> — gather uses the explicit index list, not the identity fast path inside <code>GatherFixedWidth</code>.</p>
+<hr />
+<h2 id="selectionevaluator-overview">8.16 SelectionEvaluator overview</h2>
+<pre><code class="language-csharp">// src/RainDB.Query/Vectorized/SelectionEvaluator.cs
+/// &lt;summary&gt;
+/// Builds dense selection vectors (matching row indices) for filters.
+/// Fixed-width predicates use column-wise compare kernels; conjunctive AND
+/// intersects successive selections in-place.
+/// &lt;/summary&gt;
+internal static class SelectionEvaluator
+</code></pre>
+<h3 id="null-bitmap-helper">Null bitmap helper</h3>
+<pre><code class="language-csharp">internal static bool IsNull(ReadOnlySpan&lt;byte&gt; nullBitmap, int row, bool hasNulls)
+{
+    if (!hasNulls)
+        return false;
+    return (nullBitmap[row &gt;&gt; 3] &amp; (1 &lt;&lt; (row &amp; 7))) != 0;
+}
+</code></pre>
+<p>Bit <code>1</code> means SQL NULL (RainDB column chunk convention).</p>
+<h3 id="conjunctive-and-fillselectedrowsconjunctive">Conjunctive AND: FillSelectedRowsConjunctive</h3>
+<pre><code class="language-csharp">internal static int FillSelectedRowsConjunctive(
+    IColumnarBatch batch,
+    ReadOnlySpan&lt;ColumnCompareFilter&gt; filters,
+    Span&lt;int&gt; dest)
+{
+    var n = batch.RowCount;
+    if (filters.Length == 0)
+    {
+        for (var i = 0; i &lt; n; i++)
+            dest[i] = i;
+        return n;
+    }
+
+    if (dest.Length &lt; n)
+        throw new ArgumentException(&quot;Selection buffer too small.&quot;, nameof(dest));
+
+    var count = FillSelectedRows(batch.Columns[filters[0].ColumnIndex], filters[0], dest);
+    for (var f = 1; f &lt; filters.Length; f++)
+    {
+        var col = batch.Columns[filters[f].ColumnIndex];
+        count = filters[f].Utf8LiteralBytes is not null || col.PhysicalType == RainDbType.Utf8
+            ? IntersectUtf8(col, filters[f], dest, count)
+            : FixedWidthSelectionKernels.IntersectSelectedIndices(
+                col, filters[f], dest, count);
+    }
+
+    return count;
+}
+</code></pre>
+<p><strong>Algorithm:</strong></p>
+<ol>
+<li>First predicate: fill <code>dest[0..count)</code> with matching row indices</li>
+<li>Each subsequent predicate: <strong>compact in-place</strong> — survivors only</li>
+</ol>
+<p>UTF-8 intersection uses scalar <code>RowMatchesFilter</code> per candidate row.</p>
+<h3 id="single-predicate-fillselectedrows">Single predicate: FillSelectedRows</h3>
+<pre><code class="language-csharp">internal static int FillSelectedRows(IColumnChunk column, ColumnCompareFilter filter, Span&lt;int&gt; dest)
+{
+    if (filter.Utf8LiteralBytes is not null)
+    {
+        if (column.PhysicalType != RainDbType.Utf8)
+            throw new ArgumentException(&quot;UTF-8 literal filter requires a UTF-8 column.&quot;);
+        return FillUtf8Selected(column, filter, dest);
+    }
+
+    if (column.PhysicalType == RainDbType.Utf8)
+        throw new NotSupportedException(&quot;UTF-8 column requires a string literal predicate.&quot;);
+
+    return FixedWidthSelectionKernels.FillSelectedIndices(column, filter, dest);
+}
+</code></pre>
+<h3 id="rowmatchesfilter-scalar-fallback">RowMatchesFilter (scalar fallback)</h3>
+<p>Used for UTF-8 and intersection fallback. Supports <code>Int32</code>, <code>Int64</code>, <code>Float64</code>, <code>Boolean</code> with full comparison operator set. NULL cells never match equality/range filters in <code>WHERE</code>.</p>
+<h3 id="utf-8-equality">UTF-8 equality</h3>
+<pre><code class="language-csharp">private static bool Utf8PayloadEquals(IColumnChunk column, int row, ReadOnlySpan&lt;byte&gt; literal)
+{
+    return column switch
+    {
+        Utf8ColumnChunk utf8 =&gt; Utf8ArrowRowEquals(utf8, row, literal),
+        Utf8LengthPrefixedColumnChunk lp =&gt; lp.GetPayloadSpan(row).SequenceEqual(literal),
+        _ =&gt; throw new NotSupportedException(...),
+    };
+}
+</code></pre>
+<p><strong>Limitations:</strong> Only <code>=</code>, <code>!=</code>, <code>&lt;&gt;</code> with single-quoted literals. No <code>LIKE</code>, range, or collation.</p>
+<hr />
+<h2 id="fixedwidthselectionkernels-simd-int32-equality">8.17 FixedWidthSelectionKernels: SIMD Int32 equality</h2>
+<pre><code class="language-csharp">// src/RainDB.Query/Vectorized/FixedWidthSelectionKernels.cs
+internal static class FixedWidthSelectionKernels
+{
+    internal static int FillSelectedIndices(
+        IColumnChunk column, ColumnCompareFilter filter, Span&lt;int&gt; dest)
+    {
+        // dispatch by PhysicalType → FillInt32 / FillInt64 / FillFloat64 / FillBool
+    }
+}
+</code></pre>
+<h3 id="int32-fill-with-vectorized-equality-fast-path">Int32 fill with vectorized equality fast path</h3>
+<pre><code class="language-csharp">private static int FillInt32(
+    ReadOnlySpan&lt;byte&gt; values,
+    ReadOnlySpan&lt;byte&gt; nb,
+    bool hasNulls,
+    ScalarCompareOp op,
+    int imm,
+    Span&lt;int&gt; dest)
+{
+    var ints = MemoryMarshal.Cast&lt;byte, int&gt;(values);
+    if (!hasNulls &amp;&amp; op == ScalarCompareOp.Eq &amp;&amp; Vector128.IsHardwareAccelerated)
+        return FillInt32EqVectorized(ints, imm, dest);
+
+    var count = 0;
+    for (var i = 0; i &lt; ints.Length; i++)
+    {
+        if (SelectionEvaluator.IsNull(nb, i, hasNulls))
+            continue;
+        if (CompareInt32(ints[i], imm, op))
+            dest[count++] = i;
+    }
+    return count;
+}
+</code></pre>
+<p><strong>Fast path preconditions:</strong></p>
+<ul>
+<li>No nulls (<code>!hasNulls</code>)</li>
+<li>Equality operator (<code>ScalarCompareOp.Eq</code>)</li>
+<li><code>Vector128.IsHardwareAccelerated</code></li>
+</ul>
+<h3 id="fillint32eqvectorized">FillInt32EqVectorized</h3>
+<pre><code class="language-csharp">private static int FillInt32EqVectorized(ReadOnlySpan&lt;int&gt; values, int imm, Span&lt;int&gt; dest)
+{
+    var count = 0;
+    var i = 0;
+    var vImm = Vector128.Create(imm);
+    ref var start = ref MemoryMarshal.GetReference(values);
+    var limit = values.Length - (values.Length % Vector128&lt;int&gt;.Count);
+
+    for (; i &lt; limit; i += Vector128&lt;int&gt;.Count)
+    {
+        var block = Vector128.LoadUnsafe(ref Unsafe.Add(ref start, i));
+        var eq = Vector128.Equals(block, vImm);
+        for (var j = 0; j &lt; Vector128&lt;int&gt;.Count; j++)
+        {
+            if (eq.GetElement(j) != 0)
+                dest[count++] = i + j;
+        }
+    }
+
+    for (; i &lt; values.Length; i++)
+    {
+        if (values[i] == imm)
+            dest[count++] = i;
+    }
+
+    return count;
+}
+</code></pre>
+<p><strong>Step-by-step:</strong> cast values to <code>ReadOnlySpan&lt;int&gt;</code>, broadcast immediate with <code>Vector128.Create</code>, compare in <code>Vector128&lt;int&gt;.Count</code> lanes via <code>LoadUnsafe</code>/<code>Equals</code>, extract set lanes to indices, scalar tail for remainder.</p>
+<h3 id="intersectselectedindices-for-int32">IntersectSelectedIndices for Int32</h3>
+<pre><code class="language-csharp">private static int IntersectInt32(
+    ReadOnlySpan&lt;byte&gt; values,
+    ReadOnlySpan&lt;byte&gt; nb,
+    bool hasNulls,
+    ScalarCompareOp op,
+    int imm,
+    Span&lt;int&gt; selectedRows,
+    int count)
+{
+    var ints = MemoryMarshal.Cast&lt;byte, int&gt;(values);
+    var write = 0;
+    for (var r = 0; r &lt; count; r++)
+    {
+        var i = selectedRows[r];
+        if (SelectionEvaluator.IsNull(nb, i, hasNulls))
+            continue;
+        if (CompareInt32(ints[i], imm, op))
+            selectedRows[write++] = i;
+    }
+    return write;
+}
+</code></pre>
+<p>Second and later predicates touch <strong>candidate rows only</strong> — critical when the first predicate is highly selective. Intersect path does not currently use SIMD — candidate count may be small.</p>
+<h3 id="other-fixed-width-types">Other fixed-width types</h3>
+<p><code>Int64</code>, <code>Float64</code>, and <code>Boolean</code> use scalar fill and intersect loops. Extension point: <code>FillInt64EqVectorized</code> when profiling warrants.</p>
+<hr />
+<h2 id="projectgather-projection-after-selection">8.18 ProjectGather: projection after selection</h2>
+<pre><code class="language-csharp">// src/RainDB.Query/Vectorized/ProjectGather.cs
+internal static class ProjectGather
+{
+    internal static ColumnarBatch Project(...)
+    {
+        var cols = new IColumnChunk[outputColumnIndices.Length];
+        for (var c = 0; c &lt; outputColumnIndices.Length; c++)
+        {
+            cols[c] = GatherColumn(
+                batch.Columns[outputColumnIndices[c]],
+                useRowSelection, selectedRows, selectedCount,
+                bufferPool, alignedBufferPool);
+        }
+        return new ColumnarBatch(selectedCount, cols);
+    }
+}
+</code></pre>
+<p>Output row count is <code>selectedCount</code>, not <code>batch.RowCount</code>.</p>
+<h3 id="gather-routing">Gather routing</h3>
+<pre><code class="language-csharp">private static IColumnChunk GatherColumn(...)
+{
+    if (source.PhysicalType == RainDbType.Utf8)
+    {
+        if (source is Utf8ColumnChunk utf8)
+            return GatherUtf8Arrow(utf8, ...);
+        if (source is Utf8LengthPrefixedColumnChunk lp)
+            return GatherUtf8LengthPrefixed(lp, ...);
+        throw new NotSupportedException(&quot;Unknown UTF-8 chunk implementation.&quot;);
+    }
+    return GatherFixedWidth(source, ..., bufferPool, alignedBufferPool);
+}
+</code></pre>
+<h3 id="fixed-width-gather-paths">Fixed-width gather paths</h3>
+<p><strong>Path A — identity / no filter (<code>CopyEntireFixedWidthColumn</code>):</strong></p>
+<p>When <code>!useRowSelection &amp;&amp; selectedCount == source.RowCount</code>, bulk <code>CopyTo</code> of values and null bitmap.</p>
+<p><strong>Path B — selective gather without nulls:</strong></p>
+<pre><code class="language-csharp">for (var o = 0; o &lt; selectedCount; o++)
+{
+    var r = RowAt(useRowSelection, selectedRows, o);
+    srcValues.Slice(r * w, w).CopyTo(outValues.Slice(o * w, w));
+}
+</code></pre>
+<p><strong>Path C — selective gather with nulls:</strong> per output row, set null bit or copy value bytes.</p>
+<pre><code class="language-csharp">private static int RowAt(bool useRowSelection, ReadOnlySpan&lt;int&gt; selectedRows, int o) =&gt;
+useRowSelection ? selectedRows[o] : o;
+</code></pre>
+<h3 id="utf-8-gather-paths">UTF-8 gather paths</h3>
+<p><strong>Arrow (<code>GatherUtf8Arrow</code>):</strong> rebuild offsets + blob. <strong>Length-prefixed:</strong> write length + payload per row. UTF-8 gathers use managed allocations (<code>List&lt;byte&gt;</code>, <code>ToArray</code>) — not pooled in Phase 1.</p>
+<hr />
+<h2 id="global-aggregate-path">8.19 Global aggregate path</h2>
+<p>When <code>plan.Aggregate</code> is set, <code>ComputeAggregateAsync</code>:</p>
+<ol>
+<li>Builds <code>PartialAgg[n]</code> per batch (same morsel parallelism)</li>
+<li>Applies filters via <code>SelectionEvaluator</code></li>
+<li>Combines partials in <strong>batch index order</strong></li>
+<li>Returns <code>AggregateQueryResult</code></li>
+</ol>
+<p><code>COUNT(*)</code> counts selected rows only. <code>COUNT(col)</code> skips nulls. Unfiltered non-null <code>Float64</code> <code>SUM</code> may use <code>UseAvx2DoubleSum</code> + <code>AggregateIntrinsics.SumFloat64</code>.</p>
+<pre><code class="language-csharp">var combined = partials[0];
+for (var i = 1; i &lt; n; i++)
+    combined = PartialAgg.Combine(combined, partials[i], spec.Kind);
+</code></pre>
+<p>Ordered combine preserves deterministic floating-point aggregation semantics versus arbitrary thread reduction order.</p>
+<hr />
+<h2 id="performance-characteristics">8.20 Performance characteristics</h2>
+<table class="table">
+<thead>
+<tr>
+<th>Stage</th>
+<th>Dominant cost</th>
+<th>Optimizations</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Filter (Int32 =)</td>
+<td>Memory bandwidth</td>
+<td>SIMD <code>Vector128.Equals</code></td>
+</tr>
+<tr>
+<td>Filter (other ops)</td>
+<td>Per-row branch</td>
+<td>Selective intersection on AND chain</td>
+</tr>
+<tr>
+<td>Filter (UTF-8)</td>
+<td>Byte compare</td>
+<td>Scalar only</td>
+</tr>
+<tr>
+<td>Project fixed-width</td>
+<td>memcpy</td>
+<td>Full-column copy fast path</td>
+</tr>
+<tr>
+<td>Project UTF-8</td>
+<td>Alloc + copy</td>
+<td>Not pooled</td>
+</tr>
+<tr>
+<td>Parallelism</td>
+<td>CPU cores</td>
+<td>Morsel per batch, deterministic merge</td>
+</tr>
+</tbody>
+</table>
+<p><code>VectorizedSelectionPerformanceTests</code> benchmarks selection kernels.</p>
+<hr />
+<h2 id="correctness-and-integration">8.21 Correctness and integration</h2>
+<p><strong>Edge cases:</strong></p>
+<ul>
+<li>Empty or fully filtered batches → zero-row output chunks</li>
+<li>NULL cells never match equality predicates</li>
+<li>Filters present but select every row → <code>useRowSelection</code> still true</li>
+<li>Disposed <code>PooledFixedWidthColumnChunk</code> throws on property access</li>
+</ul>
+<p><strong>Pipeline:</strong></p>
+<pre><code>SqlCompiler → VectorizedScanPhysicalPlan
+DefaultQueryExecutor → catalog resolve → ValidatePlan
+Per batch: SelectionEvaluator → ProjectGather
+ColumnarMaterializedQueryResult (DisposeAsync returns pools)
+</code></pre>
+<hr />
+<h2 id="quick-reference">8.22 Quick reference</h2>
+<table class="table">
+<thead>
+<tr>
+<th>Component</th>
+<th>Path</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>VectorizedScanEngine</code></td>
+<td><code>src/RainDB.Query/Execution/VectorizedScanEngine.cs</code></td>
+</tr>
+<tr>
+<td><code>VectorizedScanPhysicalPlan</code></td>
+<td><code>src/RainDB.Query/Plans/VectorizedScanPhysicalPlan.cs</code></td>
+</tr>
+<tr>
+<td><code>SelectionEvaluator</code></td>
+<td><code>src/RainDB.Query/Vectorized/SelectionEvaluator.cs</code></td>
+</tr>
+<tr>
+<td><code>FixedWidthSelectionKernels</code></td>
+<td><code>src/RainDB.Query/Vectorized/FixedWidthSelectionKernels.cs</code></td>
+</tr>
+<tr>
+<td><code>ProjectGather</code></td>
+<td><code>src/RainDB.Query/Vectorized/ProjectGather.cs</code></td>
+</tr>
+<tr>
+<td><code>ColumnarMaterializedQueryResult</code></td>
+<td><code>src/RainDB.Query/Results/ColumnarAndAggregateResults.cs</code></td>
+</tr>
+<tr>
+<td>Performance tests</td>
+<td><code>tests/RainDB.Tests/VectorizedSelectionPerformanceTests.cs</code></td>
+</tr>
+</tbody>
+</table>
+<p>The vectorized scan path is the foundation for RainDB's analytical read performance: batches in, selections in the middle, pooled columnar batches out — with optional parallel morsels and SIMD where the type system and nullability allow.</p>
+</div>
+          <footer class="doc-footer">
+            <p>Generated by <strong>hoihky</strong> with <strong>MDWeb</strong> and with assistance from <strong>AI</strong></p>
+
+          </footer>
+        </article>
+
+        
+                <aside class="toc" aria-label="On this page">
+                  <p class="toc-title">On this page</p>
+                  <ul>
+                    
+                        <li class="toc-h1">
+                          <a href="#chapter-8-vectorized-scan-filter-and-project">Chapter 8: Vectorized Scan, Filter, and Project</a>
+                        </li>
+                        
+                        <li class="toc-h1">
+                          <a href="#part-i-concepts-and-theory">Part I: Concepts and Theory</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#81-selection-and-projection">8.1 Selection (σ) and projection (π)</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#selection">Selection</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#projection">Projection</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#composition">Composition</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#pseudocode-algebra-to-operators">Pseudocode: algebra to operators</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#82-selectivity-and-predicate-pushdown">8.2 Selectivity and predicate pushdown</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#why-selectivity-matters">Why selectivity matters</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#predicate-pushdown">Predicate pushdown</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#conjunctive-selectivity-estimation">Conjunctive selectivity estimation</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#83-selection-vectors-in-columnar-execution">8.3 Selection vectors in columnar execution</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#dense-index-list">Dense index list</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#versus-bitmasks">Versus bitmasks</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#pseudocode">Pseudocode</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#identity-fast-path">Identity fast path</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#84-conjunctive-predicates-cnf">8.4 Conjunctive predicates (CNF)</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#sequential-intersection-algorithm">Sequential intersection algorithm</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#disjunction-or">Disjunction (OR)</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#reordering-conjuncts">Reordering conjuncts</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#85-short-circuit-evaluation">8.5 Short-circuit evaluation</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#sql-three-valued-logic">SQL three-valued logic</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#columnar-batch-evaluation">Columnar batch evaluation</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#null-in-comparisons">NULL in comparisons</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#86-gather-and-scatter-in-vectorized-engines">8.6 Gather and scatter in vectorized engines</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#gather">Gather</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#scatter">Scatter</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#full-column-copy-fast-path">Full-column copy fast path</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#87-morsel-driven-parallelism">8.7 Morsel-driven parallelism</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#static-versus-dynamic-morsels">Static versus dynamic morsels</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#deterministic-output-with-parallel-morsels">Deterministic output with parallel morsels</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#morsel-granularity-trade-off">Morsel granularity trade-off</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#pipeline-within-morsel">Pipeline within morsel</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#88-integration-with-global-aggregates">8.8 Integration with global aggregates</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#89-summary-part-i-checklist">8.9 Summary: Part I checklist</a>
+                        </li>
+                        
+                        <li class="toc-h1">
+                          <a href="#transition-to-part-ii-raindb-implementation">Transition to Part II: RainDB Implementation</a>
+                        </li>
+                        
+                        <li class="toc-h1">
+                          <a href="#part-ii-raindb-implementation">Part II: RainDB Implementation</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#811-entry-point-and-control-flow">8.11 Entry point and control flow</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#812-validateplan-fail-fast-before-parallel-work">8.12 ValidatePlan: fail fast before parallel work</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#813-projectallbatchesasync-morsel-parallelism">8.13 ProjectAllBatchesAsync: morsel parallelism</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#814-channel-morsel-scheduler">8.14 Channel morsel scheduler</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#815-processonebatch-filter-then-project">8.15 ProcessOneBatch: filter then project</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#816-selectionevaluator-overview">8.16 SelectionEvaluator overview</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#null-bitmap-helper">Null bitmap helper</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#conjunctive-and-fillselectedrowsconjunctive">Conjunctive AND: FillSelectedRowsConjunctive</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#single-predicate-fillselectedrows">Single predicate: FillSelectedRows</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#rowmatchesfilter-scalar-fallback">RowMatchesFilter (scalar fallback)</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#utf-8-equality">UTF-8 equality</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#817-fixedwidthselectionkernels-simd-int32-equality">8.17 FixedWidthSelectionKernels: SIMD Int32 equality</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#int32-fill-with-vectorized-equality-fast-path">Int32 fill with vectorized equality fast path</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#fillint32eqvectorized">FillInt32EqVectorized</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#intersectselectedindices-for-int32">IntersectSelectedIndices for Int32</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#other-fixed-width-types">Other fixed-width types</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#818-projectgather-projection-after-selection">8.18 ProjectGather: projection after selection</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#gather-routing">Gather routing</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#fixed-width-gather-paths">Fixed-width gather paths</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#utf-8-gather-paths">UTF-8 gather paths</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#819-global-aggregate-path">8.19 Global aggregate path</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#820-performance-characteristics">8.20 Performance characteristics</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#821-correctness-and-integration">8.21 Correctness and integration</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#822-quick-reference">8.22 Quick reference</a>
+                        </li>
+                        
+                  </ul>
+                </aside>
+                
+      </main>
+    </div>
+  </div>
+  <script src="assets/vendor/mermaid.min.js"></script>
+  <script src="assets/vendor/highlight.min.js"></script>
+  <script src="assets/js/site.js"></script>
+</body>
+</html>

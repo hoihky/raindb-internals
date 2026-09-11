@@ -1,0 +1,1384 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Chapter 7: Execution Pipeline · Building an OLAP Database Engine from Scratch with RainDB</title>
+  <meta name="description" content="Generated documentation site">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="assets/css/site.css">
+  <link rel="stylesheet" href="assets/vendor/atom-one-dark.min.css">
+</head>
+<body>
+  <div class="site">
+    <header class="topbar">
+      <button class="sidebar-toggle" id="sidebar-toggle" aria-label="Toggle navigation">☰</button>
+      <a href="index.html" class="brand">Building an OLAP Database Engine from Scratch with RainDB</a>
+      <div class="search-wrap">
+        <input type="search" id="search" placeholder="Search docs…" autocomplete="off">
+      </div>
+    </header>
+
+    <div class="layout">
+      <aside class="sidebar" id="sidebar">
+        <nav class="nav" aria-label="Documentation">
+          <ul class="nav-list">
+            
+                        <li class="nav-item depth-0">
+                          
+                            <a href="index.html" class="nav-link">Building an OLAP Database Engine from Scratch</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="01-olap-fundamentals.html" class="nav-link">Chapter 1: OLAP Fundamentals</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="02-architecture-and-modules.html" class="nav-link">Chapter 2: Architecture and Modules</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="03-columnar-storage-model.html" class="nav-link">Chapter 3: Columnar Storage Model</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="04-chunk-data-structures.html" class="nav-link">Chapter 4: Chunk Data Structures</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="05-catalog-and-tables.html" class="nav-link">Chapter 5: Catalog and Tables</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="06-buffer-management.html" class="nav-link">Chapter 6: Buffer Management</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0 is-active">
+                          
+                            <a href="07-execution-pipeline.html" class="nav-link">Chapter 7: Execution Pipeline</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="08-vectorized-scan-filter-project.html" class="nav-link">Chapter 8: Vectorized Scan, Filter, and Project</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="09-global-aggregates.html" class="nav-link">Chapter 9: Global Aggregates</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="10-hash-aggregation.html" class="nav-link">Chapter 10: Hash Aggregation</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="11-joins.html" class="nav-link">Chapter 11: Joins</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="12-sort-and-limit.html" class="nav-link">Chapter 12: Sort and Limit</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="13-sql-compilation.html" class="nav-link">Chapter 13: SQL Compilation</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="14-persistence.html" class="nav-link">Chapter 14: Persistence</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="15-future-extensions.html" class="nav-link">Chapter 15: Future Extensions</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="16-mmap-io.html" class="nav-link">Chapter 16: mmap I/O</a>
+                            
+                        </li>
+                        
+          </ul>
+        </nav>
+      </aside>
+
+      <main class="content">
+        <article class="doc">
+          <header class="doc-header">
+            <h1>Chapter 7: Execution Pipeline</h1>
+          </header>
+          <div class="doc-body"><h1 id="chapter-7-execution-pipeline">Chapter 7: Execution Pipeline</h1>
+<p>A query lives in two phases. <strong>Compilation</strong> turns a declarative request (SQL, LINQ) into a <strong>physical plan</strong> — a data structure naming operators, algorithms, and parameters. <strong>Execution</strong> walks that plan, reads tables, runs kernels, and produces a <strong>result</strong>. The execution pipeline is where declared intent becomes bytes on the wire through the CPU.</p>
+<p><strong>Part I</strong> surveys how the industry runs queries: iterator trees, vectorized batches, compiled code generation, pull versus push dataflow, physical relational operators, and the trade-off between pipelining and materialization. <strong>Part II</strong> documents RainDB's concrete pipeline — <code>IPhysicalPlan</code>, <code>DefaultQueryExecutor</code>, result types, parallelism knobs, and determinism guarantees.</p>
+<hr />
+<h1 id="part-i-concepts-and-theory">Part I: Concepts and Theory</h1>
+<h2 id="query-execution-models">7.1 Query execution models</h2>
+<p>An <strong>execution model</strong> defines how operators call each other and move tuples or vectors through the plan.</p>
+<h3 id="iterator-model-volcano-tuple-at-a-time">Iterator model (Volcano / tuple-at-a-time)</h3>
+<p>The <strong>Volcano</strong> model (Graefe, 1990) composes <strong>iterator objects</strong> behind a minimal interface:</p>
+<pre><code>interface Operator {
+    open()
+    next() -&gt; Row | END
+    close()
+}
+</code></pre>
+<p>Parents <strong>pull</strong> rows by looping on <code>next()</code>. A filter above a scan:</p>
+<pre><code>Filter.next():
+loop:
+    row = child.next()
+    if row == END: return END
+    if predicate(row): return row
+</code></pre>
+<table class="table">
+<thead>
+<tr>
+<th>Strength</th>
+<th>Weakness</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Uniform composition</td>
+<td>Virtual call per row</td>
+</tr>
+<tr>
+<td>Easy pipelining</td>
+<td>Poor CPU cache utilization</td>
+</tr>
+<tr>
+<td>Extensible operator set</td>
+<td>Hard to SIMD without batching</td>
+</tr>
+</tbody>
+</table>
+<p>PostgreSQL, early SQLite, and many teaching systems use Volcano-style iterators.</p>
+<h3 id="vectorized-model-batch-at-a-time">Vectorized model (batch-at-a-time)</h3>
+<p><strong>Vectorized</strong> execution moves <strong>batches</strong> — hundreds to thousands of rows per <code>nextBatch()</code> call:</p>
+<pre><code>interface VectorOperator {
+    open()
+    nextBatch() -&gt; Batch | END
+    close()
+}
+</code></pre>
+<p>Inner loops become tight scans over dense arrays, which SIMD and hardware prefetch can accelerate. Columnar storage fits naturally: a batch is a set of parallel column vectors.</p>
+<table class="table">
+<thead>
+<tr>
+<th>Engine</th>
+<th>Vector width (typical)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>DuckDB</td>
+<td>2048–65536 rows</td>
+</tr>
+<tr>
+<td>ClickHouse</td>
+<td>block = column chunk</td>
+</tr>
+<tr>
+<td>RainDB</td>
+<td>one <code>IColumnarBatch</code> per table segment</td>
+</tr>
+</tbody>
+</table>
+<p>RainDB Phase 1 vectorizes over <strong>existing columnar batches</strong>, not single rows.</p>
+<h3 id="compiled-code-generation-model">Compiled / code-generation model</h3>
+<p><strong>Query compilation</strong> lowers a plan to <strong>native code</strong> (LLVM, machine code, or JVM bytecode) with operators fused into one loop:</p>
+<pre><code>// conceptual generated loop
+for batch in table:
+    for i in 0..batch.len:
+        if batch.col_amount[i] &gt; 100:
+            output.col_region.append(batch.col_region[i])
+</code></pre>
+<p>HyPer, Umbra, optional DuckDB paths, and Weld-style systems compile plans. Payoffs:</p>
+<ul>
+<li>Remove virtual dispatch per row or batch</li>
+<li>Let LLVM fuse loops and auto-vectorize</li>
+<li>Specialize per query shape</li>
+</ul>
+<p>Trade-offs: compile latency, instruction cache pressure, harder debugging. RainDB Phase 1 uses <strong>interpreted plan dispatch</strong> (<code>DefaultQueryExecutor</code> switch) plus hand-tuned SIMD — a middle ground.</p>
+<h3 id="model-comparison-summary">Model comparison summary</h3>
+<table class="table">
+<thead>
+<tr>
+<th>Model</th>
+<th>Unit</th>
+<th>Dispatch</th>
+<th>SIMD</th>
+<th>Compile time</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Iterator</td>
+<td>1 row</td>
+<td>High</td>
+<td>Poor</td>
+<td>None</td>
+</tr>
+<tr>
+<td>Vectorized</td>
+<td>N rows</td>
+<td>Medium</td>
+<td>Good</td>
+<td>None</td>
+</tr>
+<tr>
+<td>Compiled</td>
+<td>N rows</td>
+<td>Low/inlined</td>
+<td>Excellent</td>
+<td>High</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="pull-versus-push-pipelines">7.2 Pull versus push pipelines</h2>
+<p>Data can flow <strong>pull-driven</strong> (consumer asks) or <strong>push-driven</strong> (producer sends).</p>
+<h3 id="pull-demand-driven">Pull (demand-driven)</h3>
+<p>The <strong>root</strong> operator drives the tree:</p>
+<pre><code>result = root.nextBatch()
+└─ root pulls from child.nextBatch()
+     └─ child pulls from scan.nextBatch()
+</code></pre>
+<p>Volcano is pull-native. Benefits:</p>
+<ul>
+<li>Natural <strong>pipelining</strong> — produce a batch, consume immediately</li>
+<li><strong>Lazy</strong> evaluation — <code>LIMIT</code> can stop early</li>
+<li>Implicit backpressure — parent requests when ready</li>
+</ul>
+<h3 id="push-supply-driven">Push (supply-driven)</h3>
+<p>Producers invoke consumers through callbacks or queues:</p>
+<pre><code>scan.onBatch(b =&gt; filter.onBatch(b =&gt; project.onBatch(b =&gt; sink)))
+</code></pre>
+<p>Push helps <strong>parallel</strong> and <strong>streaming</strong> pipelines:</p>
+<ul>
+<li>Scan threads enqueue morsels</li>
+<li>Workers compete for work</li>
+<li>I/O and compute overlap more easily</li>
+</ul>
+<p>RainDB's channel scheduler (Chapter 8) <strong>pushes batch indices</strong> to workers while each worker <strong>pulls</strong> from <code>table.Batches[i]</code> — a hybrid.</p>
+<h3 id="mermaid-pull-pipeline">Mermaid: pull pipeline</h3>
+<pre class="mermaid">flowchart LR
+    Scan --> Filter
+    Filter --> Project
+    Project --> Client
+    Client -->|"nextBatch()"| Project
+</pre>
+<h3 id="mermaid-push-morsel-queue">Mermaid: push morsel queue</h3>
+<pre class="mermaid">flowchart LR
+    Scheduler -->|enqueue index| Queue
+    Queue --> Worker1
+    Queue --> Worker2
+    Worker1 --> OutArray
+    Worker2 --> OutArray
+</pre>
+<hr />
+<h2 id="physical-operators-in-relational-algebra">7.3 Physical operators in relational algebra</h2>
+<p>Algebra defines <em>what</em> to compute; <strong>physical operators</strong> are concrete algorithms with measurable cost.</p>
+<h3 id="core-unary-operators">Core unary operators</h3>
+<table class="table">
+<thead>
+<tr>
+<th>Algebra</th>
+<th>Symbol</th>
+<th>Physical operators</th>
+<th>Role</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Scan</td>
+<td>—</td>
+<td>Sequential scan, index scan</td>
+<td>Read base table</td>
+</tr>
+<tr>
+<td>Selection</td>
+<td>σ</td>
+<td>Filter, index seek</td>
+<td>Predicate on rows</td>
+</tr>
+<tr>
+<td>Projection</td>
+<td>π</td>
+<td>Project</td>
+<td>Column subset / expression</td>
+</tr>
+</tbody>
+</table>
+<p><code>SELECT a, b FROM t WHERE c &gt; 10</code> becomes:</p>
+<pre><code>π_{a,b}( σ_{c&gt;10}( Scan(t) ) )
+</code></pre>
+<h3 id="binary-operators">Binary operators</h3>
+<table class="table">
+<thead>
+<tr>
+<th>Algebra</th>
+<th>Physical algorithms</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Join (⋈)</td>
+<td>Nested loop, hash join, sort-merge join</td>
+</tr>
+<tr>
+<td>Union</td>
+<td>Concat, deduplicating hash</td>
+</tr>
+<tr>
+<td>Group-by</td>
+<td>Hash aggregate, sort aggregate</td>
+</tr>
+</tbody>
+</table>
+<p>RainDB Phase 1 ships hash join, sort-merge join, hash aggregate, sort/top-N, and vectorized scan/filter/project.</p>
+<h3 id="operator-interface-pattern">Operator interface pattern</h3>
+<p>Physical nodes consume and produce <strong>columnar batches</strong> (RainDB) or <strong>row streams</strong> (Volcano):</p>
+<pre><code>Scan(table) -&gt; Batch*
+Filter(pred, Batch) -&gt; Batch'
+Project(cols, Batch') -&gt; Batch''
+</code></pre>
+<p>One logical query admits many physical plans — the <strong>optimizer</strong> (or test harness) picks the implementation.</p>
+<hr />
+<h2 id="query-plan-as-data-structure">7.4 Query plan as data structure</h2>
+<p>A <strong>physical plan</strong> is an immutable <strong>tree or DAG</strong> describing <em>how</em> to execute. It is data, not running code — an interpreter or compiler consumes it.</p>
+<h3 id="plan-node-contents-typical">Plan node contents (typical)</h3>
+<pre><code>ScanNode {
+    table_id: ObjectId
+    output_columns: [0, 2, 5]
+    filters: [ col2 &gt; 100, col0 = 'US' ]
+}
+
+HashJoinNode {
+    probe: ScanNode(...)
+    build: ScanNode(...)
+    keys: ([0], [1])
+    algorithm: Hash
+}
+</code></pre>
+<h3 id="plans-versus-interpreters">Plans versus interpreters</h3>
+<table class="table">
+<thead>
+<tr>
+<th>Approach</th>
+<th>Plan role</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Interpreter</td>
+<td>Executor <code>switch</code>es on plan record types</td>
+</tr>
+<tr>
+<td>JIT compiler</td>
+<td>Plan lowers to LLVM / IL</td>
+</tr>
+<tr>
+<td>Stored procedures</td>
+<td>Plan cached and reused</td>
+</tr>
+</tbody>
+</table>
+<p>RainDB defines <strong>records</strong> implementing <code>IPhysicalPlan</code> with <code>Explain()</code> for debugging. <code>DefaultQueryExecutor</code> interprets them.</p>
+<h3 id="immutability-benefits">Immutability benefits</h3>
+<ul>
+<li>Safe to share across planner threads</li>
+<li>Cacheable on <code>(sql, schema_version)</code></li>
+<li>Stable EXPLAIN output</li>
+<li>No leaked operator state between queries</li>
+</ul>
+<hr />
+<h2 id="materialization-versus-pipelining">7.5 Materialization versus pipelining</h2>
+<p><strong>Pipelining</strong> hands batches directly from producer to consumer. <strong>Materialization</strong> stores an intermediate relation before the next operator starts.</p>
+<h3 id="pipelined-execution">Pipelined execution</h3>
+<pre><code>Scan --batch--&gt; Filter --batch--&gt; Project --batch--&gt; Client
+(no full table copy between operators)
+</code></pre>
+<p>Traits:</p>
+<ul>
+<li>Smaller <strong>memory footprint</strong> for selective queries</li>
+<li>Potential <strong>CPU overlap</strong> across operators when threaded</li>
+<li>Awkward for <strong>multi-pass</strong> algorithms (sort, hash join build)</li>
+</ul>
+<h3 id="materialized-execution">Materialized execution</h3>
+<pre><code>Join --&gt; full wide result in memory --&gt; HashAggregate
+</code></pre>
+<p>RainDB's <code>GroupedJoinPhysicalPlan</code> <strong>materializes</strong> join output, wraps it in <code>EphemeralColumnarTableSource</code>, then aggregates — straightforward but RAM-heavy.</p>
+<table class="table">
+<thead>
+<tr>
+<th>Materialize when</th>
+<th>Pipeline when</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Operator needs a second pass</td>
+<td>Single-pass filter/project</td>
+</tr>
+<tr>
+<td>Intermediate reused</td>
+<td>Tight memory budget</td>
+</tr>
+<tr>
+<td>Simpler Phase 1 engine</td>
+<td>Selective, streaming output</td>
+</tr>
+</tbody>
+</table>
+<h3 id="spill-as-materialization-to-disk">Spill as materialization to disk</h3>
+<p>When hash aggregate or sort exceeds RAM, operators <strong>spill</strong> to disk — materialization on a slower medium. RainDB's <code>ISpillWriter</code> port reserves a hook for that path.</p>
+<hr />
+<h2 id="deterministic-parallelism-in-olap">7.6 Deterministic parallelism in OLAP</h2>
+<p>Parallel schedules are <strong>non-deterministic</strong> (thread finish order) but <strong>results must be deterministic</strong> (modulo allowed FP reordering).</p>
+<h3 id="sources-of-non-determinism">Sources of non-determinism</h3>
+<table class="table">
+<thead>
+<tr>
+<th>Source</th>
+<th>Affects result?</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Thread completion order</td>
+<td>Only if merge is wrong</td>
+</tr>
+<tr>
+<td>Hash table iteration order</td>
+<td>Group output order, not per-group values</td>
+</tr>
+<tr>
+<td>FP add order</td>
+<td>Yes for floats unless compensated</td>
+</tr>
+<tr>
+<td>Random sort tie-break</td>
+<td>Needs a stable rule</td>
+</tr>
+</tbody>
+</table>
+<h3 id="deterministic-merge-patterns">Deterministic merge patterns</h3>
+<p><strong>Index-stable output:</strong> worker <code>w</code> writes <code>output[i]</code> for a fixed batch index <code>i</code>:</p>
+<pre><code>parallel for i in 0..n-1:
+output[i] = process(input[i])
+</code></pre>
+<p><strong>Deterministic reduction:</strong> fold partials in ascending batch order:</p>
+<pre><code>total = partial[0]
+for i in 1..n-1:
+    total = combine(total, partial[i])
+</code></pre>
+<p>RainDB's <code>VectorizedScanEngine</code> uses both for project and aggregate paths.</p>
+<h3 id="olap-parallelism-granularity">OLAP parallelism granularity</h3>
+<table class="table">
+<thead>
+<tr>
+<th>Granularity</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Query-level</td>
+<td>Different queries on different cores</td>
+</tr>
+<tr>
+<td>Operator-level</td>
+<td>Parallel hash build/probe</td>
+</tr>
+<tr>
+<td>Morsel-level</td>
+<td>Parallel batches inside scan</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Morsel-driven parallelism</strong> (Leis et al.) assigns small <strong>morsels</strong> dynamically for load balance. RainDB assigns one table batch per morsel with static index partitioning.</p>
+<h3 id="cancellation">Cancellation</h3>
+<p>Parallel loops should respect <strong>cancellation tokens</strong> — exit cleanly without corrupting shared state. RainDB forwards <code>context.CancellationToken</code> to <code>Parallel.For</code> and channel workers.</p>
+<hr />
+<h2 id="separation-of-compilation-and-execution">7.7 Separation of compilation and execution</h2>
+<p>Production engines draw a hard line:</p>
+<pre><code>┌──────────────┐     ┌──────────────┐     ┌──────────────┐
+│   Parser     │ ──► │   Binder     │ ──► │   Planner    │
+│  (syntax)    │     │  (catalog)   │     │  (physical)  │
+└──────────────┘     └──────────────┘     └──────┬───────┘
+                                                  │
+                                                  ▼
+                                           IPhysicalPlan
+                                                  │
+                                                  ▼
+                                           IQueryExecutor
+</code></pre>
+<p>The executor <strong>never parses SQL</strong>. It takes a plan plus <code>IExecutionContext</code> (catalog, buffers, spill, cancellation). Tests call <code>ExecutePhysicalAsync(plan)</code> directly, skipping compilation.</p>
+<hr />
+<h2 id="result-delivery-models">7.8 Result delivery models</h2>
+<p>Execution can surface several <strong>result shapes</strong>:</p>
+<table class="table">
+<thead>
+<tr>
+<th>Shape</th>
+<th>Use case</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Columnar batches</td>
+<td><code>SELECT</code> returning rows</td>
+</tr>
+<tr>
+<td>Scalar aggregate</td>
+<td><code>SELECT SUM(x)</code></td>
+</tr>
+<tr>
+<td>Empty</td>
+<td><code>EXPLAIN</code> only, unsupported plans</td>
+</tr>
+<tr>
+<td>Streaming cursor</td>
+<td>Future: incremental client read</td>
+</tr>
+</tbody>
+</table>
+<p>Every shape must <strong>release resources</strong> — pooled buffers, native handles — through <code>Dispose</code> / <code>DisposeAsync</code>.</p>
+<hr />
+<h2 id="summary-part-i-checklist">7.9 Summary: Part I checklist</h2>
+<ol>
+<li><strong>Iterator vs vectorized vs compiled</strong> — RainDB is vectorized with interpreted dispatch.</li>
+<li><strong>Pull vs push</strong> — Parents pull batches; parallel morsels push indices to workers.</li>
+<li><strong>Physical operators</strong> — Scan, filter, project, join, aggregate implement algebra.</li>
+<li><strong>Plan as data</strong> — Immutable records, not self-executing objects.</li>
+<li><strong>Pipeline vs materialize</strong> — RainDB pipelines per-batch scan/filter/project; grouped join materializes.</li>
+<li><strong>Deterministic parallelism</strong> — Fixed output slots and ordered partial combines.</li>
+</ol>
+<hr />
+<h1 id="transition-to-part-ii-raindb-implementation">Transition to Part II: RainDB Implementation</h1>
+<p>RainDB separates <strong><code>IPhysicalPlan</code></strong> (what to run) from <strong><code>IQueryExecutor</code></strong> (how to run it). <strong><code>DefaultQueryExecutor</code></strong> matches seven plan types and delegates to <code>VectorizedScanEngine</code>, <code>HashAggregateEngine</code>, <code>JoinExecutionEngine</code>, and <code>SortTopNEngine</code>. Results implement <strong><code>IQueryResult</code></strong> with async disposal. <strong><code>RainDbExecutionContext</code></strong> carries catalog, buffer pools, spill writer, and cancellation into every engine.</p>
+<hr />
+<h1 id="part-ii-raindb-implementation">Part II: RainDB Implementation</h1>
+<h2 id="separation-of-planning-and-execution">7.10 Separation of planning and execution</h2>
+<pre><code>  SQL / LINQ string
+      │
+      ▼
+ISqlCompiler / ILinqCompiler  ──►  IPhysicalPlan
+      │
+      ▼
+IQueryExecutor.ExecuteAsync(plan, context)
+      │
+      ├── VectorizedScanEngine
+      ├── HashAggregateEngine
+      ├── JoinExecutionEngine
+      ├── SortTopNEngine
+      └── (fallback) EmptyQueryResult
+      │
+      ▼
+IQueryResult  (columnar batches, single aggregate, or empty)
+</code></pre>
+<p><strong>Single responsibility:</strong> Parsers and binders live in <code>RainDB.Sql</code> and <code>RainDB.Linq</code>. Operators live in <code>RainDB.Query.Execution</code>. The executor never parses SQL.</p>
+<p><strong>Composition root:</strong> <code>RainDbEngine</code> constructs <code>DefaultQueryExecutor</code> and exposes:</p>
+<pre><code class="language-csharp">public IExecutionContext CreateSession(CancellationToken cancellationToken = default) =&gt;
+    new RainDbExecutionContext(Catalog, BufferPool, AlignedBufferPool, SpillWriter, cancellationToken);
+
+public async ValueTask&lt;IQueryResult&gt; ExecuteSqlAsync(string sql, CancellationToken ct = default)
+{
+    var ctx = CreateSession(ct);
+    var plan = await SqlCompiler.CompileAsync(sql, Catalog, ct);
+    return await Executor.ExecuteAsync(plan, ctx);
+}
+</code></pre>
+<p>Physical plan tests call <code>ExecutePhysicalAsync(plan)</code> directly, bypassing SQL.</p>
+<hr />
+<h2 id="iphysicalplan-the-operator-contract">7.11 IPhysicalPlan: the operator contract</h2>
+<pre><code class="language-csharp">// src/RainDB.Abstractions/Execution/IPhysicalPlan.cs
+public interface IPhysicalPlan
+{
+    string Explain(string indent = &quot;&quot;);
+}
+</code></pre>
+<p>Every plan implements <strong><code>Explain</code></strong> for debugging and <code>EXPLAIN</code> output. There is no <code>Execute</code> on the plan itself — the visitor is <code>DefaultQueryExecutor</code>.</p>
+<p>Plans are <strong>immutable records/classes</strong> constructed at compile time. They hold <code>TableId</code> values, column indices, filter structs, and options — no runtime mutable state.</p>
+<hr />
+<h2 id="physical-plan-taxonomy">7.12 Physical plan taxonomy</h2>
+<p>RainDB ships seven plan types in <code>src/RainDB.Query/Plans/</code>:</p>
+<table class="table">
+<thead>
+<tr>
+<th>Plan</th>
+<th>File</th>
+<th>Executes via</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>VectorizedScanPhysicalPlan</code></td>
+<td><code>VectorizedScanPhysicalPlan.cs</code></td>
+<td><code>VectorizedScanEngine</code></td>
+</tr>
+<tr>
+<td><code>HashAggregatePhysicalPlan</code></td>
+<td><code>HashAggregatePhysicalPlan.cs</code></td>
+<td><code>HashAggregateEngine</code></td>
+</tr>
+<tr>
+<td><code>JoinPhysicalPlan</code></td>
+<td><code>JoinPhysicalPlan.cs</code></td>
+<td><code>JoinExecutionEngine</code></td>
+</tr>
+<tr>
+<td><code>SortTopNPhysicalPlan</code></td>
+<td><code>SortTopNPhysicalPlan.cs</code></td>
+<td><code>SortTopNEngine.ExecuteTableAsync</code></td>
+</tr>
+<tr>
+<td><code>JoinSortTopNPhysicalPlan</code></td>
+<td><code>JoinSortTopNPhysicalPlan.cs</code></td>
+<td><code>SortTopNEngine.ExecuteJoinAsync</code></td>
+</tr>
+<tr>
+<td><code>GroupedJoinPhysicalPlan</code></td>
+<td><code>GroupedJoinPhysicalPlan.cs</code></td>
+<td>Join engine → ephemeral table → hash aggregate</td>
+</tr>
+<tr>
+<td><code>ExplainOnlyPhysicalPlan</code></td>
+<td><code>ExplainOnlyPhysicalPlan.cs</code></td>
+<td><strong>Not executed</strong> — falls through to empty result</td>
+</tr>
+</tbody>
+</table>
+<h3 id="plan-summaries">Plan summaries</h3>
+<ul>
+<li><strong><code>VectorizedScanPhysicalPlan</code></strong> — single-table scan; <code>OutputColumnIndices</code>, optional <code>Filters</code> (AND), optional global <code>Aggregate</code>, <code>Options</code>. Returns <code>IAggregateQueryResult</code> when <code>Aggregate</code> is set.</li>
+<li><strong><code>HashAggregatePhysicalPlan</code></strong> — <code>GROUP BY</code> via <code>GroupKeyColumnIndices</code> + <code>Aggregates[]</code>; <code>OutputColumns</code> slot layout; optional <code>SpillPartialEntryThreshold</code>.</li>
+<li><strong><code>JoinPhysicalPlan</code></strong> — inner equi-join (<code>PhysicalJoinAlgorithm.Hash</code> or <code>SortMerge</code>); probe/build <code>TableId</code>, key index arrays, <code>OutputSchema</code>, optional per-side filters.</li>
+<li><strong><code>SortTopNPhysicalPlan</code></strong> — filter, project, <code>SortKeys</code>, <code>Limit</code> on one table.</li>
+<li><strong><code>JoinSortTopNPhysicalPlan</code></strong> — nested <code>Join</code> + sort/limit on join output.</li>
+<li><strong><code>GroupedJoinPhysicalPlan</code></strong> — <code>Join</code> + <code>HashAggregatePhysicalPlan</code> composite (§7.15).</li>
+<li><strong><code>ExplainOnlyPhysicalPlan</code></strong> — <code>Label</code> only; executor returns <code>EmptyQueryResult</code>.</li>
+</ul>
+<hr />
+<h2 id="shared-plan-building-blocks">7.13 Shared plan building blocks</h2>
+<h3 id="columncomparefilter">ColumnCompareFilter</h3>
+<pre><code class="language-csharp">public readonly record struct ColumnCompareFilter(
+int ColumnIndex,
+ScalarCompareOp Op,
+long ImmediateBits,
+byte[]? Utf8LiteralBytes = null);
+</code></pre>
+<p>Fixed-width predicates pack immediates in <code>ImmediateBits</code> (<code>int</code> cast for <code>Int32</code>, <code>BitConverter</code> for <code>Float64</code>). UTF-8 uses <code>Utf8LiteralBytes</code> with only <code>Eq</code> / <code>Ne</code>.</p>
+<h3 id="aggregatespec">AggregateSpec</h3>
+<pre><code class="language-csharp">public readonly record struct AggregateSpec(int SourceColumnIndex, AggregateKind Kind);
+</code></pre>
+<p><code>SourceColumnIndex == -1</code> means <code>COUNT(*)</code>.</p>
+<h3 id="vectorizedscanexecutionoptions">VectorizedScanExecutionOptions</h3>
+<pre><code class="language-csharp">public readonly record struct VectorizedScanExecutionOptions
+{
+    /// &lt;summary&gt;-1 = Environment.ProcessorCount; 0 = serial; 1 = one worker.&lt;/summary&gt;
+    public int MaxDegreeOfParallelism { get; init; }
+
+    /// &lt;summary&gt;Channel-based morsel scheduler vs Parallel.For.&lt;/summary&gt;
+    public bool UseChannelScheduler { get; init; }
+
+    /// &lt;summary&gt;AVX2 horizontal sum for unfiltered Float64 SUM.&lt;/summary&gt;
+    public bool UseAvx2DoubleSum { get; init; }
+}
+</code></pre>
+<p>Used by scan, hash aggregate, and sort engines for parallel batch processing.</p>
+<h3 id="sortkeyphysicalspec">SortKeyPhysicalSpec</h3>
+<pre><code class="language-csharp">public readonly record struct SortKeyPhysicalSpec(int ColumnIndex, bool Descending);
+</code></pre>
+<hr />
+<h2 id="defaultqueryexecutor-complete-walkthrough">7.14 DefaultQueryExecutor: complete walkthrough</h2>
+<pre><code class="language-csharp">// src/RainDB.Query/Execution/DefaultQueryExecutor.cs
+public sealed class DefaultQueryExecutor : IQueryExecutor
+{
+    public async ValueTask&lt;IQueryResult&gt; ExecuteAsync(IPhysicalPlan plan, IExecutionContext context)
+    {
+        ArgumentNullException.ThrowIfNull(plan);
+        ArgumentNullException.ThrowIfNull(context);
+        ArgumentNullException.ThrowIfNull(context.AlignedBufferPool);
+        _ = plan.Explain();
+
+        if (plan is VectorizedScanPhysicalPlan vs) { ... }
+        if (plan is HashAggregatePhysicalPlan ha) { ... }
+        if (plan is JoinPhysicalPlan join) { ... }
+        if (plan is SortTopNPhysicalPlan st) { ... }
+        if (plan is JoinSortTopNPhysicalPlan jst) { ... }
+        if (plan is GroupedJoinPhysicalPlan grouped) { ... }
+
+        IQueryResult r = new EmptyQueryResult(0);
+        return r;
+    }
+}
+</code></pre>
+<p>Every branch follows the same <strong>catalog resolution</strong> pattern before delegating to an engine.</p>
+<table class="table">
+<thead>
+<tr>
+<th>Branch</th>
+<th>Plan</th>
+<th>Engine</th>
+<th>Result</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td><code>VectorizedScanPhysicalPlan</code></td>
+<td><code>VectorizedScanEngine</code></td>
+<td>columnar or scalar aggregate</td>
+</tr>
+<tr>
+<td>2</td>
+<td><code>HashAggregatePhysicalPlan</code></td>
+<td><code>HashAggregateEngine</code></td>
+<td>columnar groups</td>
+</tr>
+<tr>
+<td>3</td>
+<td><code>JoinPhysicalPlan</code></td>
+<td><code>JoinExecutionEngine</code></td>
+<td>columnar wide rows</td>
+</tr>
+<tr>
+<td>4</td>
+<td><code>SortTopNPhysicalPlan</code></td>
+<td><code>SortTopNEngine.ExecuteTableAsync</code></td>
+<td>columnar, ≤ limit</td>
+</tr>
+<tr>
+<td>5</td>
+<td><code>JoinSortTopNPhysicalPlan</code></td>
+<td><code>SortTopNEngine.ExecuteJoinAsync</code></td>
+<td>columnar, ≤ limit</td>
+</tr>
+<tr>
+<td>6</td>
+<td><code>GroupedJoinPhysicalPlan</code></td>
+<td>Join → ephemeral → hash aggregate</td>
+<td>columnar groups</td>
+</tr>
+</tbody>
+</table>
+<h3 id="branch-6-groupedjoinphysicalplan">Branch 6 — GroupedJoinPhysicalPlan</h3>
+<pre><code class="language-csharp">if (plan is GroupedJoinPhysicalPlan grouped)
+{
+    // resolve probe + build from grouped.Join
+    var joinResult = await JoinExecutionEngine.ExecuteAsync(
+        grouped.Join, probeCols2, buildCols2, context).ConfigureAwait(false);
+    try
+    {
+        if (joinResult is not IColumnarQueryResult colResult)
+            throw new InvalidOperationException(
+                &quot;Join execution must return a columnar result for grouped join.&quot;);
+        var ephemeral = new EphemeralColumnarTableSource(
+            grouped.Aggregate.TableId,
+            &quot;_grouped_join_&quot;,
+            grouped.Join.OutputSchema,
+            colResult.Batches);
+        return await HashAggregateEngine.ExecuteAsync(
+            grouped.Aggregate, ephemeral, context).ConfigureAwait(false);
+    }
+    finally
+    {
+        await joinResult.DisposeAsync().ConfigureAwait(false);
+    }
+}
+</code></pre>
+<p><strong>Critical lifetime detail:</strong> <code>joinResult</code> is disposed in <code>finally</code> after aggregation is invoked. The hash aggregate must consume or copy batch data during <code>ExecuteAsync</code> — it cannot defer reads past the join result disposal.</p>
+<h3 id="fallback-explainonly-and-unknown-plans">Fallback — ExplainOnly and unknown plans</h3>
+<pre><code class="language-csharp">IQueryResult r = new EmptyQueryResult(0);
+return r;
+</code></pre>
+<p><code>ExplainOnlyPhysicalPlan</code> and any future unrecognized plan type return zero rows. <code>Explain()</code> was already called at the start for tracing side effects.</p>
+<hr />
+<h2 id="groupedjoinphysicalplan-in-depth">7.15 GroupedJoinPhysicalPlan in depth</h2>
+<p>SQL pattern: <code>SELECT ... FROM a JOIN b ... GROUP BY ...</code></p>
+<p>The compiler emits a <strong>composite plan</strong> rather than registering an intermediate table:</p>
+<pre><code>GroupedJoinPhysicalPlan
+├── JoinPhysicalPlan          (materialize join wide rows)
+└── HashAggregatePhysicalPlan (group keys index into join output schema)
+</code></pre>
+<p><strong>Why not catalog the join output?</strong></p>
+<ul>
+<li>Avoids name management and persistence for single-query intermediates</li>
+<li>Reuses <code>HashAggregateEngine</code> unchanged — it only needs <code>IColumnarTableSource</code></li>
+<li><code>EphemeralColumnarTableSource</code> wraps join batches with <code>grouped.Join.OutputSchema</code></li>
+</ul>
+<p><strong>Aggregate.TableId:</strong> Synthetic id embedded in the hash aggregate plan — <strong>not</strong> registered in <code>ICatalog</code>. Used only to satisfy <code>HashAggregatePhysicalPlan.TableId</code> and for explain strings.</p>
+<p><strong>Column index alignment:</strong> Group key and aggregate source indices in <code>HashAggregatePhysicalPlan</code> refer to columns in <strong><code>Join.OutputSchema</code></strong>, not the original probe/build tables. The SQL binder must compute the wide schema and map <code>GROUP BY</code> expressions to output ordinals.</p>
+<p><strong>Memory profile:</strong> Full join materialization before aggregation — acceptable for Phase 1 inner joins on in-memory data; streaming grouped join would require a different physical plan.</p>
+<hr />
+<h2 id="iqueryresult-type-hierarchy">7.16 IQueryResult type hierarchy</h2>
+<pre><code class="language-csharp">// src/RainDB.Abstractions/Execution/IQueryResult.cs
+public interface IQueryResult : IAsyncDisposable
+{
+    long RowCount { get; }
+}
+</code></pre>
+<p>All results are async-disposable to release pooled column memory.</p>
+<h3 id="icolumnarqueryresult">IColumnarQueryResult</h3>
+<pre><code class="language-csharp">public interface IColumnarQueryResult : IQueryResult
+{
+    IReadOnlyList&lt;IColumnarBatch&gt; Batches { get; }
+}
+</code></pre>
+<p>Implementation:</p>
+<pre><code class="language-csharp">// src/RainDB.Query/Results/ColumnarAndAggregateResults.cs
+public sealed class ColumnarMaterializedQueryResult : IColumnarQueryResult
+{
+    public ColumnarMaterializedQueryResult(IReadOnlyList&lt;IColumnarBatch&gt; batches)
+    {
+        long rows = 0;
+        foreach (var b in batches)
+            rows += b.RowCount;
+        RowCount = rows;
+    }
+
+    public ValueTask DisposeAsync()
+    {
+        foreach (var batch in _batches)
+            foreach (var col in batch.Columns)
+                if (col is IDisposable d)
+                    d.Dispose();
+        return ValueTask.CompletedTask;
+    }
+}
+</code></pre>
+<p>Used by: scan (non-aggregate), join, sort, hash aggregate.</p>
+<h3 id="iaggregatequeryresult">IAggregateQueryResult</h3>
+<pre><code class="language-csharp">public interface IAggregateQueryResult : IQueryResult
+{
+    RainDbType ResultType { get; }
+    double Float64Value { get; }
+    long Int64Value { get; }
+    long ContributingRowCount { get; }
+    bool ValueIsNull { get; }
+}
+</code></pre>
+<p>Used by: <code>VectorizedScanEngine</code> global aggregates (<code>SELECT SUM(x) FROM t</code>).</p>
+<p><strong>Reading values:</strong> Check <code>ValueIsNull</code> first (SQL NULL for empty <code>SUM</code>). Use <code>Int64Value</code> for integer/count results, <code>Float64Value</code> for floating aggregates.</p>
+<h3 id="emptyqueryresult">EmptyQueryResult</h3>
+<pre><code class="language-csharp">// src/RainDB.Query/Results/EmptyQueryResult.cs
+internal sealed class EmptyQueryResult : IQueryResult
+{
+    public EmptyQueryResult(long rowCount = 0) =&gt; RowCount = rowCount;
+    public ValueTask DisposeAsync() =&gt; ValueTask.CompletedTask;
+}
+</code></pre>
+<h3 id="result-type-by-plan">Result type by plan</h3>
+<table class="table">
+<thead>
+<tr>
+<th>Plan</th>
+<th>Typical <code>IQueryResult</code></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>VectorizedScanPhysicalPlan</code> (no agg)</td>
+<td><code>IColumnarQueryResult</code></td>
+</tr>
+<tr>
+<td><code>VectorizedScanPhysicalPlan</code> (with agg)</td>
+<td><code>IAggregateQueryResult</code></td>
+</tr>
+<tr>
+<td><code>HashAggregatePhysicalPlan</code></td>
+<td><code>IColumnarQueryResult</code></td>
+</tr>
+<tr>
+<td><code>JoinPhysicalPlan</code></td>
+<td><code>IColumnarQueryResult</code></td>
+</tr>
+<tr>
+<td><code>SortTopNPhysicalPlan</code></td>
+<td><code>IColumnarQueryResult</code></td>
+</tr>
+<tr>
+<td><code>JoinSortTopNPhysicalPlan</code></td>
+<td><code>IColumnarQueryResult</code></td>
+</tr>
+<tr>
+<td><code>GroupedJoinPhysicalPlan</code></td>
+<td><code>IColumnarQueryResult</code></td>
+</tr>
+<tr>
+<td><code>ExplainOnlyPhysicalPlan</code></td>
+<td><code>EmptyQueryResult</code></td>
+</tr>
+</tbody>
+</table>
+<p>Callers should use pattern matching:</p>
+<pre><code class="language-csharp">await using var result = await engine.ExecuteSqlAsync(&quot;SELECT COUNT(*) FROM t&quot;);
+if (result is IAggregateQueryResult agg)
+    Console.WriteLine(agg.Int64Value);
+else if (result is IColumnarQueryResult col)
+    foreach (var batch in col.Batches) { ... }
+</code></pre>
+<hr />
+<h2 id="iexecutioncontext-resources">7.17 IExecutionContext resources</h2>
+<pre><code class="language-csharp">public interface IExecutionContext
+{
+    ICatalog Catalog { get; }
+    IBufferPool BufferPool { get; }
+    IAlignedBufferPool AlignedBufferPool { get; }
+    ISpillWriter SpillWriter { get; }
+    CancellationToken CancellationToken { get; }
+}
+</code></pre>
+<p>Every engine receives the same context:</p>
+<ul>
+<li><strong>Catalog</strong> — table resolution (Chapter 5)</li>
+<li><strong>Buffer pools</strong> — projection and operator temp buffers (Chapter 6)</li>
+<li><strong>SpillWriter</strong> — hash aggregate partial spill hook; default <code>NoOpSpillWriter</code></li>
+<li><strong>CancellationToken</strong> — honored in parallel batch loops and channel workers</li>
+</ul>
+<p><code>DefaultQueryExecutor</code> requires non-null <code>AlignedBufferPool</code> even for aggregate-only plans because join and scan paths may run in the same session.</p>
+<hr />
+<h2 id="execution-options-and-parallelism">7.18 Execution options and parallelism</h2>
+<p><code>VectorizedScanExecutionOptions</code> propagates to engines that process <strong>per-batch morsels</strong>:</p>
+<pre><code class="language-csharp">private static int EffectiveDop(int maxDegreeOfParallelism) =&gt;
+maxDegreeOfParallelism &lt; 0 ? Environment.ProcessorCount
+: maxDegreeOfParallelism == 0 ? 1
+: maxDegreeOfParallelism;
+</code></pre>
+<table class="table">
+<thead>
+<tr>
+<th><code>MaxDegreeOfParallelism</code></th>
+<th>Behavior</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>-1</code></td>
+<td>Use all logical processors</td>
+</tr>
+<tr>
+<td><code>0</code></td>
+<td>Serial (1 worker)</td>
+</tr>
+<tr>
+<td><code>1</code></td>
+<td>Serial</td>
+</tr>
+<tr>
+<td><code>N &gt; 1</code></td>
+<td>Up to N parallel batch workers</td>
+</tr>
+</tbody>
+</table>
+<p><strong><code>UseChannelScheduler</code>:</strong> When true, batch indices flow through a bounded <code>Channel&lt;int&gt;</code> with <code>dop</code> worker tasks. When false, <code>Parallel.For</code> schedules batch indices.</p>
+<p><strong><code>UseAvx2DoubleSum</code>:</strong> Fast path for unfiltered, non-null <code>Float64</code> <code>SUM</code> in <code>VectorizedScanEngine.PartialAgg</code>.</p>
+<p>Join and sort engines have their own internal parallelism characteristics; they receive <code>Options</code> where applicable through nested plans.</p>
+<hr />
+<h2 id="determinism-guarantees">7.19 Determinism guarantees</h2>
+<p>RainDB distinguishes <strong>result determinism</strong> from <strong>execution schedule determinism</strong>.</p>
+<h3 id="deterministic-results">Deterministic results</h3>
+<p><strong>Batch output order:</strong> <code>VectorizedScanEngine.ProjectAllBatchesAsync</code> writes to <code>outArr[i]</code> by batch index. Parallel workers process batches concurrently but <strong>assign results by index</strong>, so <code>Batches</code> order matches <code>table.Batches</code> order regardless of completion order.</p>
+<p><strong>Channel scheduler:</strong> The writer enqueues indices <code>0 .. n-1</code> in order. Workers may process out of order, but each writes <code>outArr[i]</code> for a fixed <code>i</code> — merge order is deterministic.</p>
+<p><strong>Sort operators:</strong> <code>SortTopNEngine</code> produces a total order defined by <code>SortKeys</code> — deterministic given fixed input.</p>
+<p><strong>Hash join vs sort-merge join:</strong> Tests assert hash and sort-merge produce the same row counts for equi-join keys (<code>PhysicalPlanCorrectnessTests</code>).</p>
+<p><strong>Grouped aggregates:</strong> Hash table iteration order may vary, but group <strong>keys</strong> determine identity — aggregate values are deterministic per key.</p>
+<p><strong>Partial aggregate combine:</strong> <code>ComputeAggregateAsync</code> merges <code>partials[i]</code> in ascending batch index order.</p>
+<h3 id="non-deterministic-scheduling">Non-deterministic scheduling</h3>
+<p>Which thread processes batch 3 before batch 1 affects timing only, not <code>outArr</code> contents for scan/project.</p>
+<p><strong>Floating point:</strong> <code>Float64</code> sum order can theoretically differ under parallel partial aggregation; <code>VectorizedScanEngine</code> combines partials in batch index order for aggregates.</p>
+<h3 id="filters-and-null">Filters and NULL</h3>
+<p><code>SelectionEvaluator</code> and SQL semantics define deterministic predicate results. NULL cells never match equality filters.</p>
+<hr />
+<h2 id="error-handling-philosophy">7.20 Error handling philosophy</h2>
+<p>The executor throws <strong><code>InvalidOperationException</code></strong> for catalog misses rather than returning empty results. This surfaces binding bugs and stale plans early.</p>
+<p>Engines throw for:</p>
+<ul>
+<li>Plan/table id mismatch (<code>ValidatePlan</code>)</li>
+<li>Unsupported aggregate type combinations</li>
+<li>Join key arity mismatch (caught at plan construction)</li>
+</ul>
+<p>There is no partial result on failure — callers should dispose results in <code>await using</code> only on success paths (grouped join disposes join result in <code>finally</code> even on aggregate failure).</p>
+<hr />
+<h2 id="explain-output">7.21 Explain output</h2>
+<p>Every plan implements <code>Explain</code>. Example outputs:</p>
+<pre><code>VectorizedScan(table=abc123...) PROJECT[0,2] FILTER[col1Eq]
+HashAggregate(table=...) KEYS[0] AGGS[Sum(1)]
+HashJoin(probe=..., build=...) KEYS[0]=[0]
+GroupedJoin
+  HashJoin(...)
+  HashAggregate(...) KEYS[...] AGGS[...]
+</code></pre>
+<p><code>DefaultQueryExecutor</code> calls <code>plan.Explain()</code> before dispatch — useful when tracing is added to context later.</p>
+<hr />
+<h2 id="end-to-end-execution-trace">7.22 End-to-end execution trace</h2>
+<p>Consider <code>SELECT region, amount FROM sales WHERE amount &gt; 100</code>:</p>
+<pre><code>1. SqlCompiler.CompileAsync
+   → VectorizedScanPhysicalPlan(
+       TableId = sales.Id,
+       OutputColumnIndices = [regionIdx, amountIdx],
+       Filters = [ amount &gt; 100 ])
+
+2. DefaultQueryExecutor branch 1
+   → catalog.TryGetTable(plan.TableId) → MemoryTable
+
+3. VectorizedScanEngine.ExecuteAsync
+   → ProjectAllBatchesAsync (parallel over table.Batches)
+   → per batch: SelectionEvaluator + ProjectGather
+
+4. ColumnarMaterializedQueryResult
+   → caller iterates Batches
+   → DisposeAsync returns pooled chunks
+</code></pre>
+<p>Global aggregate variant skips step 4's columnar materialization and returns <code>AggregateQueryResult</code> instead.</p>
+<hr />
+<h2 id="quick-reference">7.23 Quick reference</h2>
+<table class="table">
+<thead>
+<tr>
+<th>Symbol</th>
+<th>Location</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>IPhysicalPlan</code></td>
+<td><code>src/RainDB.Abstractions/Execution/IPhysicalPlan.cs</code></td>
+</tr>
+<tr>
+<td><code>IQueryExecutor</code></td>
+<td><code>src/RainDB.Abstractions/Execution/IQueryExecutor.cs</code></td>
+</tr>
+<tr>
+<td><code>DefaultQueryExecutor</code></td>
+<td><code>src/RainDB.Query/Execution/DefaultQueryExecutor.cs</code></td>
+</tr>
+<tr>
+<td><code>IQueryResult</code></td>
+<td><code>src/RainDB.Abstractions/Execution/IQueryResult.cs</code></td>
+</tr>
+<tr>
+<td><code>IColumnarQueryResult</code></td>
+<td><code>src/RainDB.Abstractions/Execution/IColumnarQueryResult.cs</code></td>
+</tr>
+<tr>
+<td><code>IAggregateQueryResult</code></td>
+<td><code>src/RainDB.Abstractions/Execution/IAggregateQueryResult.cs</code></td>
+</tr>
+<tr>
+<td><code>RainDbExecutionContext</code></td>
+<td><code>src/RainDB.Query/Runtime/RainDbExecutionContext.cs</code></td>
+</tr>
+<tr>
+<td><code>EphemeralColumnarTableSource</code></td>
+<td><code>src/RainDB.Query/Execution/EphemeralColumnarTableSource.cs</code></td>
+</tr>
+<tr>
+<td>Plan types</td>
+<td><code>src/RainDB.Query/Plans/*.cs</code></td>
+</tr>
+</tbody>
+</table>
+<p>The execution pipeline is the bridge between declarative plans and imperative columnar engines. Chapter 8 zooms into the most common leaf operator: <code>VectorizedScanEngine</code>.</p>
+</div>
+          <footer class="doc-footer">
+            <p>Generated by <strong>hoihky</strong> with <strong>MDWeb</strong> and with assistance from <strong>AI</strong></p>
+
+          </footer>
+        </article>
+
+        
+                <aside class="toc" aria-label="On this page">
+                  <p class="toc-title">On this page</p>
+                  <ul>
+                    
+                        <li class="toc-h1">
+                          <a href="#chapter-7-execution-pipeline">Chapter 7: Execution Pipeline</a>
+                        </li>
+                        
+                        <li class="toc-h1">
+                          <a href="#part-i-concepts-and-theory">Part I: Concepts and Theory</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#71-query-execution-models">7.1 Query execution models</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#iterator-model-volcano-tuple-at-a-time">Iterator model (Volcano / tuple-at-a-time)</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#vectorized-model-batch-at-a-time">Vectorized model (batch-at-a-time)</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#compiled-code-generation-model">Compiled / code-generation model</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#model-comparison-summary">Model comparison summary</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#72-pull-versus-push-pipelines">7.2 Pull versus push pipelines</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#pull-demand-driven">Pull (demand-driven)</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#push-supply-driven">Push (supply-driven)</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#mermaid-pull-pipeline">Mermaid: pull pipeline</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#mermaid-push-morsel-queue">Mermaid: push morsel queue</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#73-physical-operators-in-relational-algebra">7.3 Physical operators in relational algebra</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#core-unary-operators">Core unary operators</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#binary-operators">Binary operators</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#operator-interface-pattern">Operator interface pattern</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#74-query-plan-as-data-structure">7.4 Query plan as data structure</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#plan-node-contents-typical">Plan node contents (typical)</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#plans-versus-interpreters">Plans versus interpreters</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#immutability-benefits">Immutability benefits</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#75-materialization-versus-pipelining">7.5 Materialization versus pipelining</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#pipelined-execution">Pipelined execution</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#materialized-execution">Materialized execution</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#spill-as-materialization-to-disk">Spill as materialization to disk</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#76-deterministic-parallelism-in-olap">7.6 Deterministic parallelism in OLAP</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#sources-of-non-determinism">Sources of non-determinism</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#deterministic-merge-patterns">Deterministic merge patterns</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#olap-parallelism-granularity">OLAP parallelism granularity</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#cancellation">Cancellation</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#77-separation-of-compilation-and-execution">7.7 Separation of compilation and execution</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#78-result-delivery-models">7.8 Result delivery models</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#79-summary-part-i-checklist">7.9 Summary: Part I checklist</a>
+                        </li>
+                        
+                        <li class="toc-h1">
+                          <a href="#transition-to-part-ii-raindb-implementation">Transition to Part II: RainDB Implementation</a>
+                        </li>
+                        
+                        <li class="toc-h1">
+                          <a href="#part-ii-raindb-implementation">Part II: RainDB Implementation</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#710-separation-of-planning-and-execution">7.10 Separation of planning and execution</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#711-iphysicalplan-the-operator-contract">7.11 IPhysicalPlan: the operator contract</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#712-physical-plan-taxonomy">7.12 Physical plan taxonomy</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#plan-summaries">Plan summaries</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#713-shared-plan-building-blocks">7.13 Shared plan building blocks</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#columncomparefilter">ColumnCompareFilter</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#aggregatespec">AggregateSpec</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#vectorizedscanexecutionoptions">VectorizedScanExecutionOptions</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#sortkeyphysicalspec">SortKeyPhysicalSpec</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#714-defaultqueryexecutor-complete-walkthrough">7.14 DefaultQueryExecutor: complete walkthrough</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#branch-6-groupedjoinphysicalplan">Branch 6 — GroupedJoinPhysicalPlan</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#fallback-explainonly-and-unknown-plans">Fallback — ExplainOnly and unknown plans</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#715-groupedjoinphysicalplan-in-depth">7.15 GroupedJoinPhysicalPlan in depth</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#716-iqueryresult-type-hierarchy">7.16 IQueryResult type hierarchy</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#icolumnarqueryresult">IColumnarQueryResult</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#iaggregatequeryresult">IAggregateQueryResult</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#emptyqueryresult">EmptyQueryResult</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#result-type-by-plan">Result type by plan</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#717-iexecutioncontext-resources">7.17 IExecutionContext resources</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#718-execution-options-and-parallelism">7.18 Execution options and parallelism</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#719-determinism-guarantees">7.19 Determinism guarantees</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#deterministic-results">Deterministic results</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#non-deterministic-scheduling">Non-deterministic scheduling</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#filters-and-null">Filters and NULL</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#720-error-handling-philosophy">7.20 Error handling philosophy</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#721-explain-output">7.21 Explain output</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#722-end-to-end-execution-trace">7.22 End-to-end execution trace</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#723-quick-reference">7.23 Quick reference</a>
+                        </li>
+                        
+                  </ul>
+                </aside>
+                
+      </main>
+    </div>
+  </div>
+  <script src="assets/vendor/mermaid.min.js"></script>
+  <script src="assets/vendor/highlight.min.js"></script>
+  <script src="assets/js/site.js"></script>
+</body>
+</html>

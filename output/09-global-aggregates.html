@@ -1,0 +1,1207 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Chapter 9: Global Aggregates · Building an OLAP Database Engine from Scratch with RainDB</title>
+  <meta name="description" content="Generated documentation site">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="assets/css/site.css">
+  <link rel="stylesheet" href="assets/vendor/atom-one-dark.min.css">
+</head>
+<body>
+  <div class="site">
+    <header class="topbar">
+      <button class="sidebar-toggle" id="sidebar-toggle" aria-label="Toggle navigation">☰</button>
+      <a href="index.html" class="brand">Building an OLAP Database Engine from Scratch with RainDB</a>
+      <div class="search-wrap">
+        <input type="search" id="search" placeholder="Search docs…" autocomplete="off">
+      </div>
+    </header>
+
+    <div class="layout">
+      <aside class="sidebar" id="sidebar">
+        <nav class="nav" aria-label="Documentation">
+          <ul class="nav-list">
+            
+                        <li class="nav-item depth-0">
+                          
+                            <a href="index.html" class="nav-link">Building an OLAP Database Engine from Scratch</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="01-olap-fundamentals.html" class="nav-link">Chapter 1: OLAP Fundamentals</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="02-architecture-and-modules.html" class="nav-link">Chapter 2: Architecture and Modules</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="03-columnar-storage-model.html" class="nav-link">Chapter 3: Columnar Storage Model</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="04-chunk-data-structures.html" class="nav-link">Chapter 4: Chunk Data Structures</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="05-catalog-and-tables.html" class="nav-link">Chapter 5: Catalog and Tables</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="06-buffer-management.html" class="nav-link">Chapter 6: Buffer Management</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="07-execution-pipeline.html" class="nav-link">Chapter 7: Execution Pipeline</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="08-vectorized-scan-filter-project.html" class="nav-link">Chapter 8: Vectorized Scan, Filter, and Project</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0 is-active">
+                          
+                            <a href="09-global-aggregates.html" class="nav-link">Chapter 9: Global Aggregates</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="10-hash-aggregation.html" class="nav-link">Chapter 10: Hash Aggregation</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="11-joins.html" class="nav-link">Chapter 11: Joins</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="12-sort-and-limit.html" class="nav-link">Chapter 12: Sort and Limit</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="13-sql-compilation.html" class="nav-link">Chapter 13: SQL Compilation</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="14-persistence.html" class="nav-link">Chapter 14: Persistence</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="15-future-extensions.html" class="nav-link">Chapter 15: Future Extensions</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="16-mmap-io.html" class="nav-link">Chapter 16: mmap I/O</a>
+                            
+                        </li>
+                        
+          </ul>
+        </nav>
+      </aside>
+
+      <main class="content">
+        <article class="doc">
+          <header class="doc-header">
+            <h1>Chapter 9: Global Aggregates</h1>
+          </header>
+          <div class="doc-body"><h1 id="chapter-9-global-aggregates">Chapter 9: Global Aggregates</h1>
+<p>A query like <code>SELECT SUM(amount) FROM sales WHERE region = 'us'</code> collapses an entire table (after filtering) into a single scalar. In relational algebra this is aggregation without a grouping key list — one implicit group containing every qualifying row. RainDB handles this path inside <code>VectorizedScanEngine</code> rather than spinning up a hash aggregator: there is exactly one group, so a map-reduce over columnar batches is both simpler and faster than maintaining a hash table with one entry.</p>
+<p>This chapter is split into two parts. <strong>Part I</strong> develops the theory: relational algebra's γ operator, SQL aggregate semantics, algebraic properties that enable parallel partial aggregation, distributed map-reduce patterns, NULL and empty-set behavior, and SIMD reduction. <strong>Part II</strong> walks through RainDB's concrete implementation — <code>PartialAgg</code>, <code>ComputeAggregateAsync</code>, AVX2 via <code>AggregateIntrinsics</code>, and the <code>IAggregateQueryResult</code> API boundary.</p>
+<hr />
+<h1 id="part-i-theory">Part I: Theory</h1>
+<h2 id="relational-algebra-aggregation">9.1 Relational algebra aggregation (γ)</h2>
+<p>Once you have selection, projection, and join, the next operator most query engines add is <strong>grouped aggregation</strong>, denoted γ in relational algebra. You read it as &quot;group by G, then apply aggregates F&quot;:</p>
+<pre><code>γ_{G; F₁, F₂, …, Fₙ}(R)
+</code></pre>
+<p><code>G</code> names the grouping columns. Each <code>Fᵢ</code> is an aggregate over some expression built from <code>R</code>'s attributes.</p>
+<p>The special case that matters here is <strong>G = ∅</strong>. No columns participate in grouping, so the engine treats the entire input as one bucket. Every surviving row feeds the same accumulator. The answer is always a single tuple — one number per aggregate in the SELECT list.</p>
+<table class="table">
+<thead>
+<tr>
+<th>Notation</th>
+<th>SQL equivalent</th>
+<th>Result cardinality</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>γ_{}; SUM(x)(R)</code></td>
+<td><code>SELECT SUM(x) FROM R</code></td>
+<td>1 row</td>
+</tr>
+<tr>
+<td><code>γ_{a}; SUM(x)(R)</code></td>
+<td><code>SELECT a, SUM(x) FROM R GROUP BY a</code></td>
+<td>≤ distinct <code>a</code></td>
+</tr>
+<tr>
+<td><code>γ_{}; COUNT(*)(R)</code></td>
+<td><code>SELECT COUNT(*) FROM R</code></td>
+<td>1 row, never NULL</td>
+</tr>
+</tbody>
+</table>
+<p>γ is an extension operator: it consumes a bag of rows and emits a bag of group rows. With an empty group list, that bag has size 0 or 1. SQL almost always returns one row for scalar aggregates even when the filtered input is empty — RainDB follows that contract via <code>IAggregateQueryResult</code>.</p>
+<h3 id="pipeline-placement">Pipeline placement</h3>
+<p>Logically, a global aggregate query is a thin stack:</p>
+<pre><code>π_{result_cols}( γ_{}; AGG(expr)( σ_{predicate}(R) ) )
+</code></pre>
+<p>Filter first, aggregate second, project last. RainDB collapses this into <code>VectorizedScanPhysicalPlan</code> with an optional <code>Aggregate</code> field. When <code>|G| = 0</code>, there is no reason to allocate a separate physical operator — the scan loop already touches every row.</p>
+<h2 id="aggregate-functions-in-the-sql-standard">9.2 Aggregate functions in the SQL standard</h2>
+<p>SQL aggregates consume a <strong>multiset</strong> of values drawn from the group. Duplicates count unless you write <code>DISTINCT</code> inside the function. The standard catalog includes:</p>
+<table class="table">
+<thead>
+<tr>
+<th>Function</th>
+<th>Operand</th>
+<th>Result type (typical)</th>
+<th>Ignores NULLs?</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>COUNT(*)</code></td>
+<td>—</td>
+<td>exact integer</td>
+<td>N/A (counts rows)</td>
+</tr>
+<tr>
+<td><code>COUNT(expr)</code></td>
+<td>any</td>
+<td>exact integer</td>
+<td>yes</td>
+</tr>
+<tr>
+<td><code>SUM(expr)</code></td>
+<td>numeric</td>
+<td>same or wider numeric</td>
+<td>yes</td>
+</tr>
+<tr>
+<td><code>AVG(expr)</code></td>
+<td>numeric</td>
+<td>numeric</td>
+<td>yes</td>
+</tr>
+<tr>
+<td><code>MIN(expr)</code></td>
+<td>comparable</td>
+<td>same as expr</td>
+<td>yes</td>
+</tr>
+<tr>
+<td><code>MAX(expr)</code></td>
+<td>comparable</td>
+<td>same as expr</td>
+<td>yes</td>
+</tr>
+</tbody>
+</table>
+<p>RainDB Phase 1 ships <code>COUNT</code>, <code>SUM</code>, <code>MIN</code>, and <code>MAX</code>. You can compute an average yourself with <code>SUM(x) / COUNT(x)</code>; there is no dedicated <code>AVG</code> opcode yet.</p>
+<h3 id="set-vs-bag-semantics">Set vs bag semantics</h3>
+<p><code>SUM(amount)</code> over <code>(10, 10, 5)</code> is <code>25</code>. The engine does not deduplicate unless you ask it to with <code>COUNT(DISTINCT col)</code> or similar — not implemented in RainDB today.</p>
+<h3 id="filter-interaction">Filter interaction</h3>
+<p><code>WHERE</code> trims rows <strong>before</strong> aggregation. <code>HAVING</code> trims groups <strong>after</strong>. A query without <code>GROUP BY</code> only ever sees <code>WHERE</code>:</p>
+<pre><code class="language-sql">SELECT SUM(x) FROM t WHERE y &gt; 0;
+-- γ_{}; SUM(x)( σ_{y&gt;0}(t) )
+</code></pre>
+<p>RainDB evaluates <code>ColumnCompareFilter[]</code> conjunctively while scanning batches. Rows that fail the predicate never reach the aggregate kernel.</p>
+<h2 id="algebraic-properties">9.3 Algebraic properties</h2>
+<p>Parallel engines only work if you can split the input, summarize each chunk independently, and merge summaries later. That requires <strong>decomposability</strong>: <code>whole = Combine(chunk₀, chunk₁, …)</code>.</p>
+<h3 id="associativity">Associativity</h3>
+<p>⊕ is associative when <code>(a ⊕ b) ⊕ c = a ⊕ (b ⊕ c)</code>.</p>
+<table class="table">
+<thead>
+<tr>
+<th>Aggregate</th>
+<th>Combine operation</th>
+<th>Associative?</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>SUM</code></td>
+<td>addition</td>
+<td>yes (modulo overflow / FP rounding)</td>
+</tr>
+<tr>
+<td><code>COUNT</code></td>
+<td>addition</td>
+<td>yes</td>
+</tr>
+<tr>
+<td><code>MIN</code></td>
+<td>minimum</td>
+<td>yes</td>
+</tr>
+<tr>
+<td><code>MAX</code></td>
+<td>maximum</td>
+<td>yes</td>
+</tr>
+<tr>
+<td><code>AVG</code></td>
+<td>needs <code>(sum, count)</code> pair</td>
+<td>associative on the pair</td>
+</tr>
+</tbody>
+</table>
+<p>Associativity is what lets you fold partials in a tree, a thread pool, or a coordinator merge without caring about order.</p>
+<h3 id="commutativity">Commutativity</h3>
+<p>When <code>a ⊕ b = b ⊕ a</code>, merge order is irrelevant. <code>SUM</code>, <code>COUNT</code>, <code>MIN</code>, and <code>MAX</code> all commute on their partial representations. RainDB's <code>PartialAgg.Combine</code> therefore does not need to replay batches in ingestion order.</p>
+<h3 id="distributivity-limited">Distributivity (limited)</h3>
+<p>Addition distributes across disjoint partitions: <code>SUM(A ∪ B) = SUM(A) + SUM(B)</code> when A and B share no rows. <code>COUNT</code> behaves the same way.</p>
+<p><code>MIN</code> and <code>MAX</code> are not additive, but they <strong>do</strong> form idempotent semilattices: <code>min(a, b)</code> and <code>max(a, b)</code> are associative and commutative if you track whether each side has seen a real value. A partial that only observed nulls must not contribute a fake numeric zero when merged with a partial that saw data.</p>
+<p>Practical partial state for extrema:</p>
+<ol>
+<li>Best value so far (once one exists)</li>
+<li><code>has_value</code> flag — distinguishes &quot;never saw a non-null&quot; from &quot;saw zero&quot;</li>
+</ol>
+<h3 id="decomposable-aggregate-functions-daf">Decomposable aggregate functions (DAF)</h3>
+<p>Literature calls aggregates <strong>decomposable</strong> when a fixed-size partial plus a <code>Combine</code> function suffices. Every RainDB Phase 1 aggregate qualifies. <code>MEDIAN</code>, <code>PERCENTILE_CONT</code>, and <code>MODE</code> do not — they need order statistics or unbounded state.</p>
+<h2 id="map-reduce-pattern">9.4 Map-reduce pattern</h2>
+<p>Partitioned global aggregation is textbook map-reduce with a constant key:</p>
+<pre><code>         ┌─────────┐     ┌─────────┐     ┌─────────┐
+Input ──►│ Map P₀  │     │ Map P₁  │ ... │ Map Pₙ  │
+         └────┬────┘     └────┬────┘     └────┬────┘
+              │ partial₀      │ partial₁      │ partialₙ
+              └───────────────┼───────────────┘
+                              ▼
+                        ┌───────────┐
+                        │  Reduce   │  Combine(partials)
+                        └─────┬─────┘
+                              ▼
+                         final scalar
+</code></pre>
+<p><strong>Map:</strong> each partition scans its rows and emits a compact <code>PartialAgg</code>.</p>
+<p><strong>Reduce:</strong> <code>Combine</code> folds partials. RainDB uses a serial fold today; nothing stops a parallel tree reduction.</p>
+<p>The pattern matches distributed frameworks, except the group key is always the empty tuple.</p>
+<h3 id="why-not-hash-for-global-agg">Why not hash for global agg?</h3>
+<p>A hash table keyed by &quot;the one group&quot; still pays for hashing, pointer chasing, and bucket management. When <code>|G| = 0</code>, fusion into the scan wins. <code>VectorizedScanEngine.ComputeAggregateAsync</code> is the fused path.</p>
+<h2 id="partial-aggregation-in-distributed-systems">9.5 Partial aggregation in distributed systems</h2>
+<p>In a cluster, each node emits one partial per aggregate; the coordinator merges them. Network cost is <strong>O(1)</strong> per aggregate per node, not <strong>O(rows)</strong>.</p>
+<p>Design the partial carefully:</p>
+<table class="table">
+<thead>
+<tr>
+<th>Concern</th>
+<th>Implication</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Fixed-size partial</td>
+<td>Stack allocation, SIMD-friendly structs</td>
+</tr>
+<tr>
+<td>Associative combine</td>
+<td>Any merge order valid</td>
+</tr>
+<tr>
+<td>Identity element</td>
+<td>Empty partition contributes neutral state</td>
+</tr>
+<tr>
+<td>Null awareness</td>
+<td>All-null partition ≠ partition with values</td>
+</tr>
+</tbody>
+</table>
+<p>RainDB mirrors this inside one process: each columnar batch is a partition, <code>PartialAgg[n]</code> holds <code>n</code> local summaries.</p>
+<h3 id="two-level-parallelism">Two-level parallelism</h3>
+<ol>
+<li><strong>Morsel parallelism</strong> — process batches on different threads (<code>Parallel.For</code> or channel workers).</li>
+<li><strong>Intra-batch SIMD</strong> — AVX2 horizontal sum on dense, null-free <code>Float64</code> columns.</li>
+</ol>
+<p>Combine stays serial. That is fine when batch count is tiny compared to row count.</p>
+<h2 id="null-handling-in-count-sum-min-max">9.6 NULL handling in COUNT, SUM, MIN, MAX</h2>
+<p>Predicates use three-valued logic (<code>TRUE</code>, <code>FALSE</code>, <code>UNKNOWN</code>). Aggregates use a simpler rule: NULL means <strong>skip this value</strong>, except <code>COUNT(*)</code> which counts rows regardless of column nulls.</p>
+<h3 id="count">COUNT</h3>
+<table class="table">
+<thead>
+<tr>
+<th>Form</th>
+<th>Counts</th>
+<th>NULL in column?</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>COUNT(*)</code></td>
+<td>rows in group</td>
+<td>irrelevant</td>
+</tr>
+<tr>
+<td><code>COUNT(col)</code></td>
+<td>rows where <code>col IS NOT NULL</code></td>
+<td>excluded</td>
+</tr>
+<tr>
+<td><code>COUNT(DISTINCT col)</code></td>
+<td>distinct non-null values</td>
+<td>excluded (not in RainDB yet)</td>
+</tr>
+</tbody>
+</table>
+<p><code>COUNT(expr)</code> is never NULL. Zero rows → <code>0</code>.</p>
+<h3 id="sum-min-max">SUM, MIN, MAX</h3>
+<p>Skip NULL operands. If nothing remains, emit <strong>NULL</strong> — not zero for <code>SUM</code>, not an arbitrary sentinel for <code>MIN</code>/<code>MAX</code>.</p>
+<h3 id="implementation-pattern">Implementation pattern</h3>
+<p>Track how many non-null values contributed (<code>contributing_row_count</code> or <code>HasMin</code>/<code>HasMax</code>):</p>
+<pre><code>if contributing_row_count == 0:
+    emit NULL (except COUNT variants)
+else:
+    emit computed value
+</code></pre>
+<p>RainDB's <code>PartialAgg.ContributingRows</code> and <code>HasMin</code>/<code>HasMax</code> encode this contract.</p>
+<h2 id="empty-set-semantics">9.7 Empty set semantics</h2>
+<p>Four cases show up constantly in tests and bug reports:</p>
+<table class="table">
+<thead>
+<tr>
+<th>Situation</th>
+<th>Rows after WHERE</th>
+<th>Non-null measures</th>
+<th>COUNT(*)</th>
+<th>SUM(x)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Empty table</td>
+<td>0</td>
+<td>—</td>
+<td>0</td>
+<td>NULL</td>
+</tr>
+<tr>
+<td>All filtered out</td>
+<td>0</td>
+<td>—</td>
+<td>0</td>
+<td>NULL</td>
+</tr>
+<tr>
+<td>Rows exist, all x NULL</td>
+<td>&gt;0</td>
+<td>0</td>
+<td>row count</td>
+<td>NULL</td>
+</tr>
+<tr>
+<td>Normal</td>
+<td>&gt;0</td>
+<td>&gt;0</td>
+<td>row count</td>
+<td>numeric</td>
+</tr>
+</tbody>
+</table>
+<p>Scalar aggregate queries return <strong>one row</strong> even when the input is empty. RainDB exposes <code>IAggregateQueryResult</code> with <code>RowCount = 1</code> and <code>ValueIsNull</code> set correctly — not an empty columnar batch.</p>
+<p>Grouped queries behave differently (Chapter 10): no input rows means no groups, so zero output rows.</p>
+<h2 id="simd-reduction-theory">9.8 SIMD reduction theory</h2>
+<p>SIMD applies one instruction to multiple lanes at once — four <code>double</code> values in an AVX2 <code>Vector256&lt;double&gt;</code>, for example.</p>
+<h3 id="horizontal-reduction">Horizontal reduction</h3>
+<p>To sum <code>n</code> doubles:</p>
+<ol>
+<li><strong>Vector phase</strong> — load four values per iteration, add into a vector accumulator.</li>
+<li><strong>Horizontal fold</strong> — collapse accumulator lanes to one scalar.</li>
+<li><strong>Scalar tail</strong> — handle <code>n % 4</code> leftovers.</li>
+</ol>
+<p>Still O(n) work, but higher throughput. On wide analytic columns, memory bandwidth usually caps you before ALU throughput.</p>
+<h3 id="preconditions-for-safe-simd-sum">Preconditions for safe SIMD sum</h3>
+<table class="table">
+<thead>
+<tr>
+<th>Condition</th>
+<th>Reason</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>No NULLs</td>
+<td>Null bitmap needs masking or gather</td>
+</tr>
+<tr>
+<td>Dense row order</td>
+<td>No selection-vector indirection</td>
+</tr>
+<tr>
+<td>Fixed width</td>
+<td>Known stride (<code>sizeof(double)</code>)</td>
+</tr>
+<tr>
+<td>Associative FP caveat</td>
+<td>Reordering changes rounding bits</td>
+</tr>
+</tbody>
+</table>
+<p>RainDB enables AVX2 only when <code>!col.HasNulls &amp;&amp; selectedRows.IsEmpty &amp;&amp; options.UseAvx2DoubleSum</code>.</p>
+<h3 id="gather-vs-contiguous-load">Gather vs contiguous load</h3>
+<p>A <code>WHERE</code> clause builds a <strong>selection vector</strong> of row indices. Contiguous SIMD loads assume row <code>i</code> lives at offset <code>i</code>. With filtering, you either gather indirectly or stay scalar. RainDB chooses scalar for filtered paths — gather setup often loses on small selections.</p>
+<h3 id="other-simd-opportunities-not-yet-in-raindb">Other SIMD opportunities (not yet in RainDB)</h3>
+<ul>
+<li><code>MIN</code>/<code>MAX</code> on floats via <code>vminpd</code>/<code>vmaxpd</code></li>
+<li>Integer <code>SUM</code> with widening (<code>vpmovzx</code> + <code>vpaddq</code>)</li>
+<li><code>COUNT</code> via popcount on known-non-null bitmaps</li>
+</ul>
+<p><code>AggregateIntrinsics</code> in RainDB.Core implements AVX2 <code>SumFloat64</code> today; min/max helpers exist but run scalar.</p>
+<hr />
+<h1 id="part-ii-raindb-implementation">Part II: RainDB Implementation</h1>
+<h2 id="where-global-aggregates-live">9.9 Where global aggregates live</h2>
+<p>Global aggregates are not a separate physical operator. The scan physical plan carries an optional <code>Aggregate</code> field; when it is set, <code>ExecuteAsync</code> routes to <code>ComputeAggregateAsync</code> instead of projecting batches.</p>
+<pre><code class="language-csharp">// src/RainDB.Query/Execution/VectorizedScanEngine.cs
+public static async ValueTask&lt;IQueryResult&gt; ExecuteAsync(
+    VectorizedScanPhysicalPlan plan,
+    IColumnarTableSource table,
+    IExecutionContext context)
+{
+    ArgumentNullException.ThrowIfNull(plan);
+    ArgumentNullException.ThrowIfNull(table);
+    ArgumentNullException.ThrowIfNull(context);
+    ValidatePlan(plan, table);
+
+    if (plan.Aggregate is { } agg)
+        return await ComputeAggregateAsync(plan, table, agg, context).ConfigureAwait(false);
+
+    var batches = await ProjectAllBatchesAsync(plan, table, context).ConfigureAwait(false);
+    return new ColumnarMaterializedQueryResult(batches);
+}
+</code></pre>
+<p>The result type changes: callers receive <code>IAggregateQueryResult</code> (wrapped in <code>IQueryResult</code>) rather than <code>IColumnarQueryResult</code>. The scalar value and a <code>ValueIsNull</code> flag encode SQL semantics at the API boundary.</p>
+<p><code>DefaultQueryExecutor</code> dispatches <code>VectorizedScanPhysicalPlan</code> to this engine without inspecting aggregate presence — the engine branches internally.</p>
+<h2 id="aggregatespec-and-physical-plan">9.10 AggregateSpec and physical plan</h2>
+<p><code>AggregateSpec</code> is defined alongside <code>VectorizedScanPhysicalPlan</code>:</p>
+<pre><code class="language-csharp">// src/RainDB.Query/Plans/VectorizedScanPhysicalPlan.cs
+public readonly record struct AggregateSpec(int SourceColumnIndex, AggregateKind Kind);
+</code></pre>
+<table class="table">
+<thead>
+<tr>
+<th>Field</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>SourceColumnIndex</code></td>
+<td>Column to measure; <strong>-1</strong> means <code>COUNT(*)</code></td>
+</tr>
+<tr>
+<td><code>Kind</code></td>
+<td><code>Count</code>, <code>Sum</code>, <code>Min</code>, or <code>Max</code></td>
+</tr>
+</tbody>
+</table>
+<p><code>AggregateKind</code> lives in <code>src/RainDB.Abstractions/Execution/AggregateKind.cs</code>:</p>
+<pre><code class="language-csharp">public enum AggregateKind
+{
+    None,
+    Sum,
+    Min,
+    Max,
+    /// &lt;summary&gt;COUNT(*) uses SourceColumnIndex -1; COUNT(col) uses the column index.&lt;/summary&gt;
+    Count,
+}
+</code></pre>
+<p>Validation in <code>ValidatePlan</code> enforces type/kind compatibility before any parallel work begins:</p>
+<ul>
+<li><code>Sum</code> requires <code>Int32</code>, <code>Int64</code>, or <code>Float64</code></li>
+<li><code>Min</code> / <code>Max</code> require <code>Float64</code> only</li>
+<li><code>Count</code> accepts any column type (or -1 for star)</li>
+<li>A negative <code>SourceColumnIndex</code> is rejected unless <code>Kind == Count</code></li>
+</ul>
+<p>The SQL binder (<code>LogicalTableScanBinder</code> in <code>src/RainDB.Sql/Compilation/</code>) produces these specs from <code>SELECT SUM(x), COUNT(*), ...</code> without a <code>GROUP BY</code> clause.</p>
+<h3 id="execution-options">Execution options</h3>
+<pre><code class="language-csharp">// src/RainDB.Query/Plans/VectorizedScanPhysicalPlan.cs
+public readonly record struct VectorizedScanExecutionOptions
+{
+    public int MaxDegreeOfParallelism { get; init; }  // -1 = ProcessorCount
+    public bool UseChannelScheduler { get; init; }
+    public bool UseAvx2DoubleSum { get; init; }
+}
+</code></pre>
+<h2 id="computeaggregateasync-map-reduce-over-batches">9.11 ComputeAggregateAsync: map-reduce over batches</h2>
+<pre><code class="language-csharp">// src/RainDB.Query/Execution/VectorizedScanEngine.cs
+private static async ValueTask&lt;IAggregateQueryResult&gt; ComputeAggregateAsync(
+    VectorizedScanPhysicalPlan plan,
+    IColumnarTableSource table,
+    AggregateSpec spec,
+    IExecutionContext context)
+{
+    var batches = table.Batches;
+    var n = batches.Count;
+    var ct = context.CancellationToken;
+    if (n == 0)
+        return EmptyAggregate(spec, table.Schema);
+
+    var dop = EffectiveDop(plan.Options.MaxDegreeOfParallelism);
+    var partials = new PartialAgg[n];
+    if (dop &lt;= 1 || n == 1)
+    {
+        for (var i = 0; i &lt; n; i++)
+            partials[i] = AccumulateAggregateBatch(plan, batches[i], spec, plan.Options);
+    }
+    else if (plan.Options.UseChannelScheduler)
+    {
+        await RunChannelMorselsAsync(
+            n, dop,
+            i =&gt; partials[i] = AccumulateAggregateBatch(plan, batches[i], spec, plan.Options),
+            ct).ConfigureAwait(false);
+    }
+    else
+    {
+        Parallel.For(
+            0, n,
+            new ParallelOptions { MaxDegreeOfParallelism = dop, CancellationToken = ct },
+            i =&gt; partials[i] = AccumulateAggregateBatch(plan, batches[i], spec, plan.Options));
+    }
+
+    var combined = partials[0];
+    for (var i = 1; i &lt; n; i++)
+        combined = PartialAgg.Combine(combined, partials[i], spec.Kind);
+
+    var resultType = spec.SourceColumnIndex &gt;= 0
+        ? table.Schema.Columns[spec.SourceColumnIndex].Type
+        : RainDbType.Int64;
+    return combined.ToResult(resultType, spec.Kind);
+}
+</code></pre>
+<p><strong>Map:</strong> <code>AccumulateAggregateBatch</code> per batch index.</p>
+<p><strong>Reduce:</strong> sequential <code>PartialAgg.Combine</code> fold.</p>
+<p><strong>Empty table:</strong> <code>EmptyAggregate</code> before any partial allocation.</p>
+<h2 id="emptyaggregate-sql-empty-input-rules">9.12 EmptyAggregate: SQL empty-input rules</h2>
+<pre><code class="language-csharp">private static IAggregateQueryResult EmptyAggregate(AggregateSpec spec, TableSchema schema)
+{
+    var columnType = spec.SourceColumnIndex &gt;= 0
+        ? schema.Columns[spec.SourceColumnIndex].Type
+        : RainDbType.Int64;
+    return spec.Kind switch
+    {
+        AggregateKind.Count =&gt;
+            new AggregateQueryResult(RainDbType.Int64, 0d, 0L, 0, valueIsNull: false),
+        AggregateKind.Sum when columnType == RainDbType.Float64 =&gt;
+            new AggregateQueryResult(RainDbType.Float64, 0d, 0L, 0, valueIsNull: true),
+        AggregateKind.Sum =&gt;
+            new AggregateQueryResult(RainDbType.Int64, 0d, 0L, 0, valueIsNull: true),
+        AggregateKind.Min or AggregateKind.Max when columnType == RainDbType.Float64 =&gt;
+            new AggregateQueryResult(RainDbType.Float64, 0d, 0L, 0, valueIsNull: true),
+        _ =&gt; throw new InvalidOperationException(&quot;Unsupported empty aggregate.&quot;),
+    };
+}
+</code></pre>
+<table class="table">
+<thead>
+<tr>
+<th>Aggregate</th>
+<th>Empty table</th>
+<th><code>ValueIsNull</code></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>COUNT(*)</code> / <code>COUNT(col)</code></td>
+<td><code>0</code></td>
+<td><code>false</code></td>
+</tr>
+<tr>
+<td><code>SUM</code> / <code>MIN</code> / <code>MAX</code></td>
+<td>placeholder</td>
+<td><code>true</code></td>
+</tr>
+</tbody>
+</table>
+<h2 id="partialagg-private-accumulator-struct">9.13 PartialAgg: private accumulator struct</h2>
+<pre><code class="language-csharp">private readonly struct PartialAgg
+{
+    public readonly long ContributingRows;
+    public readonly double FloatSum;
+    public readonly double FloatMin;
+    public readonly double FloatMax;
+    public readonly long IntSum;
+    public readonly bool HasMin;
+    public readonly bool HasMax;
+    public readonly long CountAgg;
+}
+</code></pre>
+<table class="table">
+<thead>
+<tr>
+<th>Field</th>
+<th>Used by</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>ContributingRows</code></td>
+<td><code>SUM</code>, <code>MIN</code>, <code>MAX</code> — non-null value count</td>
+</tr>
+<tr>
+<td><code>FloatSum</code></td>
+<td><code>SUM</code> on <code>Float64</code></td>
+</tr>
+<tr>
+<td><code>IntSum</code></td>
+<td><code>SUM</code> on <code>Int32</code> / <code>Int64</code></td>
+</tr>
+<tr>
+<td><code>FloatMin</code> / <code>HasMin</code></td>
+<td><code>MIN</code> on <code>Float64</code></td>
+</tr>
+<tr>
+<td><code>FloatMax</code> / <code>HasMax</code></td>
+<td><code>MAX</code> on <code>Float64</code></td>
+</tr>
+<tr>
+<td><code>CountAgg</code></td>
+<td><code>COUNT(*)</code> and <code>COUNT(col)</code></td>
+</tr>
+</tbody>
+</table>
+<p>One struct for all kinds avoids virtual dispatch. <code>readonly struct</code> enables stack allocation and copy-by-value combine without heap churn.</p>
+<h3 id="factory-methods">Factory methods</h3>
+<p><strong><code>FromCountStar</code></strong> — filtered row count only:</p>
+<pre><code class="language-csharp">public static PartialAgg FromCountStar(int selectedRowCount) =&gt;
+new PartialAgg(0, 0d, 0d, 0d, 0L, false, false, selectedRowCount);
+</code></pre>
+<p><strong><code>FromCountColumn</code></strong> — skips nulls via null bitmap:</p>
+<pre><code class="language-csharp">public static PartialAgg FromCountColumn(IColumnChunk col, ReadOnlySpan&lt;int&gt; selectedRows, int selectedCount)
+{
+    var nb = col.HasNulls ? col.NullBitmap.Span : ReadOnlySpan&lt;byte&gt;.Empty;
+    long c = 0;
+    for (var i = 0; i &lt; selectedCount; i++)
+    {
+        var r = Row(selectedRows, i);
+        if (!SelectionEvaluator.IsNull(nb, r, col.HasNulls))
+            c++;
+    }
+    return new PartialAgg(0, 0d, 0d, 0d, 0L, false, false, c);
+}
+</code></pre>
+<p><strong><code>FromColumn</code></strong> — dispatches <code>Sum</code> / <code>Min</code> / <code>Max</code> by <code>col.PhysicalType</code>.</p>
+<p>Helper <code>Row(selectedRows, i)</code> returns <code>i</code> when <code>selectedRows</code> is empty (dense iteration).</p>
+<h2 id="accumulateaggregatebatch-and-filters">9.14 AccumulateAggregateBatch and filters</h2>
+<pre><code class="language-csharp">private static PartialAgg AccumulateAggregateBatch(
+    VectorizedScanPhysicalPlan plan,
+    IColumnarBatch batch,
+    AggregateSpec spec,
+    VectorizedScanExecutionOptions options)
+{
+    if (spec.Kind == AggregateKind.Count &amp;&amp; spec.SourceColumnIndex &lt; 0)
+        return AccumulateFilteredRowCount(plan, batch);
+
+    if (spec.Kind == AggregateKind.Count)
+    {
+        // rent int[] selection buffer → FromCountColumn
+    }
+
+    // rent int[] selection buffer → FromColumn(measureCol, spec.Kind, sel, k, options)
+}
+</code></pre>
+<p>When <code>plan.Filters</code> is non-empty, <code>SelectionEvaluator.FillSelectedRowsConjunctive</code> writes qualifying row indices into a rented <code>ArrayPool&lt;int&gt;</code> buffer. When no filters exist, <code>k = batch.RowCount</code> and <code>selectedRows</code> is empty — dense path.</p>
+<p>Semantic distinction:</p>
+<ul>
+<li><strong><code>COUNT(*)</code></strong> — counts rows surviving <code>WHERE</code></li>
+<li><strong><code>COUNT(col)</code></strong> — counts non-null <code>col</code> among those rows</li>
+</ul>
+<h2 id="partialagg.combine">9.15 PartialAgg.Combine</h2>
+<pre><code class="language-csharp">public static PartialAgg Combine(PartialAgg a, PartialAgg b, AggregateKind kind) =&gt;
+kind switch
+{
+    AggregateKind.Sum =&gt; new PartialAgg(
+        a.ContributingRows + b.ContributingRows,
+        a.FloatSum + b.FloatSum,
+        0d, 0d,
+        a.IntSum + b.IntSum,
+        false, false, 0),
+    AggregateKind.Count =&gt; new PartialAgg(
+        0, 0d, 0d, 0d, 0L, false, false,
+        a.CountAgg + b.CountAgg),
+    AggregateKind.Min =&gt; CombineMinMax(a, b, isMin: true),
+    AggregateKind.Max =&gt; CombineMinMax(a, b, isMin: false),
+    _ =&gt; throw new ArgumentOutOfRangeException(nameof(kind), kind, null),
+};
+</code></pre>
+<p><code>CombineMinMax</code> handles identity (no extremum yet):</p>
+<pre><code class="language-csharp">if (!a.HasMin) return b;
+if (!b.HasMin) return a;
+return new PartialAgg(rows, 0d, Math.Min(a.FloatMin, b.FloatMin), 0d, 0L, true, false, 0);
+</code></pre>
+<p>If both sides are empty, combined partial has <code>HasMin == false</code> → <code>ToResult</code> emits NULL.</p>
+<h2 id="toresult-and-aggregatequeryresult">9.16 ToResult and AggregateQueryResult</h2>
+<pre><code class="language-csharp">// src/RainDB.Query/Results/ColumnarAndAggregateResults.cs
+public sealed class AggregateQueryResult : IAggregateQueryResult
+{
+    public AggregateQueryResult(
+        RainDbType resultType,
+        double float64Value,
+        long int64Value,
+        long contributingRowCount,
+        bool valueIsNull = false)
+    {
+        ResultType = resultType;
+        Float64Value = float64Value;
+        Int64Value = int64Value;
+        ContributingRowCount = contributingRowCount;
+        ValueIsNull = valueIsNull;
+        RowCount = 1;
+    }
+
+    public bool ValueIsNull { get; }
+    public long ContributingRowCount { get; }
+    // Float64Value / Int64Value — read based on ResultType
+}
+</code></pre>
+<p><code>ToResult</code> mapping:</p>
+<pre><code class="language-csharp">AggregateKind.Sum when columnType == RainDbType.Float64 =&gt;
+    new AggregateQueryResult(RainDbType.Float64, FloatSum, 0L, ContributingRows,
+        valueIsNull: ContributingRows == 0),
+AggregateKind.Min when columnType == RainDbType.Float64 =&gt;
+    new AggregateQueryResult(RainDbType.Float64, HasMin ? FloatMin : 0d, 0L, ContributingRows,
+        valueIsNull: !HasMin),
+</code></pre>
+<p><code>ContributingRows == 0</code> after combine means all-null or all-filtered measure column — not the empty-table path (handled by <code>EmptyAggregate</code>).</p>
+<h2 id="sum-on-float64-scalar-and-avx2-paths">9.17 SUM on Float64: scalar and AVX2 paths</h2>
+<pre><code class="language-csharp">private static PartialAgg SumFloat64(
+    IColumnChunk col,
+    ReadOnlySpan&lt;int&gt; selectedRows,
+    int selectedCount,
+    ReadOnlySpan&lt;byte&gt; nb,
+    ReadOnlySpan&lt;byte&gt; values,
+    VectorizedScanExecutionOptions options)
+{
+    if (selectedCount == 0)
+        return new PartialAgg(0, 0d, 0d, 0d, 0L, false, false, 0);
+
+    if (selectedRows.IsEmpty &amp;&amp; !col.HasNulls &amp;&amp; options.UseAvx2DoubleSum)
+    {
+        var sum = AggregateIntrinsics.SumFloat64(values, allowAvx2: true);
+        return new PartialAgg(selectedCount, sum, 0d, 0d, 0L, false, false, 0);
+    }
+
+    double s = 0;
+    long contrib = 0;
+    for (var i = 0; i &lt; selectedCount; i++)
+    {
+        var r = Row(selectedRows, i);
+        if (SelectionEvaluator.IsNull(nb, r, col.HasNulls))
+            continue;
+        var bits = BinaryPrimitives.ReadInt64LittleEndian(
+            values.Slice(r * sizeof(double), sizeof(double)));
+        s += BitConverter.Int64BitsToDouble(bits);
+        contrib++;
+    }
+    return new PartialAgg(contrib, s, 0d, 0d, 0L, false, false, 0);
+}
+</code></pre>
+<p>AVX2 activates when: no selection vector, no nulls, <code>UseAvx2DoubleSum == true</code>.</p>
+<p>Integer sums (<code>SumInt32</code>, <code>SumInt64</code>) always use scalar loops with null skipping; <code>Int32</code> widens into <code>long</code> accumulator.</p>
+<h2 id="aggregateintrinsics.sumfloat64">9.18 AggregateIntrinsics.SumFloat64</h2>
+<pre><code class="language-csharp">// src/RainDB.Core/Columnar/AggregateIntrinsics.cs
+public static double SumFloat64(ReadOnlySpan&lt;byte&gt; valuesLittleEndian, bool allowAvx2 = true)
+{
+    if (valuesLittleEndian.Length % sizeof(double) != 0)
+        throw new ArgumentException(&quot;Length must be multiple of 8.&quot;, nameof(valuesLittleEndian));
+    var doubles = MemoryMarshal.Cast&lt;byte, double&gt;(valuesLittleEndian);
+    if (doubles.IsEmpty)
+        return 0d;
+    if (allowAvx2 &amp;&amp; Avx2.IsSupported &amp;&amp; doubles.Length &gt;= Vector256&lt;double&gt;.Count)
+        return SumDoubleAvx2(doubles);
+    return SumDoubleScalar(doubles);
+}
+</code></pre>
+<p>AVX2 kernel:</p>
+<pre><code class="language-csharp">private static unsafe double SumDoubleAvx2(ReadOnlySpan&lt;double&gt; values)
+{
+    fixed (double* p = values)
+    {
+        var n = values.Length;
+        var i = 0;
+        var acc = Vector256&lt;double&gt;.Zero;
+        var limit = n - (n % Vector256&lt;double&gt;.Count);
+        for (; i &lt; limit; i += Vector256&lt;double&gt;.Count)
+            acc = Avx2.Add(acc, Avx2.LoadVector256(p + i));
+
+        var lo = acc.GetLower();
+        var hi = acc.GetUpper();
+        var s128 = lo + hi;
+        var sum = s128.GetElement(0) + s128.GetElement(1);
+        for (; i &lt; n; i++)
+            sum += p[i];
+        return sum;
+    }
+}
+</code></pre>
+<p><code>MemoryMarshal.Cast&lt;byte, double&gt;</code> reinterprets the column buffer without copy. FP addition order differs from scalar path — acceptable for analytics; document for financial determinism requirements.</p>
+<p><code>MinFloat64</code> / <code>MaxFloat64</code> exist in <code>AggregateIntrinsics</code> but global MIN/MAX use inline <code>MinMaxFloat64</code> in <code>PartialAgg</code>.</p>
+<h2 id="min-and-max-on-float64">9.19 MIN and MAX on Float64</h2>
+<pre><code class="language-csharp">private static PartialAgg MinMaxFloat64(
+    AggregateKind kind,
+    ReadOnlySpan&lt;int&gt; selectedRows,
+    int selectedCount,
+    bool hasNulls,
+    ReadOnlySpan&lt;byte&gt; nb,
+    ReadOnlySpan&lt;byte&gt; values)
+{
+    double? cur = null;
+    long contrib = 0;
+    for (var i = 0; i &lt; selectedCount; i++)
+    {
+        var r = Row(selectedRows, i);
+        if (SelectionEvaluator.IsNull(nb, r, hasNulls))
+            continue;
+        var bits = BinaryPrimitives.ReadInt64LittleEndian(
+            values.Slice(r * sizeof(double), sizeof(double)));
+        var v = BitConverter.Int64BitsToDouble(bits);
+        cur = cur.HasValue
+            ? kind == AggregateKind.Min ? Math.Min(cur.Value, v) : Math.Max(cur.Value, v)
+            : v;
+        contrib++;
+    }
+
+    if (!cur.HasValue)
+        return new PartialAgg(0, 0d, 0d, 0d, 0L, false, false, 0);
+    // ...
+}
+</code></pre>
+<h2 id="morsel-parallelism">9.20 Morsel parallelism</h2>
+<p><code>EffectiveDop</code> maps <code>MaxDegreeOfParallelism</code>: negative → <code>Environment.ProcessorCount</code>, zero → 1, positive → explicit cap.</p>
+<p>Three scheduling modes mirror non-aggregate projection:</p>
+<ol>
+<li>Sequential loop (<code>dop &lt;= 1 || n == 1</code>)</li>
+<li><code>Parallel.For</code> over batch indices</li>
+<li><code>RunChannelMorselsAsync</code> — bounded channel work queue</li>
+</ol>
+<p>Each worker writes to <code>partials[i]</code> — no locks. <code>PartialAgg</code> is a value type; array slots are independent.</p>
+<h2 id="global-vs-grouped-aggregates">9.21 Global vs grouped aggregates</h2>
+<table class="table">
+<thead>
+<tr>
+<th>Aspect</th>
+<th><code>PartialAgg</code> (global)</th>
+<th><code>AggregateAccumulator</code> (hash, Ch. 10)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Scope</td>
+<td>One per batch → one combined</td>
+<td>One per group key per batch</td>
+</tr>
+<tr>
+<td>Combine</td>
+<td><code>PartialAgg.Combine</code></td>
+<td><code>AggregateRowOps.Combine</code></td>
+</tr>
+<tr>
+<td>COUNT field</td>
+<td><code>CountAgg</code></td>
+<td><code>Count</code></td>
+</tr>
+<tr>
+<td>Output</td>
+<td><code>IAggregateQueryResult</code></td>
+<td><code>FixedWidthColumnChunk</code> in batch</td>
+</tr>
+<tr>
+<td>Operator</td>
+<td><code>VectorizedScanEngine</code></td>
+<td><code>HashAggregateEngine</code></td>
+</tr>
+</tbody>
+</table>
+<p><code>ShouldEmitAggregateNull</code> in hash aggregation mirrors <code>ToResult</code> null rules for per-group output columns.</p>
+<h2 id="count-semantics-reference">9.22 COUNT semantics reference</h2>
+<table class="table">
+<thead>
+<tr>
+<th>Scenario</th>
+<th><code>COUNT(*)</code></th>
+<th><code>COUNT(col)</code></th>
+<th><code>SUM(col)</code></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Empty table</td>
+<td>0, not null</td>
+<td>0, not null</td>
+<td>NULL</td>
+</tr>
+<tr>
+<td>All rows filtered</td>
+<td>0, not null</td>
+<td>0, not null</td>
+<td>NULL</td>
+</tr>
+<tr>
+<td>Rows exist, all col null</td>
+<td>row count</td>
+<td>0, not null</td>
+<td>NULL</td>
+</tr>
+<tr>
+<td>Normal</td>
+<td>row count</td>
+<td>non-null count</td>
+<td>sum</td>
+</tr>
+</tbody>
+</table>
+<p>Tests: <code>SqlGroupByTests</code>, <code>Phase1ReadPathTests</code> in <code>tests/RainDB.Tests/</code>.</p>
+<h2 id="end-to-end-trace">9.23 End-to-end trace</h2>
+<p>Query: <code>SELECT SUM(amount) FROM sales WHERE region_id = 3</code></p>
+<p>Physical plan: <code>VectorizedScanPhysicalPlan</code> with filter on <code>region_id</code>, <code>Aggregate = (SourceColumnIndex: amount_ix, Kind: Sum)</code>.</p>
+<pre><code>ExecuteAsync
+→ ComputeAggregateAsync
+    batch 0: AccumulateAggregateBatch → PartialAgg(IntSum=1200, ContributingRows=40)
+    batch 1: AccumulateAggregateBatch → PartialAgg(IntSum=800, ContributingRows=25)
+    Combine → PartialAgg(IntSum=2000, ContributingRows=65)
+    ToResult → AggregateQueryResult(Int64, int64Value=2000, valueIsNull=false)
+</code></pre>
+<h2 id="summary">9.24 Summary</h2>
+<p>Global aggregation in RainDB is a disciplined map-reduce over immutable columnar batches:</p>
+<ol>
+<li><strong>Plan</strong> — <code>VectorizedScanPhysicalPlan.Aggregate</code> selects kind and column via <code>AggregateSpec</code>.</li>
+<li><strong>Map</strong> — <code>AccumulateAggregateBatch</code> produces <code>PartialAgg</code> per batch, honoring filters and COUNT vs COUNT(col).</li>
+<li><strong>Reduce</strong> — <code>PartialAgg.Combine</code> folds partials associatively.</li>
+<li><strong>Materialize</strong> — <code>ToResult</code> or <code>EmptyAggregate</code> exposes SQL-correct scalars via <code>ValueIsNull</code>.</li>
+<li><strong>Accelerate</strong> — <code>AggregateIntrinsics.SumFloat64</code> optional AVX2 when column is dense and null-free.</li>
+</ol>
+<p>The design keeps aggregation colocated with the scan operator that already owns filter evaluation and batch iteration — avoiding hash table overhead when the group count is exactly one.</p>
+</div>
+          <footer class="doc-footer">
+            <p>Generated by <strong>hoihky</strong> with <strong>MDWeb</strong> and with assistance from <strong>AI</strong></p>
+
+          </footer>
+        </article>
+
+        
+                <aside class="toc" aria-label="On this page">
+                  <p class="toc-title">On this page</p>
+                  <ul>
+                    
+                        <li class="toc-h1">
+                          <a href="#chapter-9-global-aggregates">Chapter 9: Global Aggregates</a>
+                        </li>
+                        
+                        <li class="toc-h1">
+                          <a href="#part-i-theory">Part I: Theory</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#91-relational-algebra-aggregation">9.1 Relational algebra aggregation (γ)</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#pipeline-placement">Pipeline placement</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#92-aggregate-functions-in-the-sql-standard">9.2 Aggregate functions in the SQL standard</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#set-vs-bag-semantics">Set vs bag semantics</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#filter-interaction">Filter interaction</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#93-algebraic-properties">9.3 Algebraic properties</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#associativity">Associativity</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#commutativity">Commutativity</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#distributivity-limited">Distributivity (limited)</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#decomposable-aggregate-functions-daf">Decomposable aggregate functions (DAF)</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#94-map-reduce-pattern">9.4 Map-reduce pattern</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#why-not-hash-for-global-agg">Why not hash for global agg?</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#95-partial-aggregation-in-distributed-systems">9.5 Partial aggregation in distributed systems</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#two-level-parallelism">Two-level parallelism</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#96-null-handling-in-count-sum-min-max">9.6 NULL handling in COUNT, SUM, MIN, MAX</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#count">COUNT</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#sum-min-max">SUM, MIN, MAX</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#implementation-pattern">Implementation pattern</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#97-empty-set-semantics">9.7 Empty set semantics</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#98-simd-reduction-theory">9.8 SIMD reduction theory</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#horizontal-reduction">Horizontal reduction</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#preconditions-for-safe-simd-sum">Preconditions for safe SIMD sum</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#gather-vs-contiguous-load">Gather vs contiguous load</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#other-simd-opportunities-not-yet-in-raindb">Other SIMD opportunities (not yet in RainDB)</a>
+                        </li>
+                        
+                        <li class="toc-h1">
+                          <a href="#part-ii-raindb-implementation">Part II: RainDB Implementation</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#99-where-global-aggregates-live">9.9 Where global aggregates live</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#910-aggregatespec-and-physical-plan">9.10 AggregateSpec and physical plan</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#execution-options">Execution options</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#911-computeaggregateasync-map-reduce-over-batches">9.11 ComputeAggregateAsync: map-reduce over batches</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#912-emptyaggregate-sql-empty-input-rules">9.12 EmptyAggregate: SQL empty-input rules</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#913-partialagg-private-accumulator-struct">9.13 PartialAgg: private accumulator struct</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#factory-methods">Factory methods</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#914-accumulateaggregatebatch-and-filters">9.14 AccumulateAggregateBatch and filters</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#915-partialaggcombine">9.15 PartialAgg.Combine</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#916-toresult-and-aggregatequeryresult">9.16 ToResult and AggregateQueryResult</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#917-sum-on-float64-scalar-and-avx2-paths">9.17 SUM on Float64: scalar and AVX2 paths</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#918-aggregateintrinsicssumfloat64">9.18 AggregateIntrinsics.SumFloat64</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#919-min-and-max-on-float64">9.19 MIN and MAX on Float64</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#920-morsel-parallelism">9.20 Morsel parallelism</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#921-global-vs-grouped-aggregates">9.21 Global vs grouped aggregates</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#922-count-semantics-reference">9.22 COUNT semantics reference</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#923-end-to-end-trace">9.23 End-to-end trace</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#924-summary">9.24 Summary</a>
+                        </li>
+                        
+                  </ul>
+                </aside>
+                
+      </main>
+    </div>
+  </div>
+  <script src="assets/vendor/mermaid.min.js"></script>
+  <script src="assets/vendor/highlight.min.js"></script>
+  <script src="assets/js/site.js"></script>
+</body>
+</html>

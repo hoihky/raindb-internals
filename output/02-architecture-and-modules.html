@@ -1,0 +1,1974 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Chapter 2: Architecture and Modules · Building an OLAP Database Engine from Scratch with RainDB</title>
+  <meta name="description" content="Generated documentation site">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="assets/css/site.css">
+  <link rel="stylesheet" href="assets/vendor/atom-one-dark.min.css">
+</head>
+<body>
+  <div class="site">
+    <header class="topbar">
+      <button class="sidebar-toggle" id="sidebar-toggle" aria-label="Toggle navigation">☰</button>
+      <a href="index.html" class="brand">Building an OLAP Database Engine from Scratch with RainDB</a>
+      <div class="search-wrap">
+        <input type="search" id="search" placeholder="Search docs…" autocomplete="off">
+      </div>
+    </header>
+
+    <div class="layout">
+      <aside class="sidebar" id="sidebar">
+        <nav class="nav" aria-label="Documentation">
+          <ul class="nav-list">
+            
+                        <li class="nav-item depth-0">
+                          
+                            <a href="index.html" class="nav-link">Building an OLAP Database Engine from Scratch</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="01-olap-fundamentals.html" class="nav-link">Chapter 1: OLAP Fundamentals</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0 is-active">
+                          
+                            <a href="02-architecture-and-modules.html" class="nav-link">Chapter 2: Architecture and Modules</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="03-columnar-storage-model.html" class="nav-link">Chapter 3: Columnar Storage Model</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="04-chunk-data-structures.html" class="nav-link">Chapter 4: Chunk Data Structures</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="05-catalog-and-tables.html" class="nav-link">Chapter 5: Catalog and Tables</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="06-buffer-management.html" class="nav-link">Chapter 6: Buffer Management</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="07-execution-pipeline.html" class="nav-link">Chapter 7: Execution Pipeline</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="08-vectorized-scan-filter-project.html" class="nav-link">Chapter 8: Vectorized Scan, Filter, and Project</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="09-global-aggregates.html" class="nav-link">Chapter 9: Global Aggregates</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="10-hash-aggregation.html" class="nav-link">Chapter 10: Hash Aggregation</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="11-joins.html" class="nav-link">Chapter 11: Joins</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="12-sort-and-limit.html" class="nav-link">Chapter 12: Sort and Limit</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="13-sql-compilation.html" class="nav-link">Chapter 13: SQL Compilation</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="14-persistence.html" class="nav-link">Chapter 14: Persistence</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="15-future-extensions.html" class="nav-link">Chapter 15: Future Extensions</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="16-mmap-io.html" class="nav-link">Chapter 16: mmap I/O</a>
+                            
+                        </li>
+                        
+          </ul>
+        </nav>
+      </aside>
+
+      <main class="content">
+        <article class="doc">
+          <header class="doc-header">
+            <h1>Chapter 2: Architecture and Modules</h1>
+          </header>
+          <div class="doc-body"><h1 id="chapter-2-architecture-and-modules">Chapter 2: Architecture and Modules</h1>
+<p>RainDB is organized as six .NET projects plus tests and samples. This chapter explains why those boundaries exist, how dependencies flow, and how <code>RainDbEngine</code> wires everything together. We begin with general database architecture theory — layered design, plan separation, and extensibility patterns — before mapping each concept onto RainDB's concrete modules.</p>
+<h1 id="part-i-concepts-and-theory">Part I: Concepts and Theory</h1>
+<h2 id="layered-system-design">2.1 Layered system design</h2>
+<p>Large systems get easier to reason about when you slice them into <strong>layers</strong> — horizontal bands where upper layers call down, lower layers never call up, and each band exposes a narrow API to the one above.</p>
+<h3 id="the-classic-layered-architecture">The classic layered architecture</h3>
+<pre><code class="language-text">┌─────────────────────────────────────┐
+│  Application / User Interface       │  ← highest level
+├─────────────────────────────────────┤
+│  Query Language / API               │
+├─────────────────────────────────────┤
+│  Query Processor                    │
+├─────────────────────────────────────┤
+│  Storage Engine                     │
+├─────────────────────────────────────┤
+│  Operating System / Hardware        │  ← lowest level
+└─────────────────────────────────────┘
+</code></pre>
+<p>Each layer:</p>
+<ul>
+<li><strong>Exposes services</strong> upward through a stable interface</li>
+<li><strong>Depends on services</strong> from the layer below</li>
+<li><strong>Hides its internals</strong> from everything above</li>
+</ul>
+<h3 id="benefits-of-layering">Benefits of layering</h3>
+<table class="table">
+<thead>
+<tr>
+<th>Benefit</th>
+<th>Explanation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Separation of concerns</strong></td>
+<td>Each layer solves one class of problems</td>
+</tr>
+<tr>
+<td><strong>Replaceability</strong></td>
+<td>Swap storage engine without rewriting query processor</td>
+</tr>
+<tr>
+<td><strong>Testability</strong></td>
+<td>Mock lower layers to test upper layers in isolation</td>
+</tr>
+<tr>
+<td><strong>Team parallelism</strong></td>
+<td>Different teams own different layers</td>
+</tr>
+<tr>
+<td><strong>Evolution</strong></td>
+<td>Add features within a layer without rippling changes</td>
+</tr>
+</tbody>
+</table>
+<h3 id="costs-of-layering">Costs of layering</h3>
+<table class="table">
+<thead>
+<tr>
+<th>Cost</th>
+<th>Explanation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Indirection overhead</strong></td>
+<td>Every cross-layer call passes through interfaces</td>
+</tr>
+<tr>
+<td><strong>Performance</strong></td>
+<td>Extra abstraction can block inlining and fusion</td>
+</tr>
+<tr>
+<td><strong>Rigidity</strong></td>
+<td>Strict layering can force unnatural code placement</td>
+</tr>
+<tr>
+<td><strong>Duplication</strong></td>
+<td>Similar concepts may appear at multiple layers</td>
+</tr>
+</tbody>
+</table>
+<p>Database teams accept these tradeoffs because a query processor that never parses disk bytes directly is far easier to maintain — and the nanoseconds lost to virtual dispatch are usually noise next to I/O.</p>
+<h3 id="layering-versus-modularity">Layering versus modularity</h3>
+<p><strong>Layering</strong> is a dependency rule: A may call B only if B sits below A. <strong>Modularity</strong> is a packaging rule: code lives in separate assemblies. RainDB enforces both — six projects with a directed acyclic dependency graph.</p>
+<hr />
+<h2 id="separation-of-concerns-in-a-dbms">2.2 Separation of concerns in a DBMS</h2>
+<p>A DBMS is not a single blob of code. It is a federation of subsystems, each with a job description that should not bleed into the next.</p>
+<h3 id="major-dbms-subsystems">Major DBMS subsystems</h3>
+<pre class="mermaid">flowchart TB
+    subgraph frontend ["Front-end"]
+        Parser["SQL Parser"]
+        Binder["Binder / Semantic Analyzer"]
+        Optimizer["Optimizer"]
+    end
+    subgraph runtime ["Run-time"]
+        Executor["Query Executor"]
+        TxnMgr["Transaction Manager"]
+        LockMgr["Lock Manager"]
+    end
+    subgraph storage ["Storage"]
+        Catalog["System Catalog"]
+        BufferPool["Buffer Pool"]
+        StorageEngine["Storage Engine"]
+    end
+    Parser --> Binder --> Optimizer --> Executor
+    Executor --> Catalog
+    Executor --> BufferPool
+    BufferPool --> StorageEngine
+    Executor --> TxnMgr --> LockMgr
+</pre>
+<h3 id="storage-engine">Storage engine</h3>
+<p>The <strong>storage engine</strong> owns byte layout — on disk and in memory:</p>
+<ul>
+<li>Page or batch allocation</li>
+<li>Columnar or row-oriented encoding</li>
+<li>Compression and decompression</li>
+<li>Write-ahead logging (in transactional systems)</li>
+<li>Index structures (B-trees, zone maps)</li>
+</ul>
+<p>It answers: &quot;Given a table and a row range, return these column bytes.&quot;</p>
+<h3 id="query-processor">Query processor</h3>
+<p>The <strong>query processor</strong> turns a declarative query into a runnable plan and executes it:</p>
+<ul>
+<li>Parse SQL into an abstract syntax tree</li>
+<li>Bind names to catalog objects</li>
+<li>Optimize (rewrite, cost-based plan selection)</li>
+<li>Execute operators (scan, join, aggregate, sort)</li>
+</ul>
+<p>It answers: &quot;Given this SQL, compute this result.&quot;</p>
+<h3 id="system-catalog">System catalog</h3>
+<p>The <strong>catalog</strong> (data dictionary, system tables) holds metadata:</p>
+<ul>
+<li>Table names, column names, types</li>
+<li>Statistics (row counts, distinct values, histograms)</li>
+<li>Access paths (indexes, sort orders)</li>
+<li>Permissions and constraints</li>
+</ul>
+<p>It answers: &quot;What tables exist, and what is their schema?&quot;</p>
+<h3 id="why-separation-matters">Why separation matters</h3>
+<table class="table">
+<thead>
+<tr>
+<th>Subsystem</th>
+<th>Changes when...</th>
+<th>Should not change when...</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Storage engine</td>
+<td>Compression algorithm improves</td>
+<td>SQL syntax adds <code>WINDOW</code> clause</td>
+</tr>
+<tr>
+<td>Query processor</td>
+<td>Join algorithm added</td>
+<td>Disk page size changes</td>
+</tr>
+<tr>
+<td>Catalog</td>
+<td>New table registered</td>
+<td>Query plan executes</td>
+</tr>
+</tbody>
+</table>
+<p>Stuffing SQL parsing into the storage engine produces a system you cannot test, extend, or explain to a new hire.</p>
+<h3 id="raindbs-mapping-preview">RainDB's mapping (preview)</h3>
+<table class="table">
+<thead>
+<tr>
+<th>DBMS subsystem</th>
+<th>RainDB project(s)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Catalog</td>
+<td><code>RainDB.Core</code> (<code>InMemoryCatalog</code>)</td>
+</tr>
+<tr>
+<td>Storage engine</td>
+<td><code>RainDB.Core</code> (<code>MemoryTable</code>, chunks, persistence)</td>
+</tr>
+<tr>
+<td>Query processor</td>
+<td><code>RainDB.Query</code> (engines, physical plans)</td>
+</tr>
+<tr>
+<td>SQL front-end</td>
+<td><code>RainDB.Sql</code></td>
+</tr>
+<tr>
+<td>LINQ front-end</td>
+<td><code>RainDB.Linq</code></td>
+</tr>
+<tr>
+<td>Composition / API</td>
+<td><code>RainDB.Driver</code> (<code>RainDbEngine</code>)</td>
+</tr>
+<tr>
+<td>Contracts</td>
+<td><code>RainDB.Abstractions</code></td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="logical-versus-physical-plan-separation">2.3 Logical versus physical plan separation</h2>
+<p>The single most important split in query processing is between <strong>what</strong> to compute (logical plan) and <strong>how</strong> to compute it (physical plan).</p>
+<h3 id="logical-plans">Logical plans</h3>
+<p>A <strong>logical plan</strong> describes the query as relational operators:</p>
+<pre><code class="language-text">LogicalTableScan(order_lines)
+WHERE line_total &gt; 1000
+PROJECT region, line_total
+AGGREGATE SUM(line_total) GROUP BY region
+</code></pre>
+<p>Properties of logical plans:</p>
+<ul>
+<li>Use <strong>table and column names</strong> (not memory addresses or indices)</li>
+<li>Are <strong>declarative</strong> — no algorithm choices</li>
+<li>Are <strong>rewritable</strong> — optimizer applies equivalence-preserving transformations</li>
+<li>Are <strong>front-end independent</strong> — SQL and LINQ can produce the same logical plan</li>
+</ul>
+<h3 id="physical-plans">Physical plans</h3>
+<p>A <strong>physical plan</strong> pins down algorithms and data structures:</p>
+<pre><code class="language-text">VectorizedScanPhysicalPlan
+table_id: 0x7f3a...
+output_columns: [0, 2]
+filter: column[2] &gt; 1000.0 (immediate bits)
+aggregate: SUM(column[2]) GROUP BY column[0]
+options: dop=4, avx2_sum=true
+</code></pre>
+<p>Properties of physical plans:</p>
+<ul>
+<li>Use <strong>catalog identifiers</strong> (<code>TableId</code>) and <strong>column indices</strong></li>
+<li>Specify <strong>algorithms</strong> (hash join vs sort-merge, vectorized scan vs index scan)</li>
+<li>Include <strong>execution hints</strong> (parallelism, SIMD flags)</li>
+<li>Are <strong>machine-oriented</strong> — ready for the executor</li>
+</ul>
+<h3 id="the-compilation-pipeline">The compilation pipeline</h3>
+<pre><code class="language-text">SQL string
+→ Parse → AST
+→ Bind → Logical Plan (names resolved)
+→ Optimize → Logical Plan (rewritten)
+→ Lower → Physical Plan (algorithms chosen)
+→ Execute → Result
+</code></pre>
+<p>Each stage has a narrow contract. The binder never picks join algorithms; the optimizer never touches byte buffers.</p>
+<hr />
+<h2 id="system-r-and-the-optimizer-architecture">2.4 System R and the optimizer architecture</h2>
+<p><strong>System R</strong> (IBM, 1970s) set the template that relational databases still follow.</p>
+<h3 id="system-r-contributions">System R contributions</h3>
+<table class="table">
+<thead>
+<tr>
+<th>Contribution</th>
+<th>Impact</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Relational model</td>
+<td>Tables, not navigational pointers</td>
+</tr>
+<tr>
+<td>SQL</td>
+<td>Declarative query language</td>
+</tr>
+<tr>
+<td>Cost-based optimizer</td>
+<td>Choose plans by estimated cost, not rules</td>
+</tr>
+<tr>
+<td><strong>Logical / physical separation</strong></td>
+<td>Optimizer produces logical plans; code generator produces physical</td>
+</tr>
+<tr>
+<td>Volcano iterators</td>
+<td>Tuple-at-a-time execution (later superseded by vectorization for OLAP)</td>
+</tr>
+</tbody>
+</table>
+<h3 id="system-r-optimizer-phases">System R optimizer phases</h3>
+<pre><code class="language-text">1. Parse SQL → Query Tree (logical)
+2. Bind → resolve names via catalog
+3. Rewrite → apply algebraic equivalences
+   - Push selections down
+   - Push projections down
+   - Convert subqueries to joins
+4. Generate alternatives → enumerate join orders, access paths
+5. Cost each alternative → statistics-driven estimation
+6. Choose cheapest → physical plan
+7. Compile → executable code
+</code></pre>
+<p>RainDB Phase 1 runs a <strong>pared-down</strong> pipeline: parse → bind → lower, with little cost-based optimization. Still, the <strong>two-IR architecture</strong> follows System R's separation even without a full cost model.</p>
+<h3 id="algebraic-rewrite-example">Algebraic rewrite example</h3>
+<p>Original:</p>
+<pre><code class="language-text">π_{name}(σ_{age&gt;30}(σ_{city='NYC'}(employees)))
+</code></pre>
+<p>After pushing selection:</p>
+<pre><code class="language-text">π_{name}(σ_{age&gt;30 ∧ city='NYC'}(employees))
+</code></pre>
+<p>Both are logically equivalent, but the rewritten form scans fewer rows if a zone map on <code>city</code> exists. Optimizers apply dozens of such rewrite rules automatically.</p>
+<hr />
+<h2 id="the-cascades-framework">2.5 The Cascades framework</h2>
+<p><strong>Cascades</strong> (Graefe, 1995) turned System R's optimizer into a <strong>rule-based, extensible framework</strong> adopted by SQL Server, Greenplum, and others.</p>
+<h3 id="core-ideas">Core ideas</h3>
+<ol>
+<li><strong>Memoization</strong> — sub-expressions are stored once and shared across alternative plans</li>
+<li><strong>Transformation rules</strong> — logical equivalences (e.g., join reordering)</li>
+<li><strong>Implementation rules</strong> — map logical operators to physical algorithms</li>
+<li><strong>Cost model</strong> — assign cost to each physical expression; search for minimum</li>
+</ol>
+<pre><code class="language-text">Logical:  Join(A, B)
+           ↓ implementation rule
+Physical: HashJoin(Scan(A), Scan(B))
+           ↓ alternative
+Physical: SortMergeJoin(Sort(Scan(A)), Sort(Scan(B)))
+</code></pre>
+<h3 id="cascades-versus-raindb">Cascades versus RainDB</h3>
+<p>RainDB does not implement a full Cascades memo table. Instead:</p>
+<ul>
+<li><strong>Binders</strong> (<code>LogicalTableScanBinder</code>, <code>LogicalJoinBinder</code>) perform name resolution and direct lowering</li>
+<li><strong>Physical plan types</strong> are explicit classes, not rule-generated</li>
+<li><strong>Extension</strong> happens by adding new <code>IPhysicalPlan</code> types and executor dispatch branches</li>
+</ul>
+<p>The Cascades lesson still applies: <strong>keep logical rewrites separate from physical implementation choices</strong> so each can evolve independently.</p>
+<h3 id="extensibility-pattern-from-cascades">Extensibility pattern from Cascades</h3>
+<table class="table">
+<thead>
+<tr>
+<th>Mechanism</th>
+<th>Cascades</th>
+<th>RainDB equivalent</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Add logical operator</td>
+<td>New logical expression type</td>
+<td>New <code>ILogicalRoot</code> implementation</td>
+</tr>
+<tr>
+<td>Add physical algorithm</td>
+<td>New implementation rule</td>
+<td>New <code>IPhysicalPlan</code> + engine</td>
+</tr>
+<tr>
+<td>Add rewrite rule</td>
+<td>Transformation rule</td>
+<td>Binder / optimizer pass</td>
+</tr>
+<tr>
+<td>Add cost function</td>
+<td>Cost method on physical expr</td>
+<td>Future: <code>IOptimizer</code></td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="dependency-inversion-principle">2.6 Dependency inversion principle</h2>
+<p>The <strong>Dependency Inversion Principle</strong> (DIP), part of SOLID, boils down to two rules:</p>
+<ol>
+<li>High-level modules should not depend on low-level modules. Both should depend on abstractions.</li>
+<li>Abstractions should not depend on details. Details should depend on abstractions.</li>
+</ol>
+<h3 id="without-dip-bad">Without DIP (bad)</h3>
+<pre><code class="language-text">RainDbEngine → MemoryTable (concrete)
+→ DefaultQueryExecutor (concrete)
+→ HybridBufferPool (concrete)
+</code></pre>
+<p><code>RainDbEngine</code> is welded to every implementation detail. Swapping <code>MemoryTable</code> for a mmap-backed table means editing the engine.</p>
+<h3 id="with-dip-good">With DIP (good)</h3>
+<pre><code class="language-text">RainDbEngine → ICatalog (abstraction)
+             → IQueryExecutor (abstraction)
+             → IBufferPool (abstraction)
+
+InMemoryCatalog : ICatalog
+DefaultQueryExecutor : IQueryExecutor
+HybridBufferPool : IBufferPool
+</code></pre>
+<p><code>RainDbEngine</code> depends only on interfaces in <code>RainDB.Abstractions</code>. Implementations live in <code>RainDB.Core</code> and <code>RainDB.Query</code>.</p>
+<h3 id="dip-in-database-systems">DIP in database systems</h3>
+<table class="table">
+<thead>
+<tr>
+<th>Abstraction</th>
+<th>Implementations</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>ICatalog</code></td>
+<td><code>InMemoryCatalog</code>, file-backed catalog</td>
+</tr>
+<tr>
+<td><code>IColumnarTableSource</code></td>
+<td><code>MemoryTable</code>, <code>EphemeralColumnarTableSource</code></td>
+</tr>
+<tr>
+<td><code>IQueryExecutor</code></td>
+<td><code>DefaultQueryExecutor</code>, custom distributed executor</td>
+</tr>
+<tr>
+<td><code>ISqlCompiler</code></td>
+<td><code>DefaultSqlCompiler</code>, strict subset variant</td>
+</tr>
+<tr>
+<td><code>IBufferPool</code></td>
+<td><code>HybridBufferPool</code>, arena allocator</td>
+</tr>
+</tbody>
+</table>
+<p>Tests inject fakes; production injects defaults. The engine code stays put.</p>
+<hr />
+<h2 id="composition-root-pattern">2.7 Composition root pattern</h2>
+<p>The <strong>composition root</strong> is the one place in an application where concrete types get instantiated and wired together. Everywhere else, dependencies arrive via constructors.</p>
+<h3 id="why-a-composition-root">Why a composition root?</h3>
+<table class="table">
+<thead>
+<tr>
+<th>Problem without it</th>
+<th>Solution</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Services create their own dependencies</td>
+<td>Root creates all objects and injects them</td>
+</tr>
+<tr>
+<td>Hidden dependency graphs</td>
+<td>Explicit constructor wiring</td>
+</tr>
+<tr>
+<td>Hard to test</td>
+<td>Tests create alternate roots</td>
+</tr>
+<tr>
+<td>Circular dependencies</td>
+<td>Root resolves order</td>
+</tr>
+</tbody>
+</table>
+<h3 id="composition-root-in-di-frameworks">Composition root in DI frameworks</h3>
+<pre><code class="language-text">// ASP.NET Core Program.cs
+builder.Services.AddSingleton&lt;ICatalog, InMemoryCatalog&gt;();
+builder.Services.AddSingleton&lt;IQueryExecutor, DefaultQueryExecutor&gt;();
+</code></pre>
+<h3 id="composition-root-in-embedded-libraries">Composition root in embedded libraries</h3>
+<p>Embedded engines like RainDB expose a <strong>factory method</strong> as the composition root:</p>
+<pre><code class="language-text">RainDbEngine.CreateDefault()
+→ new HybridBufferPool()
+→ new DefaultQueryExecutor()
+→ new DefaultSqlCompiler()
+→ new DefaultLinqCompiler()
+→ new RainDbEngine(catalog, buffers, executor, sql, linq, spill)
+</code></pre>
+<p>Application code calls <code>CreateDefault()</code> and gets a fully wired engine. Advanced users call the constructor directly to substitute collaborators.</p>
+<h3 id="rules-for-composition-roots">Rules for composition roots</h3>
+<ol>
+<li><strong>One per application</strong> (or per engine instance)</li>
+<li><strong>No business logic</strong> — only wiring</li>
+<li><strong>Creates the object graph</strong> — everything else receives dependencies via constructors</li>
+<li><strong>Lives at the outermost layer</strong> — in RainDB, <code>RainDB.Driver</code></li>
+</ol>
+<hr />
+<h2 id="extensibility-in-database-systems">2.8 Extensibility in database systems</h2>
+<p>Production databases live for years. New operators, storage formats, query languages, and execution strategies show up long after v1 ships. Architecture has to absorb that growth without a rewrite.</p>
+<h3 id="extension-dimensions">Extension dimensions</h3>
+<table class="table">
+<thead>
+<tr>
+<th>Dimension</th>
+<th>Question</th>
+<th>RainDB mechanism</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Storage</td>
+<td>New table format?</td>
+<td>Implement <code>IColumnarTableSource</code></td>
+</tr>
+<tr>
+<td>Execution</td>
+<td>New operator?</td>
+<td>New <code>IPhysicalPlan</code> + engine + executor dispatch</td>
+</tr>
+<tr>
+<td>Language</td>
+<td>New query front-end?</td>
+<td>New compiler implementing <code>ISqlCompiler</code> or <code>ILinqCompiler</code></td>
+</tr>
+<tr>
+<td>Memory</td>
+<td>Custom allocator?</td>
+<td>Implement <code>IBufferPool</code> / <code>IAlignedBufferPool</code></td>
+</tr>
+<tr>
+<td>Spill</td>
+<td>Disk overflow?</td>
+<td>Implement <code>ISpillWriter</code></td>
+</tr>
+<tr>
+<td>Persistence</td>
+<td>Cloud storage?</td>
+<td>Implement <code>IRainDbBatchPersistence</code></td>
+</tr>
+</tbody>
+</table>
+<h3 id="openclosed-principle">Open/Closed Principle</h3>
+<p>Software entities should be <strong>open for extension, closed for modification</strong>.</p>
+<ul>
+<li><strong>Open:</strong> Add <code>HashAggregatePhysicalPlan</code> without changing <code>ISqlCompiler</code></li>
+<li><strong>Closed:</strong> <code>DefaultQueryExecutor</code> dispatch switch grows, but <code>IQueryExecutor</code> interface stays stable</li>
+</ul>
+<h3 id="plugin-architectures-in-databases">Plugin architectures in databases</h3>
+<p>Full plugin systems (PostgreSQL extensions, SQLite VFS) load code dynamically. Embedded engines like RainDB use <strong>compile-time composition</strong> instead:</p>
+<ul>
+<li>Reference the projects you need</li>
+<li>Implement interfaces</li>
+<li>Pass implementations to the constructor</li>
+</ul>
+<p>You trade runtime plugin loading for type safety and zero reflection overhead.</p>
+<h3 id="extension-without-forking">Extension without forking</h3>
+<p>The ideal extension path:</p>
+<pre><code class="language-text">1. Define interface in Abstractions
+2. Implement in new project (or application code)
+3. Pass to RainDbEngine constructor
+4. No changes to Core or Query required (if interface is sufficient)
+</code></pre>
+<p>When the interface is insufficient (new physical operator), you extend Query (new plan + engine) and optionally provide a custom <code>IQueryExecutor</code> that delegates to <code>DefaultQueryExecutor</code> for known plans.</p>
+<hr />
+<h2 id="module-coupling-and-cohesion-metrics">2.9 Module coupling and cohesion metrics</h2>
+<p>Project boundaries should be guided by two metrics:</p>
+<h3 id="cohesion-within-a-module">Cohesion (within a module)</h3>
+<p><strong>High cohesion</strong> means everything inside a module belongs together:</p>
+<ul>
+<li><code>RainDB.Core.Columnar</code> — all chunk and batch types</li>
+<li><code>RainDB.Query.Vectorized</code> — all selection and projection kernels</li>
+</ul>
+<h3 id="coupling-between-modules">Coupling (between modules)</h3>
+<p><strong>Low coupling</strong> means modules talk through narrow interfaces:</p>
+<ul>
+<li><code>RainDB.Linq</code> references <code>RainDB.Query</code> (plans) but not <code>RainDB.Core</code> (storage)</li>
+<li><code>RainDB.Sql</code> references all three but <code>RainDB.Core</code> references none of them</li>
+</ul>
+<h3 id="dependency-rule-summary">Dependency rule summary</h3>
+<pre><code class="language-text">Allowed:    Query → Core → Abstractions
+            Sql → Query → Core → Abstractions
+            Driver → everything
+
+Forbidden:  Core → Query
+            Abstractions → Core
+            Sql → Linq (or vice versa)
+</code></pre>
+<p>Breaking these rules creates circular dependencies and makes independent testing impossible.</p>
+<hr />
+<h2 id="comparison-monolith-versus-modular-embedded-engine">2.10 Comparison: monolith versus modular embedded engine</h2>
+<table class="table">
+<thead>
+<tr>
+<th>Aspect</th>
+<th>Monolith</th>
+<th>Modular (RainDB)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Build time</td>
+<td>Single project, fast</td>
+<td>Six projects, incremental</td>
+</tr>
+<tr>
+<td>Test isolation</td>
+<td>Hard to test query without storage</td>
+<td>Mock <code>ICatalog</code> in query tests</td>
+</tr>
+<tr>
+<td>Package size</td>
+<td>Ship everything</td>
+<td>Could ship Core+Query without SQL</td>
+</tr>
+<tr>
+<td>Onboarding</td>
+<td>One large codebase</td>
+<td>Navigate by project responsibility</td>
+</tr>
+<tr>
+<td>Refactoring</td>
+<td>Cross-cutting changes easy</td>
+<td>Cross-project changes need discipline</td>
+</tr>
+</tbody>
+</table>
+<p>RainDB chose modularity because the engine is a <strong>library</strong> consumed by other applications. Clear boundaries help consumers see which APIs are stable contracts versus internal implementation.</p>
+<hr />
+<h2 id="exercises-theory">2.11 Exercises (theory)</h2>
+<h3 id="exercise-2.1-layer-assignment">Exercise 2.1 — Layer assignment</h3>
+<p>For each component, assign it to a DBMS layer: parser, catalog, storage engine, executor.</p>
+<ol>
+<li>B-tree index lookup</li>
+<li>SQL <code>GROUP BY</code> name resolution</li>
+<li>Page read from disk</li>
+<li>Hash join probe phase</li>
+<li>Column compression on ingest</li>
+</ol>
+<h3 id="exercise-2.2-logical-to-physical">Exercise 2.2 — Logical to physical</h3>
+<p>Write a logical plan and a physical plan for:</p>
+<pre><code class="language-sql">SELECT region, SUM(amount)
+FROM sales
+WHERE year = 2025
+GROUP BY region
+</code></pre>
+<p>List what changes between logical and physical representations.</p>
+<h3 id="exercise-2.3-dip-sketch">Exercise 2.3 — DIP sketch</h3>
+<p>Design interfaces for a hypothetical <code>IRowStore</code> and <code>IColumnStore</code>. How would a <code>IQueryExecutor</code> depend on them without knowing which is used?</p>
+<h3 id="exercise-2.4-cascades-rule">Exercise 2.4 — Cascades rule</h3>
+<p>Write one <strong>transformation rule</strong> (logical rewrite) and one <strong>implementation rule</strong> (logical → physical) for a <code>Sort</code> operator.</p>
+<h3 id="exercise-2.5-composition-root">Exercise 2.5 — Composition root</h3>
+<p>Identify the composition root in a web application using RainDB. What would you inject for integration tests versus production?</p>
+<h3 id="exercise-2.6-extension-scenario">Exercise 2.6 — Extension scenario</h3>
+<p>You need to add a <code>ParquetTableSource</code> that reads Apache Parquet files. Which projects do you modify? Which interfaces do you implement?</p>
+<hr />
+<h1 id="part-ii-raindb-implementation">Part II: RainDB Implementation</h1>
+<hr />
+<h2 id="solution-map">2.12 Solution map</h2>
+<pre><code>RainDB/
+├── src/
+│   ├── RainDB.Abstractions/   # Contracts (interfaces, logical IR, schema types)
+│   ├── RainDB.Core/           # Columnar storage, catalog, memory pools, persistence
+│   ├── RainDB.Query/          # Physical plans, vectorized execution engines
+│   ├── RainDB.Sql/            # SQL parse → logical → physical (strict subset)
+│   ├── RainDB.Linq/           # LINQ IQueryable → physical plans
+│   └── RainDB.Driver/         # Composition root, public RainDbEngine API
+├── tests/RainDB.Tests/
+└── samples/RainDB.AnalyticsDemo/
+</code></pre>
+<p>The <strong>Driver</strong> assembly is published as <code>RainDB</code> on NuGet (<code>AssemblyName</code> = <code>RainDB</code>). Application code typically references only <code>RainDB.Driver</code> (which transitively pulls the rest).</p>
+<hr />
+<h2 id="the-six-projects-in-depth">2.13 The six projects in depth</h2>
+<h3 id="raindb.abstractions">RainDB.Abstractions</h3>
+<p><strong>Purpose:</strong> Dependency Inversion Principle (DIP) boundaries. No implementations — only contracts shared across layers.</p>
+<p><strong>Key namespaces:</strong></p>
+<table class="table">
+<thead>
+<tr>
+<th>Namespace</th>
+<th>Contents</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>RainDB.Schema</code></td>
+<td><code>RainDbType</code>, <code>ColumnDef</code>, <code>TableSchema</code></td>
+</tr>
+<tr>
+<td><code>RainDB.Columnar</code></td>
+<td><code>IColumnChunk</code>, <code>IColumnarBatch</code></td>
+</tr>
+<tr>
+<td><code>RainDB.Catalog</code></td>
+<td><code>ICatalog</code>, <code>ITableSource</code>, <code>IColumnarTableSource</code>, <code>TableId</code></td>
+</tr>
+<tr>
+<td><code>RainDB.Logical</code></td>
+<td><code>LogicalPlan</code>, <code>LogicalTableScan</code>, <code>LogicalInnerJoin</code>, <code>ILogicalRoot</code></td>
+</tr>
+<tr>
+<td><code>RainDB.Execution</code></td>
+<td><code>IPhysicalPlan</code>, <code>IQueryExecutor</code>, <code>IExecutionContext</code>, <code>ISpillWriter</code></td>
+</tr>
+<tr>
+<td><code>RainDB.Sql</code></td>
+<td><code>ISqlCompiler</code></td>
+</tr>
+<tr>
+<td><code>RainDB.Linq</code></td>
+<td><code>ILinqCompiler</code></td>
+</tr>
+<tr>
+<td><code>RainDB.Memory</code></td>
+<td><code>IBufferPool</code>, <code>IAlignedBufferPool</code></td>
+</tr>
+</tbody>
+</table>
+<p><strong>Project file:</strong></p>
+<pre><code class="language-xml">&lt;!-- src/RainDB.Abstractions/RainDB.Abstractions.csproj --&gt;
+&lt;Project Sdk=&quot;Microsoft.NET.Sdk&quot;&gt;
+  &lt;PropertyGroup&gt;
+    &lt;RootNamespace&gt;RainDB&lt;/RootNamespace&gt;
+    &lt;AssemblyName&gt;RainDB.Abstractions&lt;/AssemblyName&gt;
+    &lt;Description&gt;RainDB contracts: storage, catalog, query execution (DIP boundaries).&lt;/Description&gt;
+  &lt;/PropertyGroup&gt;
+&lt;/Project&gt;
+</code></pre>
+<p>No project references — the root of the dependency graph.</p>
+<h3 id="raindb.core">RainDB.Core</h3>
+<p><strong>Purpose:</strong> Default implementations for storage, catalog, memory, and file persistence.</p>
+<p><strong>Key types:</strong></p>
+<ul>
+<li><code>ColumnarBatch</code>, <code>FixedWidthColumnChunk</code>, <code>Utf8ColumnChunk</code></li>
+<li><code>MemoryTable</code>, <code>InMemoryCatalog</code></li>
+<li><code>HybridBufferPool</code></li>
+<li><code>RainDbFileDatabase</code>, <code>RainDbBatchBinaryCodec</code></li>
+</ul>
+<p><strong>Project file:</strong></p>
+<pre><code class="language-xml">&lt;!-- src/RainDB.Core/RainDB.Core.csproj --&gt;
+&lt;Project Sdk=&quot;Microsoft.NET.Sdk&quot;&gt;
+  &lt;PropertyGroup&gt;
+    &lt;AllowUnsafeBlocks&gt;true&lt;/AllowUnsafeBlocks&gt;
+  &lt;/PropertyGroup&gt;
+  &lt;ItemGroup&gt;
+    &lt;ProjectReference Include=&quot;..\RainDB.Abstractions\RainDB.Abstractions.csproj&quot; /&gt;
+  &lt;/ItemGroup&gt;
+&lt;/Project&gt;
+</code></pre>
+<p><code>AllowUnsafeBlocks</code> enables pointer arithmetic in aligned buffer rent and mmap readers.</p>
+<h3 id="raindb.query">RainDB.Query</h3>
+<p><strong>Purpose:</strong> Physical operator plans and execution engines (Open/Closed Principle — add operators without changing compiler interfaces).</p>
+<p><strong>Key types:</strong></p>
+<ul>
+<li>Plans: <code>VectorizedScanPhysicalPlan</code>, <code>HashAggregatePhysicalPlan</code>, <code>JoinPhysicalPlan</code>, <code>SortTopNPhysicalPlan</code>, <code>JoinSortTopNPhysicalPlan</code>, <code>GroupedJoinPhysicalPlan</code></li>
+<li>Engines: <code>VectorizedScanEngine</code>, <code>HashAggregateEngine</code>, <code>JoinExecutionEngine</code>, <code>SortTopNEngine</code></li>
+<li>Runtime: <code>RainDbExecutionContext</code>, <code>DefaultQueryExecutor</code></li>
+<li>Vectorized kernels: <code>FixedWidthSelectionKernels</code>, <code>ProjectGather</code>, <code>PooledFixedWidthColumnChunk</code></li>
+</ul>
+<p><strong>Dependencies:</strong> Abstractions + Core (needs concrete chunk types for validation and materialization).</p>
+<h3 id="raindb.sql">RainDB.Sql</h3>
+<p><strong>Purpose:</strong> Interface Segregation — SQL compilation is separate from LINQ.</p>
+<p><strong>Pipeline:</strong> <code>string</code> → <code>SqlParser</code> → <code>LogicalPlan</code> → binders → <code>IPhysicalPlan</code></p>
+<p><strong>Dependencies:</strong> Abstractions, Core, Query (binders emit physical plans defined in Query).</p>
+<pre><code class="language-xml">&lt;!-- src/RainDB.Sql/RainDB.Sql.csproj --&gt;
+&lt;Description&gt;Strict SQL subset: parse → RainDB.Logical → VectorizedScanPhysicalPlan&lt;/Description&gt;
+</code></pre>
+<h3 id="raindb.linq">RainDB.Linq</h3>
+<p><strong>Purpose:</strong> Expression-tree-based compilation for <code>IQueryable</code> scenarios.</p>
+<p><strong>Dependencies:</strong> Abstractions + Query only (no direct Core reference — uses catalog interfaces).</p>
+<p>LINQ compilation reuses physical plans; it does not reimplement execution.</p>
+<h3 id="raindb.driver">RainDB.Driver</h3>
+<p><strong>Purpose:</strong> Single Responsibility — composition root and public API surface.</p>
+<pre><code class="language-xml">&lt;!-- src/RainDB.Driver/RainDB.Driver.csproj --&gt;
+&lt;ItemGroup&gt;
+  &lt;ProjectReference Include=&quot;..\RainDB.Abstractions\...&quot; /&gt;
+  &lt;ProjectReference Include=&quot;..\RainDB.Core\...&quot; /&gt;
+  &lt;ProjectReference Include=&quot;..\RainDB.Query\...&quot; /&gt;
+  &lt;ProjectReference Include=&quot;..\RainDB.Sql\...&quot; /&gt;
+  &lt;ProjectReference Include=&quot;..\RainDB.Linq\...&quot; /&gt;
+&lt;/ItemGroup&gt;
+</code></pre>
+<p>Applications call <code>RainDbEngine</code>; they do not construct <code>DefaultQueryExecutor</code> directly unless testing.</p>
+<hr />
+<h2 id="dependency-rules">2.14 Dependency rules</h2>
+<pre class="mermaid">graph TD
+    A[RainDB.Abstractions] 
+    C[RainDB.Core] --> A
+    Q[RainDB.Query] --> A
+    Q --> C
+    S[RainDB.Sql] --> A
+    S --> C
+    S --> Q
+    L[RainDB.Linq] --> A
+    L --> Q
+    D[RainDB.Driver] --> A
+    D --> C
+    D --> Q
+    D --> S
+    D --> L
+</pre>
+<h3 id="rules-enforce-in-code-reviews">Rules (enforce in code reviews)</h3>
+<ol>
+<li><strong>Abstractions never references implementation projects.</strong></li>
+<li><strong>Core never references Query, Sql, or Linq.</strong> Storage does not know about plans.</li>
+<li><strong>Query references Core</strong> for concrete batches/chunks but not Sql/Linq.</li>
+<li><strong>Sql and Linq are siblings</strong> — neither imports the other.</li>
+<li><strong>Driver is the only project</strong> that references all implementation assemblies.</li>
+<li><strong>Tests reference Driver</strong> (or all projects) for integration coverage.</li>
+</ol>
+<p>Violating rule 2 creates circular dependencies (Query → Core → Query). Violating rule 4 couples front-end languages.</p>
+<h3 id="why-this-layering-matters">Why this layering matters</h3>
+<ul>
+<li>Swap <code>DefaultQueryExecutor</code> for a distributed executor in tests</li>
+<li>Ship a minimal package with only Core + Query for embedded analytics without SQL</li>
+<li>Add a new front-end (e.g., JSON query DSL) by referencing Abstractions + Query</li>
+</ul>
+<hr />
+<h2 id="raindbengine-full-walkthrough">2.15 RainDbEngine — full walkthrough</h2>
+<p><code>RainDbEngine</code> is the composition root. Every collaborator is constructor-injected:</p>
+<pre><code class="language-csharp">// src/RainDB.Driver/RainDbEngine.cs
+public sealed class RainDbEngine
+{
+    public RainDbEngine(
+        ICatalog catalog,
+        IBufferPool bufferPool,
+        IAlignedBufferPool alignedBufferPool,
+        IQueryExecutor executor,
+        ISqlCompiler sqlCompiler,
+        ILinqCompiler linqCompiler,
+        ISpillWriter? spillWriter = null,
+        RainDbFileDatabase? fileDatabase = null)
+    {
+        Catalog = catalog;
+        BufferPool = bufferPool;
+        AlignedBufferPool = alignedBufferPool;
+        Executor = executor;
+        SqlCompiler = sqlCompiler;
+        LinqCompiler = linqCompiler;
+        SpillWriter = spillWriter ?? NoOpSpillWriter.Instance;
+        FileDatabase = fileDatabase;
+    }
+
+    public RainDbFileDatabase? FileDatabase { get; }
+    public ICatalog Catalog { get; }
+    public IBufferPool BufferPool { get; }
+    public IAlignedBufferPool AlignedBufferPool { get; }
+    public IQueryExecutor Executor { get; }
+    public ISqlCompiler SqlCompiler { get; }
+    public ILinqCompiler LinqCompiler { get; }
+    public ISpillWriter SpillWriter { get; }
+</code></pre>
+<h3 id="factory-methods">Factory methods</h3>
+<p><strong>In-memory default:</strong></p>
+<pre><code class="language-csharp">public static RainDbEngine CreateDefault() =&gt; CreateDefault(new InMemoryCatalog());
+
+public static RainDbEngine CreateDefault(ICatalog catalog)
+{
+    ArgumentNullException.ThrowIfNull(catalog);
+    var buffers = new HybridBufferPool();
+    var executor = new DefaultQueryExecutor();
+    var sql = new DefaultSqlCompiler();
+    var linq = new DefaultLinqCompiler();
+    return new RainDbEngine(catalog, buffers, buffers, executor, sql, linq, NoOpSpillWriter.Instance);
+}
+</code></pre>
+<p>Note: <code>HybridBufferPool</code> implements <strong>both</strong> <code>IBufferPool</code> and <code>IAlignedBufferPool</code> — passed twice intentionally.</p>
+<p><strong>Persistent:</strong></p>
+<pre><code class="language-csharp">public static RainDbEngine OpenPersistent(string directoryPath)
+{
+    ArgumentException.ThrowIfNullOrWhiteSpace(directoryPath);
+    var fileDb = RainDbFileDatabase.Open(directoryPath);
+    return CreateDefault(fileDb.Catalog, fileDb);
+}
+</code></pre>
+<p><code>FileDatabase</code> is held on the engine so the backing store is not garbage-collected while queries run.</p>
+<h3 id="execution-entry-points">Execution entry points</h3>
+<pre><code class="language-csharp">public IExecutionContext CreateSession(CancellationToken cancellationToken = default) =&gt;
+    new RainDbExecutionContext(Catalog, BufferPool, AlignedBufferPool, SpillWriter, cancellationToken);
+
+public async ValueTask&lt;IQueryResult&gt; ExecuteSqlAsync(string sql, CancellationToken cancellationToken = default)
+{
+    var ctx = CreateSession(cancellationToken);
+    var plan = await SqlCompiler.CompileAsync(sql, Catalog, cancellationToken).ConfigureAwait(false);
+    return await Executor.ExecuteAsync(plan, ctx).ConfigureAwait(false);
+}
+
+public async ValueTask&lt;IQueryResult&gt; ExecutePhysicalAsync(IPhysicalPlan plan, CancellationToken cancellationToken = default)
+{
+    ArgumentNullException.ThrowIfNull(plan);
+    var ctx = CreateSession(cancellationToken);
+    return await Executor.ExecuteAsync(plan, ctx).ConfigureAwait(false);
+}
+</code></pre>
+<p><strong>Design note:</strong> Each call creates a <strong>fresh session</strong> (<code>IExecutionContext</code>). Sessions are not pooled in Phase 1. Long-running apps should pass <code>CancellationToken</code> for cooperative cancel.</p>
+<hr />
+<h2 id="session-context-iexecutioncontext">2.16 Session context — IExecutionContext</h2>
+<p>Per-query resources live in <code>RainDbExecutionContext</code>:</p>
+<pre><code class="language-csharp">// src/RainDB.Query/Runtime/RainDbExecutionContext.cs
+public sealed class RainDbExecutionContext : IExecutionContext
+{
+    public RainDbExecutionContext(
+        ICatalog catalog,
+        IBufferPool bufferPool,
+        IAlignedBufferPool alignedBufferPool,
+        ISpillWriter spillWriter,
+        CancellationToken cancellationToken = default)
+    {
+        Catalog = catalog;
+        BufferPool = bufferPool;
+        AlignedBufferPool = alignedBufferPool;
+        SpillWriter = spillWriter ?? NoOpSpillWriter.Instance;
+        CancellationToken = cancellationToken;
+    }
+
+    public ICatalog Catalog { get; }
+    public IBufferPool BufferPool { get; }
+    public IAlignedBufferPool AlignedBufferPool { get; }
+    public ISpillWriter SpillWriter { get; }
+    public CancellationToken CancellationToken { get; }
+}
+</code></pre>
+<h3 id="what-each-property-provides">What each property provides</h3>
+<table class="table">
+<thead>
+<tr>
+<th>Property</th>
+<th>Used by</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>Catalog</code></td>
+<td>All engines</td>
+<td>Resolve <code>TableId</code> → <code>IColumnarTableSource</code></td>
+</tr>
+<tr>
+<td><code>BufferPool</code></td>
+<td>Materialization, joins</td>
+<td>Rent byte buffers for output chunks</td>
+</tr>
+<tr>
+<td><code>AlignedBufferPool</code></td>
+<td>SIMD kernels, gather</td>
+<td>32-byte aligned rents for AVX2</td>
+</tr>
+<tr>
+<td><code>SpillWriter</code></td>
+<td>Hash aggregate (optional)</td>
+<td>Spill partial hash maps when threshold exceeded</td>
+</tr>
+<tr>
+<td><code>CancellationToken</code></td>
+<td>Parallel loops, channels</td>
+<td>Abort long scans</td>
+</tr>
+</tbody>
+</table>
+<h3 id="extension-without-modifying-operators">Extension without modifying operators</h3>
+<p><code>IExecutionContext</code> is the Open/Closed extension point. Future fields might include query memory limits, tracing spans, and runtime statistics counters. Engines depend on the interface; new context fields do not require changing <code>VectorizedScanEngine</code> signatures.</p>
+<h3 id="custom-session-example">Custom session example</h3>
+<pre><code class="language-csharp">var engine = RainDbEngine.CreateDefault(catalog);
+var ctx = engine.CreateSession(cancellationToken: cts.Token);
+var plan = await engine.SqlCompiler.CompileAsync(sql, engine.Catalog);
+var result = await engine.Executor.ExecuteAsync(plan, ctx);
+</code></pre>
+<p>For tests, inject a custom <code>ISpillWriter</code> via a custom <code>RainDbEngine</code> constructor:</p>
+<pre><code class="language-csharp">var engine = new RainDbEngine(
+catalog, buffers, buffers, executor, sql, linq,
+spillWriter: myRecordingSpillWriter);
+</code></pre>
+<hr />
+<h2 id="executor-dispatch-all-physical-plan-types">2.17 Executor dispatch — all physical plan types</h2>
+<p><code>DefaultQueryExecutor</code> is a <strong>typed switch</strong> over <code>IPhysicalPlan</code> implementations:</p>
+<pre><code class="language-csharp">// src/RainDB.Query/Execution/DefaultQueryExecutor.cs
+public sealed class DefaultQueryExecutor : IQueryExecutor
+{
+    public async ValueTask&lt;IQueryResult&gt; ExecuteAsync(IPhysicalPlan plan, IExecutionContext context)
+    {
+        ArgumentNullException.ThrowIfNull(plan);
+        ArgumentNullException.ThrowIfNull(context);
+        ArgumentNullException.ThrowIfNull(context.AlignedBufferPool);
+        _ = plan.Explain();
+
+        if (plan is VectorizedScanPhysicalPlan vs) { /* VectorizedScanEngine */ }
+        if (plan is HashAggregatePhysicalPlan ha) { /* HashAggregateEngine */ }
+        if (plan is JoinPhysicalPlan join) { /* JoinExecutionEngine */ }
+        if (plan is SortTopNPhysicalPlan st) { /* SortTopNEngine table path */ }
+        if (plan is JoinSortTopNPhysicalPlan jst) { /* SortTopNEngine join path */ }
+        if (plan is GroupedJoinPhysicalPlan grouped) { /* Join then HashAggregate */ }
+
+        IQueryResult r = new EmptyQueryResult(0);
+        return r;
+    }
+}
+</code></pre>
+<h3 id="dispatch-table">Dispatch table</h3>
+<table class="table">
+<thead>
+<tr>
+<th>Physical plan</th>
+<th>Engine</th>
+<th>Catalog lookups</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>VectorizedScanPhysicalPlan</code></td>
+<td><code>VectorizedScanEngine</code></td>
+<td>One table by <code>TableId</code></td>
+</tr>
+<tr>
+<td><code>HashAggregatePhysicalPlan</code></td>
+<td><code>HashAggregateEngine</code></td>
+<td>One table</td>
+</tr>
+<tr>
+<td><code>JoinPhysicalPlan</code></td>
+<td><code>JoinExecutionEngine</code></td>
+<td>Probe + build tables</td>
+</tr>
+<tr>
+<td><code>SortTopNPhysicalPlan</code></td>
+<td><code>SortTopNEngine.ExecuteTableAsync</code></td>
+<td>One table</td>
+</tr>
+<tr>
+<td><code>JoinSortTopNPhysicalPlan</code></td>
+<td><code>SortTopNEngine.ExecuteJoinAsync</code></td>
+<td>Probe + build</td>
+</tr>
+<tr>
+<td><code>GroupedJoinPhysicalPlan</code></td>
+<td><code>JoinExecutionEngine</code> → <code>EphemeralColumnarTableSource</code> → <code>HashAggregateEngine</code></td>
+<td>Probe + build, then ephemeral</td>
+</tr>
+</tbody>
+</table>
+<h3 id="vectorizedscanphysicalplan">VectorizedScanPhysicalPlan</h3>
+<pre><code class="language-csharp">if (plan is VectorizedScanPhysicalPlan vs)
+{
+    if (!context.Catalog.TryGetTable(vs.TableId, out var ts) || ts is not IColumnarTableSource cols)
+        throw new InvalidOperationException($&quot;Columnar table {vs.TableId} was not found in the catalog.&quot;);
+    return await VectorizedScanEngine.ExecuteAsync(vs, cols, context).ConfigureAwait(false);
+}
+</code></pre>
+<p>Handles: projection, filter (AND conjunction), global aggregate (<code>AggregateSpec</code>).</p>
+<h3 id="hashaggregatephysicalplan">HashAggregatePhysicalPlan</h3>
+<p>Grouped <code>GROUP BY</code> with hash table. Supports spill hook when <code>SpillPartialEntryThreshold &gt; 0</code>.</p>
+<h3 id="joinphysicalplan">JoinPhysicalPlan</h3>
+<p>Inner equi-join with hash or sort-merge algorithm enum:</p>
+<pre><code class="language-csharp">// src/RainDB.Query/Plans/JoinPhysicalPlan.cs
+public enum PhysicalJoinAlgorithm { Hash, SortMerge }
+</code></pre>
+<p>Resolves probe (left) and build (right) tables separately.</p>
+<h3 id="groupedjoinphysicalplan-pipeline-composition">GroupedJoinPhysicalPlan — pipeline composition</h3>
+<p>The most intricate dispatch path:</p>
+<pre><code class="language-csharp">if (plan is GroupedJoinPhysicalPlan grouped)
+{
+    // ... resolve probe and build tables ...
+    var joinResult = await JoinExecutionEngine.ExecuteAsync(grouped.Join, probeCols2, buildCols2, context);
+    try
+    {
+        if (joinResult is not IColumnarQueryResult colResult)
+            throw new InvalidOperationException(&quot;Join execution must return a columnar result for grouped join.&quot;);
+        var ephemeral = new EphemeralColumnarTableSource(
+            grouped.Aggregate.TableId,
+            &quot;_grouped_join_&quot;,
+            grouped.Join.OutputSchema,
+            colResult.Batches);
+        return await HashAggregateEngine.ExecuteAsync(grouped.Aggregate, ephemeral, context);
+    }
+    finally
+    {
+        await joinResult.DisposeAsync().ConfigureAwait(false);
+    }
+}
+</code></pre>
+<p><strong>Pattern:</strong> Join materializes columnar batches → wrap as ephemeral table source → run hash aggregate. No SQL-visible temp table; purely internal IR.</p>
+<h3 id="unknown-plans">Unknown plans</h3>
+<p>Unrecognized <code>IPhysicalPlan</code> types fall through to <code>EmptyQueryResult(0)</code>. Custom executors should override <code>IQueryExecutor</code> entirely or extend <code>DefaultQueryExecutor</code> via fork (not virtual in current code).</p>
+<hr />
+<h2 id="logical-ir-versus-physical-ir">2.18 Logical IR versus physical IR</h2>
+<h3 id="logical-layer-what-not-how">Logical layer — what, not how</h3>
+<pre><code class="language-csharp">// src/RainDB.Abstractions/Logical/LogicalPlan.cs
+public sealed class LogicalPlan : ILogicalPlan
+{
+    public LogicalPlan(ILogicalRoot root) =&gt; Root = root;
+    public ILogicalRoot Root { get; }
+    public string Explain(string indent = &quot;&quot;) =&gt; Root.Explain(indent);
+}
+</code></pre>
+<p>Roots implement <code>ILogicalRoot</code>:</p>
+<pre><code class="language-csharp">public interface ILogicalRoot
+{
+    string Explain(string indent = &quot;&quot;);
+}
+</code></pre>
+<p><strong><code>LogicalTableScan</code></strong> — single-table queries:</p>
+<pre><code class="language-csharp">// src/RainDB.Abstractions/Logical/LogicalTableScan.cs (selected properties)
+public sealed class LogicalTableScan : ILogicalRoot
+{
+    public required string TableName { get; init; }
+    public IReadOnlyList&lt;LogicalColumnProjection&gt;? Projection { get; init; }
+    public IReadOnlyList&lt;LogicalColumnProjection&gt;? GroupByColumns { get; init; }
+    public IReadOnlyList&lt;LogicalSelectListItem&gt;? SelectList { get; init; }
+    public IReadOnlyList&lt;SimpleWhereClause&gt;? WhereConjuncts { get; init; }
+    public LogicalAggregate? Aggregate { get; init; }
+    public IReadOnlyList&lt;LogicalSortKey&gt;? OrderBy { get; init; }
+    public int? Limit { get; init; }
+}
+</code></pre>
+<p>Logical nodes use <strong>names</strong> (<code>TableName</code>, <code>ColumnName</code>) and <strong>SQL-shaped</strong> structures (<code>WhereConjuncts</code>, <code>GroupByColumns</code>).</p>
+<p><strong><code>LogicalInnerJoin</code></strong> — multi-table queries (see <code>LogicalJoinBinder</code>).</p>
+<h3 id="physical-layer-how-with-indices-and-algorithms">Physical layer — how, with indices and algorithms</h3>
+<pre><code class="language-csharp">// src/RainDB.Abstractions/Execution/IPhysicalPlan.cs
+public interface IPhysicalPlan
+{
+    string Explain(string indent = &quot;&quot;);
+}
+</code></pre>
+<p>Example — vectorized scan:</p>
+<pre><code class="language-csharp">// src/RainDB.Query/Plans/VectorizedScanPhysicalPlan.cs
+public sealed class VectorizedScanPhysicalPlan : IPhysicalPlan
+{
+    public TableId TableId { get; }
+    public int[] OutputColumnIndices { get; }
+    public ColumnCompareFilter[]? Filters { get; }
+    public AggregateSpec? Aggregate { get; }
+    public VectorizedScanExecutionOptions Options { get; }
+}
+</code></pre>
+<p>Physical nodes use:</p>
+<ul>
+<li><code>TableId</code> (stable catalog identifier)</li>
+<li>Column <strong>indices</strong> into schema</li>
+<li><code>ColumnCompareFilter</code> with <code>ImmediateBits</code> / <code>Utf8LiteralBytes</code></li>
+<li>Execution options (<code>MaxDegreeOfParallelism</code>, <code>UseAvx2DoubleSum</code>, <code>UseChannelScheduler</code>)</li>
+</ul>
+<h3 id="compilation-bridge">Compilation bridge</h3>
+<pre><code class="language-csharp">// src/RainDB.Sql/Compilation/DefaultSqlCompiler.cs
+public ValueTask&lt;IPhysicalPlan&gt; CompileAsync(string sql, ICatalog catalog, CancellationToken cancellationToken = default)
+{
+    var logical = SqlParser.Parse(sql);
+    IPhysicalPlan plan = logical.Root switch
+    {
+        LogicalTableScan s =&gt; LogicalTableScanBinder.BindAndLower(s, catalog, _defaultScanOptions),
+        LogicalInnerJoin j =&gt; LogicalJoinBinder.BindAndLower(j, catalog, PhysicalJoinAlgorithm.Hash, _defaultScanOptions),
+        _ =&gt; throw new InvalidOperationException($&quot;Unsupported logical root {logical.Root.GetType().Name}.&quot;),
+    };
+    return ValueTask.FromResult(plan);
+}
+</code></pre>
+<p><strong>Bind</strong> resolves names → <code>TableId</code>, column names → indices, literals → <code>ImmediateBits</code>.</p>
+<p><strong>Lower</strong> chooses physical algorithms (hash join, vectorized scan, hash aggregate).</p>
+<h3 id="ir-comparison-diagram">IR comparison diagram</h3>
+<pre class="mermaid">flowchart TB
+    subgraph logical ["Logical IR (Abstractions)"]
+        LTS["LogicalTableScan&lt;br/>table: order_lines&lt;br/>WHERE amount > 1000"]
+        LJ["LogicalInnerJoin&lt;br/>ON a.k = b.k"]
+    end
+    subgraph physical ["Physical IR (Query)"]
+        VS["VectorizedScanPhysicalPlan&lt;br/>tableId: guid&lt;br/>FILTER col2 Gt 1000"]
+        JP["JoinPhysicalPlan&lt;br/>probeKeys: [0]&lt;br/>buildKeys: [0]"]
+    end
+    LTS --> Binder["LogicalTableScanBinder"]
+    LJ --> JBinder["LogicalJoinBinder"]
+    Binder --> VS
+    JBinder --> JP
+</pre>
+<h3 id="why-two-irs">Why two IRs?</h3>
+<ol>
+<li><strong>SQL/LINQ front-ends differ</strong> but share physical execution.</li>
+<li><strong>Catalog binding</strong> happens once at compile time (table renames do not break cached plans if you recompile).</li>
+<li><strong>Testing</strong> can construct <code>VectorizedScanPhysicalPlan</code> directly without parsing SQL.</li>
+<li><strong>EXPLAIN</strong> output is readable at both levels (<code>logical.Explain()</code>, <code>plan.Explain()</code>).</li>
+</ol>
+<hr />
+<h2 id="extension-points">2.19 Extension points</h2>
+<table class="table">
+<thead>
+<tr>
+<th>Extension point</th>
+<th>Interface</th>
+<th>Default</th>
+<th>How to extend</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Catalog</td>
+<td><code>ICatalog</code></td>
+<td><code>InMemoryCatalog</code></td>
+<td>Implement table registration, schema lookup</td>
+</tr>
+<tr>
+<td>Table storage</td>
+<td><code>IColumnarTableSource</code></td>
+<td><code>MemoryTable</code></td>
+<td>Custom batch sources (mmap, remote)</td>
+</tr>
+<tr>
+<td>Query execution</td>
+<td><code>IQueryExecutor</code></td>
+<td><code>DefaultQueryExecutor</code></td>
+<td>Add plan types, distributed execution</td>
+</tr>
+<tr>
+<td>SQL compilation</td>
+<td><code>ISqlCompiler</code></td>
+<td><code>DefaultSqlCompiler</code></td>
+<td>Widen SQL subset, different parse</td>
+</tr>
+<tr>
+<td>LINQ compilation</td>
+<td><code>ILinqCompiler</code></td>
+<td><code>DefaultLinqCompiler</code></td>
+<td>Custom expression visitors</td>
+</tr>
+<tr>
+<td>Buffer allocation</td>
+<td><code>IBufferPool</code>, <code>IAlignedBufferPool</code></td>
+<td><code>HybridBufferPool</code></td>
+<td>Arena allocators, GPU buffers</td>
+</tr>
+<tr>
+<td>Spill</td>
+<td><code>ISpillWriter</code></td>
+<td><code>NoOpSpillWriter</code></td>
+<td>Disk spill for large aggregates</td>
+</tr>
+<tr>
+<td>Persistence</td>
+<td><code>IRainDbBatchPersistence</code></td>
+<td><code>RainDbFileDatabase</code></td>
+<td>Cloud object storage append</td>
+</tr>
+<tr>
+<td>Physical operators</td>
+<td>New <code>IPhysicalPlan</code> + engine</td>
+<td>—</td>
+<td>Register in custom <code>IQueryExecutor</code></td>
+</tr>
+</tbody>
+</table>
+<h3 id="injecting-a-custom-executor">Injecting a custom executor</h3>
+<pre><code class="language-csharp">public sealed class LoggingQueryExecutor : IQueryExecutor
+{
+    private readonly DefaultQueryExecutor _inner = new();
+
+    public async ValueTask&lt;IQueryResult&gt; ExecuteAsync(IPhysicalPlan plan, IExecutionContext context)
+    {
+        Console.WriteLine(plan.Explain());
+        return await _inner.ExecuteAsync(plan, context);
+    }
+}
+
+var engine = new RainDbEngine(
+    catalog, buffers, buffers,
+    new LoggingQueryExecutor(),
+    sql, linq);
+</code></pre>
+<h3 id="direct-physical-plan-execution-bypass-sql">Direct physical plan execution (bypass SQL)</h3>
+<pre><code class="language-csharp">var plan = new HashAggregatePhysicalPlan(
+    table.Id,
+    groupKeyColumnIndices: [0],
+    aggregates: [new AggregateSpec(1, AggregateKind.Sum)]);
+await using var result = await engine.ExecutePhysicalAsync(plan);
+</code></pre>
+<hr />
+<h2 id="building-the-solution-from-an-empty-repo">2.20 Building the solution from an empty repo</h2>
+<h3 id="step-1-create-solution-and-abstractions">Step 1: Create solution and Abstractions</h3>
+<pre><code class="language-bash">dotnet new sln -n RainDB
+dotnet new classlib -n RainDB.Abstractions -o src/RainDB.Abstractions
+dotnet sln add src/RainDB.Abstractions
+</code></pre>
+<p>Add schema and columnar interfaces (<code>RainDbType</code>, <code>IColumnChunk</code>, <code>IColumnarBatch</code>, <code>TableSchema</code>).</p>
+<h3 id="step-2-core">Step 2: Core</h3>
+<pre><code class="language-bash">dotnet new classlib -n RainDB.Core -o src/RainDB.Core
+dotnet add src/RainDB.Core reference src/RainDB.Abstractions
+</code></pre>
+<p>Implement <code>ColumnarBatch</code>, <code>FixedWidthColumnChunk</code>, <code>MemoryTable</code>, <code>InMemoryCatalog</code>, <code>HybridBufferPool</code>.</p>
+<p>Enable <code>AllowUnsafeBlocks</code> in csproj.</p>
+<h3 id="step-3-query">Step 3: Query</h3>
+<pre><code class="language-bash">dotnet new classlib -n RainDB.Query -o src/RainDB.Query
+dotnet add src/RainDB.Query reference src/RainDB.Abstractions src/RainDB.Core
+</code></pre>
+<p>Add <code>VectorizedScanPhysicalPlan</code>, <code>VectorizedScanEngine</code>, <code>DefaultQueryExecutor</code>, <code>RainDbExecutionContext</code>.</p>
+<h3 id="step-4-sql-and-linq-parallel">Step 4: Sql and Linq (parallel)</h3>
+<pre><code class="language-bash">dotnet new classlib -n RainDB.Sql -o src/RainDB.Sql
+dotnet add src/RainDB.Sql reference src/RainDB.Abstractions src/RainDB.Core src/RainDB.Query
+
+dotnet new classlib -n RainDB.Linq -o src/RainDB.Linq
+dotnet add src/RainDB.Linq reference src/RainDB.Abstractions src/RainDB.Query
+</code></pre>
+<h3 id="step-5-driver">Step 5: Driver</h3>
+<pre><code class="language-bash">dotnet new classlib -n RainDB.Driver -o src/RainDB.Driver
+# Set AssemblyName to RainDB for NuGet package identity
+dotnet add src/RainDB.Driver reference all five implementation projects
+</code></pre>
+<p>Implement <code>RainDbEngine</code> with <code>CreateDefault()</code>.</p>
+<h3 id="step-6-tests-and-sample">Step 6: Tests and sample</h3>
+<pre><code class="language-bash">dotnet new xunit -n RainDB.Tests -o tests/RainDB.Tests
+dotnet add tests/RainDB.Tests reference src/RainDB.Driver
+</code></pre>
+<p>Write <code>ColumnarAndCatalogTests</code> before complex SQL tests — validate storage invariants first.</p>
+<h3 id="recommended-build-order">Recommended build order</h3>
+<ol>
+<li>Abstractions (no deps)</li>
+<li>Core</li>
+<li>Query</li>
+<li>Sql, Linq (parallel)</li>
+<li>Driver</li>
+<li>Tests</li>
+</ol>
+<p><code>dotnet build</code> on the solution resolves this automatically.</p>
+<hr />
+<h2 id="end-to-end-architecture-diagram">2.21 End-to-end architecture diagram</h2>
+<pre class="mermaid">flowchart TB
+    App["Application / Demo / Tests"]
+    Engine["RainDbEngine&lt;br/>(Driver)"]
+    SQL["DefaultSqlCompiler&lt;br/>(Sql)"]
+    LINQ["DefaultLinqCompiler&lt;br/>(Linq)"]
+    Exec["DefaultQueryExecutor&lt;br/>(Query)"]
+    Cat["ICatalog&lt;br/>(Core: InMemoryCatalog)"]
+    Tables["MemoryTable / FileDb&lt;br/>(Core)"]
+    Scan["VectorizedScanEngine"]
+    Agg["HashAggregateEngine"]
+    Join["JoinExecutionEngine"]
+
+    App --> Engine
+    Engine --> SQL
+    Engine --> LINQ
+    Engine --> Exec
+    Engine --> Cat
+    SQL --> Exec
+    LINQ --> Exec
+    Exec --> Scan
+    Exec --> Agg
+    Exec --> Join
+    Scan --> Tables
+    Agg --> Tables
+    Join --> Tables
+    Cat --> Tables
+</pre>
+<hr />
+<h2 id="worked-example-registering-and-querying">2.22 Worked example: registering and querying</h2>
+<pre><code class="language-csharp">using RainDB;
+using RainDB.Core.Catalog;
+using RainDB.Core.Columnar;
+using RainDB.Core.Tables;
+using RainDB.Schema;
+
+var engine = RainDbEngine.CreateDefault();
+var schema = new TableSchema([
+    new ColumnDef(&quot;region&quot;, RainDbType.Utf8),
+    new ColumnDef(&quot;amount&quot;, RainDbType.Float64),
+]);
+
+var table = new MemoryTable(&quot;sales&quot;, schema);
+// ... append batches (Chapter 3) ...
+engine.Catalog.Register(table);
+
+await using var result = await engine.ExecuteSqlAsync(
+    &quot;SELECT SUM(amount) FROM sales&quot;);
+</code></pre>
+<p>Internal flow:</p>
+<ol>
+<li><code>ExecuteSqlAsync</code> → <code>CreateSession</code></li>
+<li><code>DefaultSqlCompiler.CompileAsync</code> → <code>LogicalTableScan</code> with <code>Aggregate</code></li>
+<li><code>LogicalTableScanBinder</code> → <code>VectorizedScanPhysicalPlan</code></li>
+<li><code>DefaultQueryExecutor</code> → <code>VectorizedScanEngine</code></li>
+<li>Returns <code>IAggregateQueryResult</code></li>
+</ol>
+<hr />
+<h2 id="pitfalls">2.23 Pitfalls</h2>
+<h3 id="pitfall-1-referencing-core-from-application-ui-layer">Pitfall 1: Referencing Core from application UI layer</h3>
+<p>Pull in <code>RainDB</code> (Driver) only. Direct Core references couple you to concrete types (<code>MemoryTable</code>) — acceptable for ingest, not for query-only layers.</p>
+<h3 id="pitfall-2-sharing-one-iexecutioncontext-across-concurrent-queries">Pitfall 2: Sharing one IExecutionContext across concurrent queries</h3>
+<p><code>CreateSession</code> per query. Buffer pools are shared; context state is per execution.</p>
+<h3 id="pitfall-3-forgetting-to-register-tables">Pitfall 3: Forgetting to register tables</h3>
+<p>Compilation binds names via catalog. <code>TryGetTable</code> failure surfaces as <code>InvalidOperationException</code> in executor.</p>
+<h3 id="pitfall-4-assuming-explainonlyphysicalplan-runs-in-default-executor">Pitfall 4: Assuming ExplainOnlyPhysicalPlan runs in default executor</h3>
+<p><code>ExplainOnlyPhysicalPlan</code> exists for diagnostics; default executor returns empty for unknown types.</p>
+<h3 id="pitfall-5-circular-project-references">Pitfall 5: Circular project references</h3>
+<p>If Core accidentally references Query, MSBuild fails. Keep a printed dependency diagram in CONTRIBUTING.</p>
+<h3 id="pitfall-6-linq-needing-core-types-at-compile-time">Pitfall 6: Linq needing Core types at compile time</h3>
+<p>LINQ provider emits plans referencing <code>TableId</code> from catalog at runtime — no Core table concrete types required in Linq project.</p>
+<hr />
+<h2 id="exercises-implementation">2.24 Exercises (implementation)</h2>
+<h3 id="exercise-2.7-dependency-audit">Exercise 2.7 — Dependency audit</h3>
+<p>List all types in <code>RainDB.Query</code> that reference <code>RainDB.Core.Columnar</code> namespaces. Why is this allowed?</p>
+<h3 id="exercise-2.8-custom-catalog">Exercise 2.8 — Custom catalog</h3>
+<p>Sketch an <code>ICatalog</code> implementation that resolves tables from a <code>Dictionary&lt;string, MemoryTable&gt;</code>. What methods are required?</p>
+<h3 id="exercise-2.9-new-physical-operator">Exercise 2.9 — New physical operator</h3>
+<p>Design a <code>LimitPhysicalPlan</code> (table scan + take N rows). Which existing engine would you extend? Where would dispatch go?</p>
+<h3 id="exercise-2.10-trace-groupedjoin">Exercise 2.10 — Trace GroupedJoin</h3>
+<p>Write the sequence of <code>await</code> calls for <code>GroupedJoinPhysicalPlan</code> including <code>DisposeAsync</code> on join result.</p>
+<hr />
+<h2 id="chapter-summary">2.25 Chapter summary</h2>
+<p>RainDB's six-project layout enforces clear boundaries: <strong>Abstractions</strong> define contracts, <strong>Core</strong> owns data, <strong>Query</strong> owns execution, <strong>Sql/Linq</strong> own front-ends, <strong>Driver</strong> wires the graph. <code>RainDbEngine</code> is the single entry point; <code>IExecutionContext</code> carries per-query resources; <code>DefaultQueryExecutor</code> dispatches every physical plan type to specialized engines. Logical IR preserves SQL semantics; physical IR enables vectorized performance.</p>
+<p>Chapter 3 descends into the columnar storage model — types, validation, and batch construction.</p>
+</div>
+          <footer class="doc-footer">
+            <p>Generated by <strong>hoihky</strong> with <strong>MDWeb</strong> and with assistance from <strong>AI</strong></p>
+
+          </footer>
+        </article>
+
+        
+                <aside class="toc" aria-label="On this page">
+                  <p class="toc-title">On this page</p>
+                  <ul>
+                    
+                        <li class="toc-h1">
+                          <a href="#chapter-2-architecture-and-modules">Chapter 2: Architecture and Modules</a>
+                        </li>
+                        
+                        <li class="toc-h1">
+                          <a href="#part-i-concepts-and-theory">Part I: Concepts and Theory</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#21-layered-system-design">2.1 Layered system design</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#the-classic-layered-architecture">The classic layered architecture</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#benefits-of-layering">Benefits of layering</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#costs-of-layering">Costs of layering</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#layering-versus-modularity">Layering versus modularity</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#22-separation-of-concerns-in-a-dbms">2.2 Separation of concerns in a DBMS</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#major-dbms-subsystems">Major DBMS subsystems</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#storage-engine">Storage engine</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#query-processor">Query processor</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#system-catalog">System catalog</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#why-separation-matters">Why separation matters</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#raindbs-mapping-preview">RainDB's mapping (preview)</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#23-logical-versus-physical-plan-separation">2.3 Logical versus physical plan separation</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#logical-plans">Logical plans</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#physical-plans">Physical plans</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#the-compilation-pipeline">The compilation pipeline</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#24-system-r-and-the-optimizer-architecture">2.4 System R and the optimizer architecture</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#system-r-contributions">System R contributions</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#system-r-optimizer-phases">System R optimizer phases</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#algebraic-rewrite-example">Algebraic rewrite example</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#25-the-cascades-framework">2.5 The Cascades framework</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#core-ideas">Core ideas</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#cascades-versus-raindb">Cascades versus RainDB</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#extensibility-pattern-from-cascades">Extensibility pattern from Cascades</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#26-dependency-inversion-principle">2.6 Dependency inversion principle</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#without-dip-bad">Without DIP (bad)</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#with-dip-good">With DIP (good)</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#dip-in-database-systems">DIP in database systems</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#27-composition-root-pattern">2.7 Composition root pattern</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#why-a-composition-root">Why a composition root?</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#composition-root-in-di-frameworks">Composition root in DI frameworks</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#composition-root-in-embedded-libraries">Composition root in embedded libraries</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#rules-for-composition-roots">Rules for composition roots</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#28-extensibility-in-database-systems">2.8 Extensibility in database systems</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#extension-dimensions">Extension dimensions</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#openclosed-principle">Open/Closed Principle</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#plugin-architectures-in-databases">Plugin architectures in databases</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#extension-without-forking">Extension without forking</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#29-module-coupling-and-cohesion-metrics">2.9 Module coupling and cohesion metrics</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#cohesion-within-a-module">Cohesion (within a module)</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#coupling-between-modules">Coupling (between modules)</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#dependency-rule-summary">Dependency rule summary</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#210-comparison-monolith-versus-modular-embedded-engine">2.10 Comparison: monolith versus modular embedded engine</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#211-exercises-theory">2.11 Exercises (theory)</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#exercise-21-layer-assignment">Exercise 2.1 — Layer assignment</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#exercise-22-logical-to-physical">Exercise 2.2 — Logical to physical</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#exercise-23-dip-sketch">Exercise 2.3 — DIP sketch</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#exercise-24-cascades-rule">Exercise 2.4 — Cascades rule</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#exercise-25-composition-root">Exercise 2.5 — Composition root</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#exercise-26-extension-scenario">Exercise 2.6 — Extension scenario</a>
+                        </li>
+                        
+                        <li class="toc-h1">
+                          <a href="#part-ii-raindb-implementation">Part II: RainDB Implementation</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#212-solution-map">2.12 Solution map</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#213-the-six-projects-in-depth">2.13 The six projects in depth</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#raindbabstractions">RainDB.Abstractions</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#raindbcore">RainDB.Core</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#raindbquery">RainDB.Query</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#raindbsql">RainDB.Sql</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#raindblinq">RainDB.Linq</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#raindbdriver">RainDB.Driver</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#214-dependency-rules">2.14 Dependency rules</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#rules-enforce-in-code-reviews">Rules (enforce in code reviews)</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#why-this-layering-matters">Why this layering matters</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#215-raindbengine-full-walkthrough">2.15 RainDbEngine — full walkthrough</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#factory-methods">Factory methods</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#execution-entry-points">Execution entry points</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#216-session-context-iexecutioncontext">2.16 Session context — IExecutionContext</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#what-each-property-provides">What each property provides</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#extension-without-modifying-operators">Extension without modifying operators</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#custom-session-example">Custom session example</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#217-executor-dispatch-all-physical-plan-types">2.17 Executor dispatch — all physical plan types</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#dispatch-table">Dispatch table</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#vectorizedscanphysicalplan">VectorizedScanPhysicalPlan</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#hashaggregatephysicalplan">HashAggregatePhysicalPlan</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#joinphysicalplan">JoinPhysicalPlan</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#groupedjoinphysicalplan-pipeline-composition">GroupedJoinPhysicalPlan — pipeline composition</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#unknown-plans">Unknown plans</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#218-logical-ir-versus-physical-ir">2.18 Logical IR versus physical IR</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#logical-layer-what-not-how">Logical layer — what, not how</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#physical-layer-how-with-indices-and-algorithms">Physical layer — how, with indices and algorithms</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#compilation-bridge">Compilation bridge</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#ir-comparison-diagram">IR comparison diagram</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#why-two-irs">Why two IRs?</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#219-extension-points">2.19 Extension points</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#injecting-a-custom-executor">Injecting a custom executor</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#direct-physical-plan-execution-bypass-sql">Direct physical plan execution (bypass SQL)</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#220-building-the-solution-from-an-empty-repo">2.20 Building the solution from an empty repo</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#step-1-create-solution-and-abstractions">Step 1: Create solution and Abstractions</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#step-2-core">Step 2: Core</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#step-3-query">Step 3: Query</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#step-4-sql-and-linq-parallel">Step 4: Sql and Linq (parallel)</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#step-5-driver">Step 5: Driver</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#step-6-tests-and-sample">Step 6: Tests and sample</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#recommended-build-order">Recommended build order</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#221-end-to-end-architecture-diagram">2.21 End-to-end architecture diagram</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#222-worked-example-registering-and-querying">2.22 Worked example: registering and querying</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#223-pitfalls">2.23 Pitfalls</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#pitfall-1-referencing-core-from-application-ui-layer">Pitfall 1: Referencing Core from application UI layer</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#pitfall-2-sharing-one-iexecutioncontext-across-concurrent-queries">Pitfall 2: Sharing one IExecutionContext across concurrent queries</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#pitfall-3-forgetting-to-register-tables">Pitfall 3: Forgetting to register tables</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#pitfall-4-assuming-explainonlyphysicalplan-runs-in-default-executor">Pitfall 4: Assuming ExplainOnlyPhysicalPlan runs in default executor</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#pitfall-5-circular-project-references">Pitfall 5: Circular project references</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#pitfall-6-linq-needing-core-types-at-compile-time">Pitfall 6: Linq needing Core types at compile time</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#224-exercises-implementation">2.24 Exercises (implementation)</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#exercise-27-dependency-audit">Exercise 2.7 — Dependency audit</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#exercise-28-custom-catalog">Exercise 2.8 — Custom catalog</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#exercise-29-new-physical-operator">Exercise 2.9 — New physical operator</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#exercise-210-trace-groupedjoin">Exercise 2.10 — Trace GroupedJoin</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#225-chapter-summary">2.25 Chapter summary</a>
+                        </li>
+                        
+                  </ul>
+                </aside>
+                
+      </main>
+    </div>
+  </div>
+  <script src="assets/vendor/mermaid.min.js"></script>
+  <script src="assets/vendor/highlight.min.js"></script>
+  <script src="assets/js/site.js"></script>
+</body>
+</html>

@@ -1,0 +1,1183 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Chapter 11: Joins · Building an OLAP Database Engine from Scratch with RainDB</title>
+  <meta name="description" content="Generated documentation site">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="assets/css/site.css">
+  <link rel="stylesheet" href="assets/vendor/atom-one-dark.min.css">
+</head>
+<body>
+  <div class="site">
+    <header class="topbar">
+      <button class="sidebar-toggle" id="sidebar-toggle" aria-label="Toggle navigation">☰</button>
+      <a href="index.html" class="brand">Building an OLAP Database Engine from Scratch with RainDB</a>
+      <div class="search-wrap">
+        <input type="search" id="search" placeholder="Search docs…" autocomplete="off">
+      </div>
+    </header>
+
+    <div class="layout">
+      <aside class="sidebar" id="sidebar">
+        <nav class="nav" aria-label="Documentation">
+          <ul class="nav-list">
+            
+                        <li class="nav-item depth-0">
+                          
+                            <a href="index.html" class="nav-link">Building an OLAP Database Engine from Scratch</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="01-olap-fundamentals.html" class="nav-link">Chapter 1: OLAP Fundamentals</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="02-architecture-and-modules.html" class="nav-link">Chapter 2: Architecture and Modules</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="03-columnar-storage-model.html" class="nav-link">Chapter 3: Columnar Storage Model</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="04-chunk-data-structures.html" class="nav-link">Chapter 4: Chunk Data Structures</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="05-catalog-and-tables.html" class="nav-link">Chapter 5: Catalog and Tables</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="06-buffer-management.html" class="nav-link">Chapter 6: Buffer Management</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="07-execution-pipeline.html" class="nav-link">Chapter 7: Execution Pipeline</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="08-vectorized-scan-filter-project.html" class="nav-link">Chapter 8: Vectorized Scan, Filter, and Project</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="09-global-aggregates.html" class="nav-link">Chapter 9: Global Aggregates</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="10-hash-aggregation.html" class="nav-link">Chapter 10: Hash Aggregation</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0 is-active">
+                          
+                            <a href="11-joins.html" class="nav-link">Chapter 11: Joins</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="12-sort-and-limit.html" class="nav-link">Chapter 12: Sort and Limit</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="13-sql-compilation.html" class="nav-link">Chapter 13: SQL Compilation</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="14-persistence.html" class="nav-link">Chapter 14: Persistence</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="15-future-extensions.html" class="nav-link">Chapter 15: Future Extensions</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="16-mmap-io.html" class="nav-link">Chapter 16: mmap I/O</a>
+                            
+                        </li>
+                        
+          </ul>
+        </nav>
+      </aside>
+
+      <main class="content">
+        <article class="doc">
+          <header class="doc-header">
+            <h1>Chapter 11: Joins</h1>
+          </header>
+          <div class="doc-body"><h1 id="chapter-11-joins">Chapter 11: Joins</h1>
+<p>RainDB implements <strong>inner equi-joins</strong> in <code>JoinExecutionEngine</code> — matching rows from a probe (left) table to rows in a build (right) table where composite join keys are equal. Two algorithms are available: <strong>hash join</strong> (build a hash table on the right, probe from the left) and <strong>sort-merge join</strong> (sort both sides by key, merge matching runs). String keys route through <code>CompositeJoinKey</code>; fixed-width keys use <code>GroupKey</code>.</p>
+<p>This chapter is split into two parts. <strong>Part I</strong> develops join theory: relational algebra ⋈, join types, algorithm complexity, build vs probe, equi-join vs theta join, join ordering, cardinality estimation, and semi/anti joins. <strong>Part II</strong> walks RainDB's <code>JoinPhysicalPlan</code>, both algorithms in both key modes, <code>RowRefMatch</code>, and <code>MaterializeMatches</code>.</p>
+<hr />
+<h1 id="part-i-theory">Part I: Theory</h1>
+<h2 id="relational-algebra-join">11.1 Relational algebra join (⋈)</h2>
+<p>Join combines two relations under a predicate. The general <strong>theta join</strong> filters a Cartesian product:</p>
+<pre><code>R ⋈_θ S = σ_θ (R × S)
+</code></pre>
+<p><code>×</code> pairs every row of R with every row of S; σ keeps pairs where θ holds.</p>
+<p>A <strong>natural join</strong> is the special case where θ equates every attribute that appears in both relations — rare in hand-written SQL, but the same underlying idea.</p>
+<h3 id="equi-join">Equi-join</h3>
+<p>When θ is a conjunction of equalities — <code>R.A = S.B AND R.C = S.D</code> — you have an <strong>equi-join</strong>. OLAP engines optimize this shape heavily because keys hash and partition cleanly.</p>
+<p>Inequality predicates (<code>R.A &gt; S.B</code>) are <strong>theta</strong> or <strong>range</strong> joins. They usually need nested loops, interval structures, or inequality-aware merge — not a simple hash table.</p>
+<p>RainDB Phase 2 implements <strong>inner equi-join</strong> only: one or more column pairs, matching types, equality predicate.</p>
+<h3 id="join-as-composition">Join as composition</h3>
+<p>Plans represent join as a binary node:</p>
+<pre><code>        ⋈
+    / \
+scan_R scan_S
+</code></pre>
+<p>Multi-table queries become <strong>join trees</strong> — left-deep, right-deep, or bushy. Tree shape drives intermediate row counts and memory (see §11.6).</p>
+<h2 id="join-types">11.2 Join types</h2>
+<p>SQL names several join flavors by what happens to non-matching rows:</p>
+<table class="table">
+<thead>
+<tr>
+<th>Join type</th>
+<th>Keeps unmatched left?</th>
+<th>Keeps unmatched right?</th>
+<th>SQL syntax</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Inner</strong></td>
+<td>no</td>
+<td>no</td>
+<td><code>INNER JOIN</code> / <code>JOIN</code></td>
+</tr>
+<tr>
+<td><strong>Left outer</strong></td>
+<td>yes (NULL-padded right)</td>
+<td>no</td>
+<td><code>LEFT JOIN</code></td>
+</tr>
+<tr>
+<td><strong>Right outer</strong></td>
+<td>no</td>
+<td>yes</td>
+<td><code>RIGHT JOIN</code></td>
+</tr>
+<tr>
+<td><strong>Full outer</strong></td>
+<td>yes</td>
+<td>yes</td>
+<td><code>FULL OUTER JOIN</code></td>
+</tr>
+<tr>
+<td><strong>Cross</strong></td>
+<td>all pairs</td>
+<td>all pairs</td>
+<td><code>CROSS JOIN</code></td>
+</tr>
+</tbody>
+</table>
+<h3 id="inner-join-semantics">Inner join semantics</h3>
+<p>Emit <code>(r, s)</code> only when the predicate evaluates to <strong>TRUE</strong>. Unmatched probe rows disappear.</p>
+<h3 id="outer-join-semantics">Outer join semantics</h3>
+<p>Preserve rows from one side even without a partner. Missing columns from the other side become <strong>NULL</strong>. Implementation must enumerate non-matches and widen the output schema.</p>
+<p>RainDB ships <strong>inner join</strong> today — no outer variants.</p>
+<h3 id="cross-join">Cross join</h3>
+<p>No predicate: every left row pairs with every right row — <code>|R| × |S|</code> output. Expensive and rare in hand-written SQL; optimizers sometimes introduce it during decorrelation.</p>
+<h2 id="nested-loop-hash-join-sort-merge-complexity">11.3 Nested-loop, hash join, sort-merge complexity</h2>
+<p>Three algorithms cover most join workloads.</p>
+<h3 id="nested-loop-join-nlj">Nested-loop join (NLJ)</h3>
+<pre><code>for each row r in R:
+for each row s in S:
+    if predicate(r, s): emit (r, s)
+</code></pre>
+<table class="table">
+<thead>
+<tr>
+<th>Metric</th>
+<th>Value</th>
+<th></th>
+<th></th>
+<th></th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Time</td>
+<td>O(</td>
+<td>R</td>
+<td>×</td>
+<td>S</td>
+<td>) worst case</td>
+</tr>
+<tr>
+<td>Space</td>
+<td>O(1) beyond inputs</td>
+<td></td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+<tr>
+<td>Best for</td>
+<td>tiny inner relation, index on inner</td>
+<td></td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<p><strong>Block nested-loop</strong> reads S in cache-sized chunks. <strong>Index nested-loop</strong> probes a B-tree per outer row — O(|R| × log|S|).</p>
+<p>RainDB does not use NLJ as a primary equi-join path; hash and sort-merge handle the supported cases.</p>
+<h3 id="hash-join-hj">Hash join (HJ)</h3>
+<p><strong>Build:</strong> load the (typically smaller) relation into a hash table keyed by join columns.</p>
+<p><strong>Probe:</strong> walk the other relation, hash each key, look up matches, emit pairs.</p>
+<table class="table">
+<thead>
+<tr>
+<th>Metric</th>
+<th>Value</th>
+<th></th>
+<th></th>
+<th></th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Time</td>
+<td>O(</td>
+<td>R</td>
+<td>+</td>
+<td>S</td>
+<td>) average</td>
+</tr>
+<tr>
+<td>Space</td>
+<td>O(</td>
+<td>S</td>
+<td>) for hash table</td>
+<td></td>
+<td></td>
+</tr>
+<tr>
+<td>Requirement</td>
+<td>equi-join predicate</td>
+<td></td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<p>When the build side exceeds RAM, <strong>Grace hash join</strong> partitions both inputs — same family as hash-aggregation spill.</p>
+<p>RainDB implements in-memory hash join in <code>ComputeHashMatchesFixed</code> / <code>ComputeHashMatchesUtf8</code> with <code>Dictionary&lt;Key, List&lt;RowRef&gt;&gt;</code>.</p>
+<h3 id="sort-merge-join-smj">Sort-merge join (SMJ)</h3>
+<ol>
+<li>Sort both inputs on join keys.</li>
+<li>Walk two cursors in merge fashion.</li>
+<li>On equal keys, cross-product the <strong>runs</strong> of duplicates.</li>
+</ol>
+<table class="table">
+<thead>
+<tr>
+<th>Metric</th>
+<th>Value</th>
+<th></th>
+<th></th>
+<th></th>
+<th></th>
+<th></th>
+<th></th>
+<th></th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Time</td>
+<td>O(</td>
+<td>R</td>
+<td>log</td>
+<td>R</td>
+<td>+</td>
+<td>S</td>
+<td>log</td>
+<td>S</td>
+<td>)</td>
+</tr>
+<tr>
+<td>Space</td>
+<td>O(</td>
+<td>R</td>
+<td>+</td>
+<td>S</td>
+<td>) for sorted entry lists</td>
+<td></td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+<tr>
+<td>Best for</td>
+<td>pre-sorted inputs, large sequential scans</td>
+<td></td>
+<td></td>
+<td></td>
+<td></td>
+<td></td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<p>RainDB's <code>ComputeSortMergeMatchesFixed</code> flattens, sorts in memory, then merges.</p>
+<h3 id="algorithm-selection-summary">Algorithm selection summary</h3>
+<table class="table">
+<thead>
+<tr>
+<th>Condition</th>
+<th>Typical choice</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>One side small, fits in memory</td>
+<td>Hash join</td>
+</tr>
+<tr>
+<td>Both sides large, sorted / clustered on key</td>
+<td>Sort-merge</td>
+</tr>
+<tr>
+<td>Non-equi predicate</td>
+<td>Nested-loop or specialized</td>
+</tr>
+<tr>
+<td>Streaming / online</td>
+<td>Nested-loop or merge on sorted streams</td>
+</tr>
+</tbody>
+</table>
+<p>RainDB picks the algorithm at <strong>compile time</strong> via <code>PhysicalJoinAlgorithm</code> — no runtime cost model yet.</p>
+<h2 id="build-vs-probe-side">11.4 Build vs probe side</h2>
+<p>Classic hash-join vocabulary:</p>
+<table class="table">
+<thead>
+<tr>
+<th>Side</th>
+<th>Role</th>
+<th>Typical relation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Build</strong> (right)</td>
+<td>Construct hash table</td>
+<td>Smaller relation</td>
+</tr>
+<tr>
+<td><strong>Probe</strong> (left)</td>
+<td>Lookup each row</td>
+<td>Larger relation</td>
+</tr>
+</tbody>
+</table>
+<p>Put the smaller input on the build side to shrink table size and build time.</p>
+<h3 id="probe-centric-view">Probe-centric view</h3>
+<p>Some papers call the driving relation &quot;probe&quot; regardless of size. RainDB's plan names are fixed:</p>
+<ul>
+<li><code>ProbeTableId</code> — left table</li>
+<li><code>BuildTableId</code> — right table</li>
+</ul>
+<p>The binder assigns roles today. Swapping when left ≫ right is an optimizer job (Chapter 13).</p>
+<h3 id="many-to-many-matches">Many-to-many matches</h3>
+<p>Duplicate keys on both sides mean one probe row can match many build rows (and vice versa). Hash join stores <code>List&lt;RowRef&gt;</code> per key; sort-merge expands equal-key <strong>runs</strong> with nested loops.</p>
+<h2 id="equi-join-vs-theta-join">11.5 Equi-join vs theta join</h2>
+<table class="table">
+<thead>
+<tr>
+<th>Type</th>
+<th>Predicate form</th>
+<th>RainDB support</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Equi-join</td>
+<td><code>a = b AND c = d</code></td>
+<td>✓</td>
+</tr>
+<tr>
+<td>Theta join</td>
+<td><code>a &gt; b</code>, <code>a BETWEEN b AND c</code></td>
+<td>✗</td>
+</tr>
+<tr>
+<td>Cross join</td>
+<td>none</td>
+<td>✗ (explicit)</td>
+</tr>
+<tr>
+<td>Semi-join</td>
+<td>exists subquery pattern</td>
+<td>✗</td>
+</tr>
+</tbody>
+</table>
+<p>Equi-join keys hash. Theta predicates generally need all-pairs comparison or specialized structures.</p>
+<h3 id="multi-column-equi-join">Multi-column equi-join</h3>
+<p><code>(a₁, a₂) = (b₁, b₂)</code> is one tuple equality, not two independent filters. Engines pack components into a single hashable key — RainDB uses <code>GroupKey</code> and <code>CompositeJoinKey</code>.</p>
+<h2 id="join-ordering-problem">11.6 Join ordering problem</h2>
+<p>Joining <code>k</code> tables means choosing a binary tree over <code>k</code> leaves. Bushy trees explode combinatorially. <strong>Which edges to evaluate first</strong> and <strong>which algorithm per edge</strong> dominate optimizer runtime and plan quality.</p>
+<h3 id="left-deep-vs-bushy-trees">Left-deep vs bushy trees</h3>
+<pre><code>Left-deep:        Bushy:
+    ⋈                 ⋈
+   /  \               / \
+  ⋈   T3            ⋈   ⋈
+ / \               / \ / \
+T1 T2             T1 T2 T3 T4
+</code></pre>
+<p>System R–style optimizers often prefer left-deep plans: one growing intermediate on the left spine.</p>
+<h3 id="cost-factors">Cost factors</h3>
+<ul>
+<li>Cardinality of intermediate results</li>
+<li>Memory for hash tables</li>
+<li>Existing sort orders on keys</li>
+<li>Network shuffle cost in distributed engines</li>
+</ul>
+<p>RainDB's SQL subset emits simple join plans without dynamic-programming reordering.</p>
+<h2 id="cardinality-estimation-intro">11.7 Cardinality estimation intro</h2>
+<p>Optimizers need row-count estimates at every node to rank plans.</p>
+<h3 id="basic-statistics">Basic statistics</h3>
+<ul>
+<li><code>n_R</code> — rows in R</li>
+<li><code>n_S</code> — rows in S</li>
+<li><code>d_A</code> — distinct values of join column A</li>
+</ul>
+<h3 id="simple-equi-join-estimate-independence-assumption">Simple equi-join estimate (independence assumption)</h3>
+<pre><code>|R ⋈ S| ≈ |R| × |S| / max(d_A, d_S)
+</code></pre>
+<p>Uniform keys, independent distributions — often wrong under skew.</p>
+<h3 id="selectivity">Selectivity</h3>
+<p>Filters scale counts: <code>|σ_p(R)| ≈ sel(p) × |R|</code>.</p>
+<p>RainDB Phase 1 knows exact in-memory table sizes for embedded workloads — no histogram CE yet. Zone maps and HyperLogLog sketches are plausible next steps.</p>
+<h3 id="skew-and-bad-estimates">Skew and bad estimates</h3>
+<p>A few hot keys with massive fanout blow up hash buckets. <strong>Adaptive join</strong> re-partitions at runtime when estimates lie.</p>
+<h2 id="semi-join-and-anti-join-concepts">11.8 Semi-join and anti-join concepts</h2>
+<p>Not every join widens the schema.</p>
+<h3 id="semi-join-exists">Semi-join (EXISTS)</h3>
+<pre><code>R ⋉ S = { r ∈ R | ∃ s ∈ S : θ(r, s) }
+</code></pre>
+<p>Output keeps <strong>R's columns</strong> only. At most one row per <code>r</code> even if many <code>s</code> match — the pattern behind <code>EXISTS (SELECT 1 FROM S WHERE ...)</code>.</p>
+<h3 id="anti-join-not-exists">Anti-join (NOT EXISTS)</h3>
+<pre><code>R ▷ S = { r ∈ R | ¬∃ s ∈ S : θ(r, s) }
+</code></pre>
+<p>Rows of R with no partner in S — <code>NOT EXISTS</code> semantics.</p>
+<h3 id="implementation">Implementation</h3>
+<p>Common recipes:</p>
+<ul>
+<li><strong>Hash semi-join</strong> — stop at first hit in the build table</li>
+<li><strong>Mark join</strong> — hash join plus duplicate suppression on the probe side</li>
+</ul>
+<p>RainDB does not expose semi/anti joins in SQL. <code>INNER JOIN</code> materializes every matching pair; duplicate keys on both sides duplicate output rows.</p>
+<h3 id="null-in-join-keys">NULL in join keys</h3>
+<p><code>NULL = NULL</code> is <strong>UNKNOWN</strong>, not TRUE. Any NULL component in the join key disqualifies the row:</p>
+<pre><code>(1, NULL) ⋈ (1, NULL) → no row
+</code></pre>
+<p>RainDB skips rows with <code>key.NullMask != 0</code> on both build and probe. Contrast with <code>GROUP BY</code>, where NULL is a legitimate group value.</p>
+<hr />
+<h1 id="part-ii-raindb-implementation">Part II: RainDB Implementation</h1>
+<h2 id="joinphysicalplan">11.9 JoinPhysicalPlan</h2>
+<pre><code class="language-csharp">// src/RainDB.Query/Plans/JoinPhysicalPlan.cs
+public enum PhysicalJoinAlgorithm
+{
+    Hash,
+    SortMerge,
+}
+
+public sealed class JoinPhysicalPlan : IPhysicalPlan
+{
+    public PhysicalJoinAlgorithm Algorithm { get; }
+    public TableId ProbeTableId { get; }      // left
+    public TableId BuildTableId { get; }       // right
+    public int[] ProbeKeyColumnIndices { get; }
+    public int[] BuildKeyColumnIndices { get; }
+    public TableSchema OutputSchema { get; }
+    public JoinOutputColumnRef[]? OutputColumnOrder { get; }
+    public ColumnCompareFilter[]? ProbeSideFilters { get; }
+    public ColumnCompareFilter[]? BuildSideFilters { get; }
+}
+</code></pre>
+<p><code>JoinOutputColumnRef</code> selects output columns:</p>
+<pre><code class="language-csharp">public readonly record struct JoinOutputColumnRef(bool IsProbe, int ColumnIndex);
+</code></pre>
+<p><code>Explain()</code> renders <code>HashJoin</code> or <code>SortMergeJoin</code> with key indices and optional filters.</p>
+<p>Construction requires matching key arity: <code>probeKeyColumnIndices.Length == buildKeyColumnIndices.Length &gt; 0</code>.</p>
+<h2 id="engine-entry-point">11.10 Engine entry point</h2>
+<pre><code class="language-csharp">// src/RainDB.Query/Execution/JoinExecutionEngine.cs
+public static ValueTask&lt;IQueryResult&gt; ExecuteAsync(
+    JoinPhysicalPlan plan,
+    IColumnarTableSource probeTable,
+    IColumnarTableSource buildTable,
+    IExecutionContext context)
+{
+    Validate(plan, probeTable, buildTable);
+
+    var utf8JoinKeys = JoinKeysIncludeUtf8(probeSchema, plan.ProbeKeyColumnIndices);
+    List&lt;RowRefMatch&gt; matches = plan.Algorithm switch
+    {
+        PhysicalJoinAlgorithm.Hash =&gt; utf8JoinKeys
+            ? ComputeHashMatchesUtf8(plan, probeBatches, buildBatches, probeSchema, buildSchema, ct)
+            : ComputeHashMatchesFixed(plan, probeBatches, buildBatches, ct),
+        PhysicalJoinAlgorithm.SortMerge =&gt; utf8JoinKeys
+            ? ComputeSortMergeMatchesUtf8(plan, probeBatches, buildBatches, probeSchema, buildSchema, ct)
+            : ComputeSortMergeMatchesFixed(plan, probeBatches, buildBatches, probeSchema, ct),
+        _ =&gt; throw new ArgumentOutOfRangeException(nameof(plan)),
+    };
+
+    var batch = MaterializeMatches(plan, probeBatches, buildBatches, probeSchema, buildSchema, matches);
+    return new ValueTask&lt;IQueryResult&gt;(new ColumnarMaterializedQueryResult([batch]));
+}
+</code></pre>
+<p>Synchronous after match computation — all matches in <code>List&lt;RowRefMatch&gt;</code>, then materialize. No streaming join output.</p>
+<p><code>DefaultQueryExecutor</code> resolves probe and build tables from catalog by <code>TableId</code>.</p>
+<h2 id="internal-row-references">11.11 Internal row references</h2>
+<pre><code class="language-csharp">private readonly record struct RowRef(int BatchIdx, int RowIdx);
+
+private readonly record struct RowRefMatch(
+    int LeftBatchIdx, int LeftRow,
+    int RightBatchIdx, int RightRow);
+</code></pre>
+<table class="table">
+<thead>
+<tr>
+<th>Type</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>RowRef</code></td>
+<td>One row in one batch (hash table values)</td>
+</tr>
+<tr>
+<td><code>RowRefMatch</code></td>
+<td>One output row: paired left and right locations</td>
+</tr>
+</tbody>
+</table>
+<p>Materialization walks <code>RowRefMatch</code> once per output column.</p>
+<h2 id="validation">11.12 Validation</h2>
+<pre><code class="language-csharp">private static void Validate(JoinPhysicalPlan plan, IColumnarTableSource probe, IColumnarTableSource build)
+{
+    if (plan.ProbeTableId != probe.Id || plan.BuildTableId != build.Id)
+        throw new ArgumentException(&quot;Physical join table ids do not match supplied tables.&quot;);
+
+    // key indices in range
+    // filter indices in range per side
+    // output schema non-empty
+    // output column order length matches schema
+
+    for (var i = 0; i &lt; plan.ProbeKeyColumnIndices.Length; i++)
+    {
+        var pt = probe.Schema.Columns[plan.ProbeKeyColumnIndices[i]].Type;
+        var bt = build.Schema.Columns[plan.BuildKeyColumnIndices[i]].Type;
+        if (pt != bt)
+            throw new ArgumentException($&quot;Join key part {i} type mismatch {pt} vs {bt}.&quot;);
+        if (pt != RainDbType.Utf8 &amp;&amp; !ColumnTypeSizes.IsFixedWidth(pt))
+            throw new ArgumentException($&quot;Join key column type {pt} is not supported for equi-join.&quot;);
+    }
+}
+</code></pre>
+<p>Rules:</p>
+<ol>
+<li>Table IDs match resolved catalog tables</li>
+<li>Key types match pairwise</li>
+<li>Supported types: fixed-width primitives + <code>Utf8</code></li>
+</ol>
+<h2 id="null-key-semantics">11.13 NULL key semantics</h2>
+<p>Both algorithms skip rows where any join key component is NULL:</p>
+<pre><code class="language-csharp">var key = FixedWidthGroupKeyBuilder.BuildKey(batch, row, plan.BuildKeyColumnIndices, scratch);
+if (key.NullMask != 0)
+    continue;
+</code></pre>
+<p>SQL three-valued logic: null keys never match. Differs from <code>GROUP BY</code> where NULL is a valid group key.</p>
+<h2 id="hash-join-fixed-width-keys">11.14 Hash join: fixed-width keys</h2>
+<h3 id="build-phase">Build phase</h3>
+<pre><code class="language-csharp">private static List&lt;RowRefMatch&gt; ComputeHashMatchesFixed(
+    JoinPhysicalPlan plan,
+    IReadOnlyList&lt;IColumnarBatch&gt; probeBatches,
+    IReadOnlyList&lt;IColumnarBatch&gt; buildBatches,
+    CancellationToken ct)
+{
+    var dict = new Dictionary&lt;GroupKey, List&lt;RowRef&gt;&gt;();
+    var scratch = new ulong[plan.BuildKeyColumnIndices.Length];
+    for (var bi = 0; bi &lt; buildBatches.Count; bi++)
+    {
+        ct.ThrowIfCancellationRequested();
+        var batch = buildBatches[bi];
+        for (var row = 0; row &lt; batch.RowCount; row++)
+        {
+            if (!RowPassesAll(batch, plan.BuildSideFilters, row))
+                continue;
+            var key = FixedWidthGroupKeyBuilder.BuildKey(batch, row, plan.BuildKeyColumnIndices, scratch);
+            if (key.NullMask != 0)
+                continue;
+            if (!dict.TryGetValue(key, out var list))
+            {
+                list = [];
+                dict[key] = list;
+            }
+            list.Add(new RowRef(bi, row));
+        }
+    }
+    // probe phase ...
+}
+</code></pre>
+<h3 id="probe-phase">Probe phase</h3>
+<pre><code class="language-csharp">var matches = new List&lt;RowRefMatch&gt;();
+for (var bi = 0; bi &lt; probeBatches.Count; bi++)
+{
+    var batch = probeBatches[bi];
+    for (var row = 0; row &lt; batch.RowCount; row++)
+    {
+        if (!RowPassesAll(batch, plan.ProbeSideFilters, row))
+            continue;
+        var key = FixedWidthGroupKeyBuilder.BuildKey(batch, row, plan.ProbeKeyColumnIndices, scratch);
+        if (key.NullMask != 0)
+            continue;
+        if (!dict.TryGetValue(key, out var list))
+            continue;
+        foreach (var br in list)
+            matches.Add(new RowRefMatch(bi, row, br.BatchIdx, br.RowIdx));
+    }
+}
+return matches;
+</code></pre>
+<h3 id="rowpassesall">RowPassesAll</h3>
+<pre><code class="language-csharp">private static bool RowPassesAll(IColumnarBatch batch, ColumnCompareFilter[]? filters, int row)
+{
+    if (filters is null || filters.Length == 0)
+        return true;
+    foreach (var f in filters)
+    {
+        if (!SelectionEvaluator.RowMatchesFilter(batch.Columns[f.ColumnIndex], f, row))
+            return false;
+    }
+    return true;
+}
+</code></pre>
+<p>Side filters are conjunctive (<code>AND</code>).</p>
+<h2 id="hash-join-utf-8-keys">11.15 Hash join: UTF-8 keys</h2>
+<p><code>ComputeHashMatchesUtf8</code> uses <code>Dictionary&lt;CompositeJoinKey, List&lt;RowRef&gt;&gt;</code> and <code>CompositeJoinKeyBuilder.Build(schema, batch, row, keyIndices)</code>.</p>
+<p>Schema required to distinguish numeric vs UTF-8 components. Equality via <code>CompositeJoinKey.Equals</code> — byte <code>SequenceEqual</code> on payloads.</p>
+<p>Memory: each key owns copied UTF-8 bytes — significant for high-cardinality string join keys on large build tables.</p>
+<h2 id="sort-merge-join-fixed-width-keys">11.16 Sort-merge join: fixed-width keys</h2>
+<pre><code class="language-csharp">private static List&lt;RowRefMatch&gt; ComputeSortMergeMatchesFixed(
+    JoinPhysicalPlan plan,
+    IReadOnlyList&lt;IColumnarBatch&gt; probeBatches,
+    IReadOnlyList&lt;IColumnarBatch&gt; buildBatches,
+    TableSchema probeSchema,
+    CancellationToken ct)
+{
+    var comparer = new GroupKeyComparer(probeSchema, plan.ProbeKeyColumnIndices);
+    var left = FlattenNonNullFixedKeys(probeBatches, plan.ProbeKeyColumnIndices, plan.ProbeSideFilters, ct);
+    var right = FlattenNonNullFixedKeys(buildBatches, plan.BuildKeyColumnIndices, plan.BuildSideFilters, ct);
+
+    left.Sort((a, b) =&gt; comparer.Compare(a.Key, b.Key));
+    right.Sort((a, b) =&gt; comparer.Compare(a.Key, b.Key));
+
+    return MergeSortedKeyRuns(left, right, comparer, ct);
+}
+</code></pre>
+<p><code>SortEntryFixed</code> carries key + <code>(BatchIdx, RowIdx)</code>.</p>
+<h3 id="merge-algorithm">Merge algorithm</h3>
+<pre><code class="language-csharp">while (i &lt; left.Count &amp;&amp; j &lt; right.Count)
+{
+    var c = comparer.Compare(left[i].Key, right[j].Key);
+    if (c &lt; 0) { i++; continue; }
+    if (c &gt; 0) { j++; continue; }
+
+    // equal keys: expand runs
+    var iStart = i;
+    while (i &lt; left.Count &amp;&amp; comparer.Compare(left[i].Key, left[iStart].Key) == 0)
+        i++;
+    var jStart = j;
+    while (j &lt; right.Count &amp;&amp; comparer.Compare(right[j].Key, right[jStart].Key) == 0)
+        j++;
+
+    for (var ii = iStart; ii &lt; i; ii++)
+        for (var jj = jStart; jj &lt; j; jj++)
+            matches.Add(new RowRefMatch(
+                left[ii].BatchIdx, left[ii].RowIdx,
+                right[jj].BatchIdx, right[jj].RowIdx));
+}
+</code></pre>
+<p>Run expansion produces same semantics as hash join nested loop over <code>List&lt;RowRef&gt;</code>.</p>
+<h2 id="sort-merge-utf-8-keys">11.17 Sort-merge: UTF-8 keys</h2>
+<p><code>ComputeSortMergeMatchesUtf8</code> uses <code>CompositeJoinKeyComparer</code>, <code>SortEntryUtf8</code>, and <code>MergeSortedCompositeRuns</code> — parallel structure to fixed-width merge.</p>
+<p><code>FlattenNonNullCompositeKeys</code> requires <code>TableSchema</code> for <code>CompositeJoinKeyBuilder.Build</code>.</p>
+<h2 id="materializematches">11.18 MaterializeMatches</h2>
+<pre><code class="language-csharp">private static ColumnarBatch MaterializeMatches(
+    JoinPhysicalPlan plan,
+    IReadOnlyList&lt;IColumnarBatch&gt; probeBatches,
+    IReadOnlyList&lt;IColumnarBatch&gt; buildBatches,
+    TableSchema probeSchema,
+    TableSchema buildSchema,
+    List&lt;RowRefMatch&gt; matches)
+{
+    var n = matches.Count;
+    if (n == 0)
+    {
+        var empty = new IColumnChunk[totalCols];
+        for (var c = 0; c &lt; totalCols; c++)
+            empty[c] = EmptyColumnChunk(outSchema.Columns[c].Type);
+        return new ColumnarBatch(0, empty);
+    }
+    // materialize columns ...
+}
+</code></pre>
+<h3 id="default-column-order">Default column order</h3>
+<p>When <code>OutputColumnOrder</code> is null: all probe columns, then all build columns.</p>
+<h3 id="explicit-column-order">Explicit column order</h3>
+<pre><code class="language-csharp">for (var ocol = 0; ocol &lt; order.Length; ocol++)
+{
+    var r = order[ocol];
+    cols[ocol] = r.IsProbe
+        ? MaterializeOneColumn(probeBatches, typ, r.ColumnIndex, matches, useProbeSide: true)
+        : MaterializeOneColumn(buildBatches, typ, r.ColumnIndex, matches, useProbeSide: false);
+}
+</code></pre>
+<p>Supports <code>SELECT a.x, b.y, a.z FROM a JOIN b ...</code>.</p>
+<h2 id="materializeonecolumn">11.19 MaterializeOneColumn</h2>
+<p>Fixed-width gather:</p>
+<pre><code class="language-csharp">for (var o = 0; o &lt; n; o++)
+{
+    var m = matches[o];
+    var bi = useProbeSide ? m.LeftBatchIdx : m.RightBatchIdx;
+    var ri = useProbeSide ? m.LeftRow : m.RightRow;
+    var col = batches[bi].Columns[colIndex];
+    if (SelectionEvaluator.IsNull(srcNb, ri, col.HasNulls))
+    {
+        anyNull = true;
+        SetNullBit(outNb.AsSpan(), o);
+        continue;
+    }
+    col.Values.Span.Slice(ri * w, w).CopyTo(outVals.AsSpan(o * w, w));
+}
+</code></pre>
+<p>UTF-8: <code>MaterializeUtf8Column</code> builds offset + blob layout. <code>ReadUtf8Payload</code> handles <code>Utf8ColumnChunk</code> and <code>Utf8LengthPrefixedColumnChunk</code>.</p>
+<h2 id="hash-vs-sort-merge-comparison">11.20 Hash vs sort-merge comparison</h2>
+<table class="table">
+<thead>
+<tr>
+<th>Aspect</th>
+<th>Hash join</th>
+<th>Sort-merge join</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Build structure</td>
+<td><code>Dictionary&lt;Key, List&lt;RowRef&gt;&gt;</code></td>
+<td>Sorted <code>List&lt;SortEntry&gt;</code> per side</td>
+</tr>
+<tr>
+<td>Probe</td>
+<td>O(1) average lookup</td>
+<td>Two-pointer O(n+m)</td>
+</tr>
+<tr>
+<td>Duplicates</td>
+<td>List per key</td>
+<td>Run expansion</td>
+</tr>
+<tr>
+<td>Memory</td>
+<td>Hash table + lists</td>
+<td>Two full entry lists</td>
+</tr>
+<tr>
+<td>Match order</td>
+<td>Undefined (probe order)</td>
+<td>Sort order</td>
+</tr>
+</tbody>
+</table>
+<p>Both produce identical match <strong>sets</strong> for inner equi-join; ordering may differ.</p>
+<h2 id="integration-with-sort-and-grouped-join">11.21 Integration with sort and grouped join</h2>
+<p><code>SortTopNEngine.ExecuteJoinAsync</code> (Chapter 12) calls join first, then sorts materialized output — join engine does not sort.</p>
+<p><code>GroupedJoinPhysicalPlan</code> composes join + <code>HashAggregateEngine</code> via <code>EphemeralColumnarTableSource</code> — join output fed directly into grouped aggregation.</p>
+<h2 id="fixedwidthkeycompare">11.22 FixedWidthKeyCompare</h2>
+<pre><code class="language-csharp">// src/RainDB.Query/Execution/FixedWidthKeyCompare.cs
+internal static int ComparePart(RainDbType type, ulong xa, ulong xb) =&gt;
+    type switch
+    {
+        RainDbType.Int32 =&gt; ((int)(uint)xa).CompareTo((int)(uint)xb),
+        RainDbType.Int64 =&gt; ((long)xa).CompareTo((long)xb),
+        RainDbType.Float64 =&gt; CompareFloat64Bits(xa, xb),
+        RainDbType.Boolean =&gt; ((xa != 0) ? 1 : 0).CompareTo(xb != 0 ? 1 : 0),
+        _ =&gt; xa.CompareTo(xb),
+    };
+</code></pre>
+<p>Float comparison decodes IEEE bits — consistent with hash equality and sort order.</p>
+<h2 id="cancellation">11.23 Cancellation</h2>
+<p>Build, probe, flatten, and merge loops call <code>ct.ThrowIfCancellationRequested()</code>. Materialization does not check per row — matches already computed.</p>
+<h2 id="example-trace">11.24 Example trace</h2>
+<p>Tables:</p>
+<ul>
+<li><code>orders(order_id, customer_id)</code> — probe</li>
+<li><code>customers(customer_id, name)</code> — build</li>
+</ul>
+<p>Plan: hash join on <code>customer_id</code>, no filters.</p>
+<pre><code>Build hash:
+  customer_id=1 → [RowRef(0,0), RowRef(0,5)]
+  customer_id=2 → [RowRef(0,1)]
+
+Probe orders:
+  order (cust=1) → 2 matches
+  order (cust=3) → no match
+  order (cust=2) → 1 match
+
+matches = [
+  RowRefMatch(0, 3, 0, 0),
+  RowRefMatch(0, 3, 0, 5),
+  RowRefMatch(0, 7, 0, 1),
+]
+
+MaterializeMatches → 3-row ColumnarBatch
+</code></pre>
+<h2 id="limitations">11.25 Limitations</h2>
+<table class="table">
+<thead>
+<tr>
+<th>Limitation</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Inner join only</td>
+<td>No outer variants</td>
+</tr>
+<tr>
+<td>Equi-join only</td>
+<td>No range joins</td>
+</tr>
+<tr>
+<td>In-memory</td>
+<td>Full match list resident</td>
+</tr>
+<tr>
+<td>No bloom filter</td>
+<td>Every probe hits hash table</td>
+</tr>
+<tr>
+<td>No runtime algorithm pick</td>
+<td>Plan-time <code>PhysicalJoinAlgorithm</code></td>
+</tr>
+<tr>
+<td>Match order</td>
+<td>Undefined for hash join</td>
+</tr>
+</tbody>
+</table>
+<h2 id="sql-compilation-and-samples">11.26 SQL compilation and samples</h2>
+<p>The SQL compiler (<code>DefaultSqlCompiler</code> in <code>src/RainDB.Sql/Compilation/</code>) binds <code>INNER JOIN</code> syntax to <code>JoinPhysicalPlan</code> or nested <code>JoinSortTopNPhysicalPlan</code> / <code>GroupedJoinPhysicalPlan</code> when <code>ORDER BY</code> or <code>GROUP BY</code> follow.</p>
+<p>Sample SQL in <code>samples/sql/07_join_select_list.sql</code> demonstrates explicit output column ordering — the binder emits <code>JoinOutputColumnRef[]</code> matching the <code>SELECT</code> list rather than default left-then-right layout.</p>
+<p><code>LogicalInnerJoin</code> in <code>src/RainDB.Abstractions/Logical/LogicalInnerJoin.cs</code> is the logical plan node; <code>LogicalJoinBinder</code> resolves table aliases and key column names to schema indices before physical plan construction.</p>
+<p>Tests in <code>tests/RainDB.Tests/JoinExecutionTests.cs</code> and <code>PhysicalPlanCorrectnessTests.cs</code> verify hash and sort-merge paths produce identical row sets for inner equi-join on fixed-width and UTF-8 keys.</p>
+<h2 id="summary">11.27 Summary</h2>
+<p><code>JoinExecutionEngine</code> implements a complete inner equi-join pipeline:</p>
+<ol>
+<li><strong>Validate</strong> table IDs, key types, filters, output schema</li>
+<li><strong>Match</strong> via hash or sort-merge, fixed or UTF-8 keys</li>
+<li><strong>Skip</strong> null join keys per SQL semantics</li>
+<li><strong>Materialize</strong> wide columnar output by gathering from source batches</li>
+</ol>
+<p><code>RowRef</code> and <code>RowRefMatch</code> decouple matching from projection — the same match list feeds arbitrary output column orderings without re-running the join.</p>
+</div>
+          <footer class="doc-footer">
+            <p>Generated by <strong>hoihky</strong> with <strong>MDWeb</strong> and with assistance from <strong>AI</strong></p>
+
+          </footer>
+        </article>
+
+        
+                <aside class="toc" aria-label="On this page">
+                  <p class="toc-title">On this page</p>
+                  <ul>
+                    
+                        <li class="toc-h1">
+                          <a href="#chapter-11-joins">Chapter 11: Joins</a>
+                        </li>
+                        
+                        <li class="toc-h1">
+                          <a href="#part-i-theory">Part I: Theory</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#111-relational-algebra-join">11.1 Relational algebra join (⋈)</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#equi-join">Equi-join</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#join-as-composition">Join as composition</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#112-join-types">11.2 Join types</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#inner-join-semantics">Inner join semantics</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#outer-join-semantics">Outer join semantics</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#cross-join">Cross join</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#113-nested-loop-hash-join-sort-merge-complexity">11.3 Nested-loop, hash join, sort-merge complexity</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#nested-loop-join-nlj">Nested-loop join (NLJ)</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#hash-join-hj">Hash join (HJ)</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#sort-merge-join-smj">Sort-merge join (SMJ)</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#algorithm-selection-summary">Algorithm selection summary</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#114-build-vs-probe-side">11.4 Build vs probe side</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#probe-centric-view">Probe-centric view</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#many-to-many-matches">Many-to-many matches</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#115-equi-join-vs-theta-join">11.5 Equi-join vs theta join</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#multi-column-equi-join">Multi-column equi-join</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#116-join-ordering-problem">11.6 Join ordering problem</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#left-deep-vs-bushy-trees">Left-deep vs bushy trees</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#cost-factors">Cost factors</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#117-cardinality-estimation-intro">11.7 Cardinality estimation intro</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#basic-statistics">Basic statistics</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#simple-equi-join-estimate-independence-assumption">Simple equi-join estimate (independence assumption)</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#selectivity">Selectivity</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#skew-and-bad-estimates">Skew and bad estimates</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#118-semi-join-and-anti-join-concepts">11.8 Semi-join and anti-join concepts</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#semi-join-exists">Semi-join (EXISTS)</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#anti-join-not-exists">Anti-join (NOT EXISTS)</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#implementation">Implementation</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#null-in-join-keys">NULL in join keys</a>
+                        </li>
+                        
+                        <li class="toc-h1">
+                          <a href="#part-ii-raindb-implementation">Part II: RainDB Implementation</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#119-joinphysicalplan">11.9 JoinPhysicalPlan</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1110-engine-entry-point">11.10 Engine entry point</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1111-internal-row-references">11.11 Internal row references</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1112-validation">11.12 Validation</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1113-null-key-semantics">11.13 NULL key semantics</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1114-hash-join-fixed-width-keys">11.14 Hash join: fixed-width keys</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#build-phase">Build phase</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#probe-phase">Probe phase</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#rowpassesall">RowPassesAll</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1115-hash-join-utf-8-keys">11.15 Hash join: UTF-8 keys</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1116-sort-merge-join-fixed-width-keys">11.16 Sort-merge join: fixed-width keys</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#merge-algorithm">Merge algorithm</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1117-sort-merge-utf-8-keys">11.17 Sort-merge: UTF-8 keys</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1118-materializematches">11.18 MaterializeMatches</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#default-column-order">Default column order</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#explicit-column-order">Explicit column order</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1119-materializeonecolumn">11.19 MaterializeOneColumn</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1120-hash-vs-sort-merge-comparison">11.20 Hash vs sort-merge comparison</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1121-integration-with-sort-and-grouped-join">11.21 Integration with sort and grouped join</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1122-fixedwidthkeycompare">11.22 FixedWidthKeyCompare</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1123-cancellation">11.23 Cancellation</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1124-example-trace">11.24 Example trace</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1125-limitations">11.25 Limitations</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1126-sql-compilation-and-samples">11.26 SQL compilation and samples</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1127-summary">11.27 Summary</a>
+                        </li>
+                        
+                  </ul>
+                </aside>
+                
+      </main>
+    </div>
+  </div>
+  <script src="assets/vendor/mermaid.min.js"></script>
+  <script src="assets/vendor/highlight.min.js"></script>
+  <script src="assets/js/site.js"></script>
+</body>
+</html>

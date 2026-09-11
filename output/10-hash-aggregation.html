@@ -1,0 +1,1040 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Chapter 10: Hash Aggregation · Building an OLAP Database Engine from Scratch with RainDB</title>
+  <meta name="description" content="Generated documentation site">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="assets/css/site.css">
+  <link rel="stylesheet" href="assets/vendor/atom-one-dark.min.css">
+</head>
+<body>
+  <div class="site">
+    <header class="topbar">
+      <button class="sidebar-toggle" id="sidebar-toggle" aria-label="Toggle navigation">☰</button>
+      <a href="index.html" class="brand">Building an OLAP Database Engine from Scratch with RainDB</a>
+      <div class="search-wrap">
+        <input type="search" id="search" placeholder="Search docs…" autocomplete="off">
+      </div>
+    </header>
+
+    <div class="layout">
+      <aside class="sidebar" id="sidebar">
+        <nav class="nav" aria-label="Documentation">
+          <ul class="nav-list">
+            
+                        <li class="nav-item depth-0">
+                          
+                            <a href="index.html" class="nav-link">Building an OLAP Database Engine from Scratch</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="01-olap-fundamentals.html" class="nav-link">Chapter 1: OLAP Fundamentals</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="02-architecture-and-modules.html" class="nav-link">Chapter 2: Architecture and Modules</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="03-columnar-storage-model.html" class="nav-link">Chapter 3: Columnar Storage Model</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="04-chunk-data-structures.html" class="nav-link">Chapter 4: Chunk Data Structures</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="05-catalog-and-tables.html" class="nav-link">Chapter 5: Catalog and Tables</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="06-buffer-management.html" class="nav-link">Chapter 6: Buffer Management</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="07-execution-pipeline.html" class="nav-link">Chapter 7: Execution Pipeline</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="08-vectorized-scan-filter-project.html" class="nav-link">Chapter 8: Vectorized Scan, Filter, and Project</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="09-global-aggregates.html" class="nav-link">Chapter 9: Global Aggregates</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0 is-active">
+                          
+                            <a href="10-hash-aggregation.html" class="nav-link">Chapter 10: Hash Aggregation</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="11-joins.html" class="nav-link">Chapter 11: Joins</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="12-sort-and-limit.html" class="nav-link">Chapter 12: Sort and Limit</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="13-sql-compilation.html" class="nav-link">Chapter 13: SQL Compilation</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="14-persistence.html" class="nav-link">Chapter 14: Persistence</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="15-future-extensions.html" class="nav-link">Chapter 15: Future Extensions</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="16-mmap-io.html" class="nav-link">Chapter 16: mmap I/O</a>
+                            
+                        </li>
+                        
+          </ul>
+        </nav>
+      </aside>
+
+      <main class="content">
+        <article class="doc">
+          <header class="doc-header">
+            <h1>Chapter 10: Hash Aggregation</h1>
+          </header>
+          <div class="doc-body"><h1 id="chapter-10-hash-aggregation">Chapter 10: Hash Aggregation</h1>
+<p>When a query includes <code>GROUP BY</code>, RainDB cannot fold all rows into a single scalar. Instead, <code>HashAggregateEngine</code> builds a hash map from <strong>group keys</strong> to <strong>aggregate accumulators</strong>, processes each source batch in parallel to produce partial maps, merges them into a global map, sorts keys for deterministic output, and materializes columnar result batches.</p>
+<p>This chapter is split into two parts. <strong>Part I</strong> covers hash-table-based grouping theory: open vs closed addressing, hash aggregation vs sort aggregation, memory bounds and spill, multi-column keys, variable-length keys, and GROUP BY output ordering. <strong>Part II</strong> traces RainDB's implementation — <code>HashAggregatePhysicalPlan</code>, <code>GroupKey</code>, <code>CompositeJoinKey</code>, <code>MergePartials</code>, <code>AggregateRowOps</code>, and the spill instrumentation hook.</p>
+<hr />
+<h1 id="part-i-theory">Part I: Theory</h1>
+<h2 id="hash-table-based-grouping">10.1 Hash table based grouping</h2>
+<p><code>GROUP BY</code> asks a simple question: &quot;which rows belong together?&quot; The answer is a <strong>group key</strong> — the tuple of values from the grouping columns. A hash map is the standard index from key to running totals:</p>
+<pre><code>key  →  accumulator state (SUM, COUNT, MIN, ...)
+</code></pre>
+<p>Per input row:</p>
+<ol>
+<li>Read the key columns.</li>
+<li>Hash the key and probe the table.</li>
+<li>Insert a fresh accumulator if this key is new.</li>
+<li>Feed measure columns into the accumulator slot(s).</li>
+</ol>
+<p>When the scan finishes, each distinct key becomes one output row with finalized aggregates.</p>
+<h3 id="multiset-semantics">Multiset semantics</h3>
+<p>Input is a <strong>bag</strong>: duplicate keys are expected. Ten rows with <code>region = 'us'</code> collapse to one output row; <code>COUNT(*)</code> reports 10 for that bucket.</p>
+<h3 id="hash-function-requirements">Hash function requirements</h3>
+<p><code>h(key)</code> should spread keys evenly, stay deterministic across runs, and mix every component of a composite key. Skewed hash functions create <strong>hot buckets</strong> — long chains and worst-case O(n) behavior inside an otherwise O(1) structure.</p>
+<h2 id="open-addressing-vs-closed-addressing">10.2 Open addressing vs closed addressing</h2>
+<p>Collision resolution splits into two families.</p>
+<h3 id="closed-addressing-separate-chaining">Closed addressing (separate chaining)</h3>
+<p>Each bucket points at a chain (or tree) of entries that share the same bucket index. .NET <code>Dictionary&lt;K,V&gt;</code> is in this camp.</p>
+<table class="table">
+<thead>
+<tr>
+<th>Pros</th>
+<th>Cons</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Simple deletion</td>
+<td>Pointer chasing, cache misses</td>
+</tr>
+<tr>
+<td>Load factor can exceed 1</td>
+<td>Extra allocation per entry</td>
+</tr>
+<tr>
+<td>Tolerates clustering</td>
+<td>Memory overhead for small maps</td>
+</tr>
+</tbody>
+</table>
+<h3 id="open-addressing">Open addressing</h3>
+<p>All entries sit in one array. On collision, probe forward (linear, quadratic, or double hashing) until an empty slot appears.</p>
+<table class="table">
+<thead>
+<tr>
+<th>Pros</th>
+<th>Cons</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Cache-friendly contiguous memory</td>
+<td>Clustering (linear probing)</td>
+</tr>
+<tr>
+<td>No per-entry pointers</td>
+<td>Deletion needs tombstones</td>
+</tr>
+<tr>
+<td>Good for SIMD-friendly layouts</td>
+<td>Load factor must stay below ~0.7</td>
+</tr>
+</tbody>
+</table>
+<h3 id="engine-choice">Engine choice</h3>
+<p>High-performance analytical engines often build custom open-addressing tables with power-of-two sizing (bitmask instead of modulo). RainDB Phase 1 uses <code>Dictionary&lt;GroupKey, AggregateAccumulator[]&gt;</code> — BCL closed addressing — for speed of implementation. A future columnar open-addressing table with inline accumulators is a natural upgrade path.</p>
+<h2 id="hash-aggregation-vs-sort-aggregation">10.3 Hash aggregation vs sort aggregation</h2>
+<p>Two physical recipes implement the same logical <code>GROUP BY</code>.</p>
+<h3 id="hash-aggregation">Hash aggregation</h3>
+<pre><code>Scan rows → hash into map → (optional) sort keys → emit
+</code></pre>
+<ul>
+<li><strong>Best when:</strong> many distinct keys, no helpful input order, one pass is enough</li>
+<li><strong>Memory:</strong> O(distinct groups)</li>
+<li><strong>Time:</strong> O(n) average insert per row</li>
+</ul>
+<h3 id="sort-aggregation">Sort aggregation</h3>
+<pre><code>Scan rows → sort by group key → scan sorted runs → accumulate per run → emit
+</code></pre>
+<ul>
+<li><strong>Best when:</strong> data already sorted on group keys, or hash memory is impossible but external sort is acceptable</li>
+<li><strong>Memory:</strong> O(n) for the sort buffer (or disk-backed runs)</li>
+<li><strong>Time:</strong> O(n log n) for the sort</li>
+</ul>
+<h3 id="hybrid-decisions">Hybrid decisions</h3>
+<table class="table">
+<thead>
+<tr>
+<th>Factor</th>
+<th>Favors hash</th>
+<th>Favors sort</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Pre-sorted input on group keys</td>
+<td></td>
+<td>✓</td>
+</tr>
+<tr>
+<td>Low cardinality (few groups)</td>
+<td>✓</td>
+<td></td>
+</tr>
+<tr>
+<td>Memory budget tight</td>
+<td></td>
+<td>✓ (external sort)</td>
+</tr>
+<tr>
+<td>Multiple aggregates</td>
+<td>✓ (one pass)</td>
+<td>✓ (one pass after sort)</td>
+</tr>
+<tr>
+<td>Need ordered output</td>
+<td>sort phase either way</td>
+<td>natural after sort-agg</td>
+</tr>
+</tbody>
+</table>
+<p>RainDB groups with <strong>hash aggregation</strong> (<code>HashAggregateEngine</code>), then <strong>sorts keys</strong> for deterministic output. It does not use sort-aggregation as the primary grouping strategy.</p>
+<h2 id="memory-bounds-and-spill">10.4 Memory bounds and spill</h2>
+<p>Memory scales with <strong>distinct groups</strong> × (key footprint + accumulator state). Exceed <code>work_mem</code> or the operator budget and something has to give.</p>
+<h3 id="grace-hash-aggregation-spill-to-disk">Grace hash aggregation (spill to disk)</h3>
+<ol>
+<li>Partition rows by <code>hash(key) mod P</code> into P temp files.</li>
+<li>Process one partition at a time — each fits in RAM.</li>
+<li>Write partition results to temp storage.</li>
+<li>Merge partition outputs.</li>
+</ol>
+<h3 id="partial-spill-strategies">Partial spill strategies</h3>
+<ul>
+<li>Flush the whole table and start fresh when a threshold trips</li>
+<li><strong>Metrics-only hooks</strong> (RainDB today) — log that a threshold was crossed without actually spilling</li>
+</ul>
+<p><code>SpillPartialEntryThreshold</code> on <code>HashAggregatePhysicalPlan</code> calls <code>ISpillWriter.SpillChunkAsync</code> with a JSON metrics blob when a partial dictionary grows large. The operator <strong>still finishes in memory</strong>; this is scaffolding for real spill later.</p>
+<h3 id="memory-estimation">Memory estimation</h3>
+<pre><code>memory ≈ |G| × (key_bytes + agg_state_bytes + hash_overhead)
+</code></pre>
+<p>High-cardinality UTF-8 <code>GROUP BY</code> hurts: RainDB copies each distinct string into <code>CompositeJoinKey</code> owned payloads.</p>
+<h2 id="multi-column-group-keys">10.5 Multi-column group keys</h2>
+<p>A composite key is <code>(k₁, k₂, …, kₙ)</code>. Hash and equality must consider every component:</p>
+<pre><code>hash = H( H(k₁) ⊕ H(k₂) ⊕ … ⊕ H(kₙ) )
+</code></pre>
+<p>Equality walks components left to right. <strong>Grouping</strong> treats NULL as a real group value — <code>(NULL, 1)</code> groups with <code>(NULL, 1)</code>. That differs from <strong>join</strong> semantics, where <code>NULL = NULL</code> is unknown.</p>
+<p>RainDB packs fixed-width components into <code>ulong[] Parts</code> with a <code>uint NullMask</code> — bit <code>i</code> set when column <code>i</code> is SQL NULL.</p>
+<h3 id="lexicographic-ordering">Lexicographic ordering</h3>
+<p>Sorted output compares:</p>
+<ol>
+<li><code>NullMask</code> (which columns are null)</li>
+<li>Component 0 with type-specific rules</li>
+<li>Component 1, and so on</li>
+</ol>
+<p>Deterministic for tests; full SQL <code>ORDER BY</code> null placement may differ.</p>
+<h2 id="handling-variable-length-keys">10.6 Handling variable-length keys</h2>
+<p><code>Int32</code>, <code>Float64</code>, and <code>Boolean</code> fit in machine words — cheap hash, cheap compare.</p>
+<p>Strings need a strategy:</p>
+<table class="table">
+<thead>
+<tr>
+<th>Approach</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Copy-on-insert</strong></td>
+<td>Store payload bytes in the key object (RainDB)</td>
+</tr>
+<tr>
+<td><strong>String interning / dictionary</strong></td>
+<td>Map payload to integer id, hash the id</td>
+</tr>
+<tr>
+<td><strong>Prefix hash</strong></td>
+<td>Hash first N bytes + length (collision risk)</td>
+</tr>
+</tbody>
+</table>
+<p><code>CompositeJoinKey</code> keeps <code>byte[]?[] Utf8Payloads</code> — owned copies from <code>CompositeJoinKeyBuilder</code>. Equality is <code>SequenceEqual</code> on byte spans.</p>
+<p><strong>Trade-off:</strong> correct, stable dictionary keys versus memory amplification when cardinality is high.</p>
+<h2 id="output-ordering-of-group-by">10.7 Output ordering of GROUP BY</h2>
+<p>The SQL standard does <strong>not</strong> promise sorted <code>GROUP BY</code> output. Engines sort anyway for regression tests, merge-join consumers, and predictable CLI behavior.</p>
+<p>RainDB sorts after merge with <code>Array.Sort</code> and <code>GroupKeyComparer</code> / <code>CompositeJoinKeyComparer</code> before <code>MaterializeOutput</code>. That is <strong>policy</strong>, not spec.</p>
+<p>User <code>ORDER BY</code> on grouped results would today route through <code>SortTopNEngine</code> (Chapter 12) as a separate step — not a fused hash+sort operator yet.</p>
+<hr />
+<h1 id="part-ii-raindb-implementation">Part II: RainDB Implementation</h1>
+<h2 id="hashaggregatephysicalplan">10.8 HashAggregatePhysicalPlan</h2>
+<pre><code class="language-csharp">// src/RainDB.Query/Plans/HashAggregatePhysicalPlan.cs
+public sealed class HashAggregatePhysicalPlan : IPhysicalPlan
+{
+    public TableId TableId { get; }
+    public int[] GroupKeyColumnIndices { get; }
+    public AggregateSpec[] Aggregates { get; }
+    public HashAggregateOutputSlot[] OutputColumns { get; }
+    public ColumnCompareFilter[]? Filters { get; }
+    public VectorizedScanExecutionOptions Options { get; }
+    public int SpillPartialEntryThreshold { get; }
+}
+</code></pre>
+<p>Construction constraints:</p>
+<ul>
+<li>At least one group key column and one aggregate</li>
+<li><code>OutputColumns</code> defaults to keys first, then aggregates (or explicit reorder for <code>SELECT</code> list)</li>
+<li><code>SpillPartialEntryThreshold</code> defaults to <code>0</code> (spill hook disabled)</li>
+</ul>
+<p><code>Explain()</code> example:</p>
+<pre><code>HashAggregate(table=...) KEYS[0,1] AGGS[Sum(2),Count(*)] FILTER[col3&gt;5]
+</code></pre>
+<h3 id="output-slot-layout">Output slot layout</h3>
+<pre><code class="language-csharp">public enum HashAggregateOutputColumnKind { GroupKey, Aggregate }
+
+public readonly record struct HashAggregateOutputSlot(
+    HashAggregateOutputColumnKind Kind, int Ordinal);
+</code></pre>
+<p><code>Ordinal</code> indexes into <code>GroupKeyColumnIndices</code> or <code>Aggregates</code> depending on <code>Kind</code>. Supports <code>SELECT k, SUM(v), k</code> reordering without changing accumulation.</p>
+<p><code>AggregateSpec</code> (from <code>VectorizedScanPhysicalPlan.cs</code>):</p>
+<pre><code class="language-csharp">public readonly record struct AggregateSpec(int SourceColumnIndex, AggregateKind Kind);
+</code></pre>
+<h2 id="engine-entry-and-dual-code-paths">10.9 Engine entry and dual code paths</h2>
+<pre><code class="language-csharp">// src/RainDB.Query/Execution/HashAggregateEngine.cs
+public static async ValueTask&lt;IQueryResult&gt; ExecuteAsync(
+    HashAggregatePhysicalPlan plan,
+    IColumnarTableSource table,
+    IExecutionContext context)
+{
+    ValidatePlan(plan, table);
+
+    if (AnyUtf8GroupKey(plan, table.Schema))
+        return await ExecuteWithCompositeKeysAsync(plan, table, context).ConfigureAwait(false);
+
+    var batches = table.Batches;
+    var n = batches.Count;
+    // ...
+    var partials = new Dictionary&lt;GroupKey, AggregateAccumulator[]&gt;[n];
+    // parallel AccumulateBatch per batch index
+    var global = MergePartials(partials, plan.Aggregates);
+    var sortedKeys = SortKeys(global.Keys, schema, plan.GroupKeyColumnIndices);
+    var outBatch = MaterializeOutput(sortedKeys, global, plan, schema);
+    return new ColumnarMaterializedQueryResult([outBatch]);
+}
+</code></pre>
+<p><code>AnyUtf8GroupKey</code> scans <code>GroupKeyColumnIndices</code> — any <code>RainDbType.Utf8</code> column routes to <code>CompositeJoinKey</code> path (shared with join infrastructure). Mixed fixed-width and UTF-8 keys in one <code>GROUP BY</code> use the composite path.</p>
+<h3 id="empty-table">Empty table</h3>
+<pre><code class="language-csharp">if (n == 0)
+{
+    var emptyCols = MaterializeEmptyOutput(plan, schema);
+    return new ColumnarMaterializedQueryResult([new ColumnarBatch(0, emptyCols)]);
+}
+</code></pre>
+<p>Empty grouped query: <strong>zero output rows</strong> (unlike global <code>COUNT(*)</code> which returns one row with <code>0</code>).</p>
+<h2 id="groupkey-and-fixedwidthgroupkeybuilder">10.10 GroupKey and FixedWidthGroupKeyBuilder</h2>
+<pre><code class="language-csharp">// src/RainDB.Query/Execution/FixedWidthGroupKey.cs
+internal sealed class GroupKey : IEquatable&lt;GroupKey&gt;
+{
+    public GroupKey(ulong[] parts, uint nullMask)
+    {
+        Parts = parts;
+        NullMask = nullMask;
+    }
+
+    public ulong[] Parts { get; }
+    public uint NullMask { get; }
+}
+</code></pre>
+<table class="table">
+<thead>
+<tr>
+<th>Field</th>
+<th>Role</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>Parts</code></td>
+<td>One <code>ulong</code> per key column, raw little-endian bits</td>
+</tr>
+<tr>
+<td><code>NullMask</code></td>
+<td>Bit <code>i</code> set when key column <code>i</code> is SQL NULL</td>
+</tr>
+</tbody>
+</table>
+<p><code>Equals</code> compares <code>NullMask</code> then <code>Parts</code> element-wise. <code>GetHashCode</code> mixes both. SQL NULL group keys are <strong>valid</strong> — NULL groups with NULL.</p>
+<h3 id="buildkey-from-a-row">BuildKey from a row</h3>
+<pre><code class="language-csharp">internal static class FixedWidthGroupKeyBuilder
+{
+    public static GroupKey BuildKey(
+        IColumnarBatch batch, int row, int[] keyIndices, ulong[] scratch)
+    {
+        uint mask = 0;
+        for (var i = 0; i &lt; keyIndices.Length; i++)
+        {
+            var col = batch.Columns[keyIndices[i]];
+            var nb = col.HasNulls ? col.NullBitmap.Span : ReadOnlySpan&lt;byte&gt;.Empty;
+            if (SelectionEvaluator.IsNull(nb, row, col.HasNulls))
+            {
+                mask |= 1u &lt;&lt; i;
+                scratch[i] = 0;
+                continue;
+            }
+            scratch[i] = PhysicalValueToULong(col, row);
+        }
+
+        var owned = new ulong[keyIndices.Length];
+        scratch.AsSpan(0, keyIndices.Length).CopyTo(owned);
+        return new GroupKey(owned, mask);
+    }
+}
+</code></pre>
+<p><strong>Scratch reuse:</strong> <code>AccumulateBatch</code> rents <code>ulong[]</code> from <code>ArrayPool</code> per batch. Each <code>GroupKey</code> <strong>owns</strong> copied <code>ulong[]</code> for dictionary stability.</p>
+<h3 id="physicalvaluetoulong">PhysicalValueToULong</h3>
+<pre><code class="language-csharp">public static ulong PhysicalValueToULong(IColumnChunk col, int row)
+{
+    var values = col.Values.Span;
+    return col.PhysicalType switch
+    {
+        RainDbType.Int32 =&gt; (ulong)(uint)BinaryPrimitives.ReadInt32LittleEndian(
+            values.Slice(row * sizeof(int), sizeof(int))),
+        RainDbType.Int64 =&gt; (ulong)BinaryPrimitives.ReadInt64LittleEndian(
+            values.Slice(row * sizeof(long), sizeof(long))),
+        RainDbType.Float64 =&gt; (ulong)BinaryPrimitives.ReadInt64LittleEndian(
+            values.Slice(row * sizeof(double), sizeof(double))),
+        RainDbType.Boolean =&gt; values[row] != 0 ? 1UL : 0UL,
+        _ =&gt; throw new InvalidOperationException($&quot;Unexpected key physical type {col.PhysicalType}.&quot;),
+    };
+}
+</code></pre>
+<p>Float keys compare by IEEE-754 bit pattern via <code>FixedWidthKeyCompare</code> — not numeric tolerance.</p>
+<h2 id="accumulatebatch-fixed-width-path">10.11 AccumulateBatch (fixed-width path)</h2>
+<pre><code class="language-csharp">private static Dictionary&lt;GroupKey, AggregateAccumulator[]&gt; AccumulateBatch(
+    IColumnarBatch batch,
+    HashAggregatePhysicalPlan plan,
+    CancellationToken cancellationToken)
+{
+    var specs = plan.Aggregates;
+    var aggCount = specs.Length;
+    var dict = new Dictionary&lt;GroupKey, AggregateAccumulator[]&gt;();
+    var rent = ArrayPool&lt;int&gt;.Shared.Rent(batch.RowCount);
+    try
+    {
+        // filter → selection buffer
+        var scratch = ArrayPool&lt;ulong&gt;.Shared.Rent(plan.GroupKeyColumnIndices.Length);
+        try
+        {
+            for (var i = 0; i &lt; k; i++)
+            {
+                var row = sel.IsEmpty ? i : sel[i];
+                var key = FixedWidthGroupKeyBuilder.BuildKey(
+                    batch, row, plan.GroupKeyColumnIndices, scratch);
+                if (!dict.TryGetValue(key, out var accs))
+                {
+                    accs = new AggregateAccumulator[aggCount];
+                    dict[key] = accs;
+                }
+                for (var a = 0; a &lt; aggCount; a++)
+                {
+                    ref var slot = ref accs[a];
+                    var spec = specs[a];
+                    if (spec.Kind == AggregateKind.Count &amp;&amp; spec.SourceColumnIndex &lt; 0)
+                        AggregateRowOps.AddCountStar(ref slot);
+                    else if (spec.Kind == AggregateKind.Count)
+                        AggregateRowOps.AddCountColumn(ref slot, batch.Columns[spec.SourceColumnIndex], row);
+                    else
+                        AggregateRowOps.AddRow(ref slot, batch.Columns[spec.SourceColumnIndex], spec.Kind, row);
+                }
+            }
+        }
+        finally { ArrayPool&lt;ulong&gt;.Shared.Return(scratch); }
+        return dict;
+    }
+    finally { ArrayPool&lt;int&gt;.Shared.Return(rent); }
+}
+</code></pre>
+<p>Parallel workers each own a <code>Dictionary</code> — no cross-thread contention. Cross-batch duplicate keys merge in <code>MergePartials</code>.</p>
+<h2 id="compositejoinkey-utf-8-path">10.12 CompositeJoinKey UTF-8 path</h2>
+<pre><code class="language-csharp">// src/RainDB.Query/Execution/JoinCompositeKey.cs
+internal sealed class CompositeJoinKey : IEquatable&lt;CompositeJoinKey&gt;
+{
+    public CompositeJoinKey(uint nullMask, ulong[] numericParts, byte[]?[] utf8Payloads)
+    {
+        NullMask = nullMask;
+        NumericParts = numericParts;
+        Utf8Payloads = utf8Payloads;
+    }
+
+    public uint NullMask { get; }
+    public ulong[] NumericParts { get; }
+    public byte[]?[] Utf8Payloads { get; }
+}
+</code></pre>
+<p>Per key column index <code>i</code>:</p>
+<ul>
+<li>Fixed-width → <code>NumericParts[i]</code>, <code>Utf8Payloads[i]</code> null</li>
+<li><code>Utf8</code> → copied payload in <code>Utf8Payloads[i]</code></li>
+<li>NULL → <code>NullMask</code> bit set</li>
+</ul>
+<p><code>CompositeJoinKeyBuilder.Build</code> in the same file handles <code>Utf8ColumnChunk</code> and <code>Utf8LengthPrefixedColumnChunk</code>.</p>
+<h3 id="deepclone-on-merge">DeepClone on merge</h3>
+<pre><code class="language-csharp">global[kv.Key.DeepClone()] = merged;
+</code></pre>
+<p>Prevents shared mutable key arrays between partial and global dictionaries.</p>
+<p><code>ExecuteWithCompositeKeysAsync</code> mirrors fixed-width flow: parallel <code>AccumulateBatchComposite</code>, <code>MergePartialsComposite</code>, <code>SortCompositeKeys</code>, <code>MaterializeOutputComposite</code>.</p>
+<h2 id="mergepartials">10.13 MergePartials</h2>
+<pre><code class="language-csharp">private static Dictionary&lt;GroupKey, AggregateAccumulator[]&gt; MergePartials(
+    Dictionary&lt;GroupKey, AggregateAccumulator[]&gt;[] partials,
+    AggregateSpec[] specs)
+{
+    var aggCount = specs.Length;
+    var global = new Dictionary&lt;GroupKey, AggregateAccumulator[]&gt;();
+    for (var bi = 0; bi &lt; partials.Length; bi++)
+    {
+        foreach (var kv in partials[bi])
+        {
+            if (!global.TryGetValue(kv.Key, out var merged))
+            {
+                merged = new AggregateAccumulator[aggCount];
+                for (var j = 0; j &lt; aggCount; j++)
+                    merged[j] = kv.Value[j];
+                global[new GroupKey(kv.Key.Parts.ToArray(), kv.Key.NullMask)] = merged;
+            }
+            else
+            {
+                for (var j = 0; j &lt; aggCount; j++)
+                    merged[j] = AggregateRowOps.Combine(merged[j], kv.Value[j], specs[j].Kind);
+            }
+        }
+    }
+    return global;
+}
+</code></pre>
+<p><strong>Key copying:</strong> <code>Parts.ToArray()</code> on insert — defensive copy.</p>
+<p><strong>Per-slot combine:</strong> each <code>AggregateSpec</code> at index <code>j</code> uses its own <code>Kind</code>.</p>
+<p>Complexity: O(total entries in partial maps) ≤ O(batches × distinct groups).</p>
+<h2 id="aggregaterowops">10.14 AggregateRowOps</h2>
+<pre><code class="language-csharp">internal struct AggregateAccumulator
+{
+    public long ContributingRows;
+    public long Count;
+    public double FloatSum;
+    public double FloatMin;
+    public double FloatMax;
+    public long IntSum;
+    public bool HasMin;
+    public bool HasMax;
+}
+</code></pre>
+<p>Parallel to <code>PartialAgg</code> (Chapter 9) with <code>Count</code> instead of <code>CountAgg</code>.</p>
+<h3 id="addcountstar-addcountcolumn">AddCountStar / AddCountColumn</h3>
+<pre><code class="language-csharp">public static void AddCountStar(ref AggregateAccumulator acc) =&gt; acc.Count++;
+
+public static void AddCountColumn(ref AggregateAccumulator acc, IColumnChunk col, int row)
+{
+    var nb = col.HasNulls ? col.NullBitmap.Span : ReadOnlySpan&lt;byte&gt;.Empty;
+    if (!SelectionEvaluator.IsNull(nb, row, col.HasNulls))
+        acc.Count++;
+}
+</code></pre>
+<h3 id="addrow">AddRow</h3>
+<pre><code class="language-csharp">public static void AddRow(ref AggregateAccumulator acc, IColumnChunk col, AggregateKind kind, int row)
+{
+    var nb = col.HasNulls ? col.NullBitmap.Span : ReadOnlySpan&lt;byte&gt;.Empty;
+    if (SelectionEvaluator.IsNull(nb, row, col.HasNulls))
+        return;
+
+    var values = col.Values.Span;
+    switch (kind)
+    {
+        case AggregateKind.Sum when col.PhysicalType == RainDbType.Float64:
+            // acc.FloatSum += v; acc.ContributingRows++
+        case AggregateKind.Sum when col.PhysicalType == RainDbType.Int32:
+            // acc.IntSum += i32
+        case AggregateKind.Min when col.PhysicalType == RainDbType.Float64:
+            // HasMin / FloatMin tracking
+        // ...
+    }
+}
+</code></pre>
+<h3 id="combine">Combine</h3>
+<pre><code class="language-csharp">public static AggregateAccumulator Combine(AggregateAccumulator a, AggregateAccumulator b, AggregateKind kind) =&gt;
+kind switch
+{
+    AggregateKind.Count =&gt; new AggregateAccumulator { Count = a.Count + b.Count },
+    AggregateKind.Sum =&gt; new AggregateAccumulator
+    {
+        ContributingRows = a.ContributingRows + b.ContributingRows,
+        FloatSum = a.FloatSum + b.FloatSum,
+        IntSum = a.IntSum + b.IntSum,
+    },
+    AggregateKind.Min =&gt; CombineMinMax(a, b, isMin: true),
+    AggregateKind.Max =&gt; CombineMinMax(a, b, isMin: false),
+    _ =&gt; throw new ArgumentOutOfRangeException(nameof(kind), kind, null),
+};
+</code></pre>
+<p><code>CombineMinMax</code> matches <code>PartialAgg.CombineMinMax</code> — identity for empty sides.</p>
+<h2 id="sorting-group-keys">10.15 Sorting group keys</h2>
+<pre><code class="language-csharp">private static GroupKey[] SortKeys(
+    Dictionary&lt;GroupKey, AggregateAccumulator[]&gt;.KeyCollection keys,
+    TableSchema schema,
+    int[] keyIndices)
+{
+    var arr = new GroupKey[keys.Count];
+    keys.CopyTo(arr, 0);
+    Array.Sort(arr, new GroupKeyComparer(schema, keyIndices));
+    return arr;
+}
+</code></pre>
+<p><code>GroupKeyComparer</code>:</p>
+<pre><code class="language-csharp">public int Compare(GroupKey? x, GroupKey? y)
+{
+    var c = x.NullMask.CompareTo(y.NullMask);
+    if (c != 0) return c;
+
+    for (var i = 0; i &lt; _keyIndices.Length; i++)
+    {
+        var t = _schema.Columns[_keyIndices[i]].Type;
+        c = ComparePart(t, x.Parts[i], y.Parts[i]);
+        if (c != 0) return c;
+    }
+    return 0;
+}
+</code></pre>
+<p><code>ComparePart</code> delegates to <code>FixedWidthKeyCompare.ComparePart</code> — shared with join ordering.</p>
+<p><code>CompositeJoinKeyComparer</code> adds UTF-8 <code>SequenceCompareTo</code> on payload bytes.</p>
+<h2 id="materializeoutput">10.16 MaterializeOutput</h2>
+<pre><code class="language-csharp">private static ColumnarBatch MaterializeOutput(
+    GroupKey[] sortedKeys,
+    Dictionary&lt;GroupKey, AggregateAccumulator[]&gt; global,
+    HashAggregatePhysicalPlan plan,
+    TableSchema schema)
+{
+    var rowCount = sortedKeys.Length;
+    var cols = new List&lt;IColumnChunk&gt;();
+    foreach (var outSlot in plan.OutputColumns)
+    {
+        switch (outSlot.Kind)
+        {
+            case HashAggregateOutputColumnKind.GroupKey:
+                var schemaCol = schema.Columns[plan.GroupKeyColumnIndices[outSlot.Ordinal]];
+                cols.Add(MaterializeKeyColumn(sortedKeys, outSlot.Ordinal, schemaCol.Type, rowCount));
+                break;
+            case HashAggregateOutputColumnKind.Aggregate:
+                var spec = plan.Aggregates[outSlot.Ordinal];
+                cols.Add(MaterializeAggregateColumn(sortedKeys, global, outSlot.Ordinal, spec, schema, rowCount));
+                break;
+        }
+    }
+    return new ColumnarBatch(rowCount, cols);
+}
+</code></pre>
+<h3 id="materializekeycolumn">MaterializeKeyColumn</h3>
+<p>Walks sorted keys, sets null bits from <code>NullMask</code>, writes physical bytes via <code>WritePhysical</code> (little-endian). UTF-8 uses <code>MaterializeUtf8KeyColumn</code> — offset array + contiguous blob.</p>
+<h3 id="shouldemitaggregatenull">ShouldEmitAggregateNull</h3>
+<pre><code class="language-csharp">private static bool ShouldEmitAggregateNull(AggregateSpec spec, AggregateAccumulator acc)
+{
+    return spec.Kind switch
+    {
+        AggregateKind.Sum =&gt; acc.ContributingRows == 0,
+        AggregateKind.Min =&gt; !acc.HasMin,
+        AggregateKind.Max =&gt; !acc.HasMax,
+        AggregateKind.Count =&gt; false,
+        _ =&gt; false,
+    };
+}
+</code></pre>
+<p>For a group where all measure values are null: <code>SUM</code> → null bit; <code>COUNT(col)</code> → <code>0</code> without null; <code>COUNT(*)</code> → row count.</p>
+<pre><code class="language-csharp">var hasNulls = anyNull;
+if (spec.Kind == AggregateKind.Count)
+    hasNulls = false;
+</code></pre>
+<h2 id="spill-hook">10.17 Spill hook</h2>
+<pre><code class="language-csharp">if (context.SpillWriter.IsEnabled &amp;&amp; plan.SpillPartialEntryThreshold &gt; 0)
+{
+    for (var i = 0; i &lt; n; i++)
+    {
+        if (partials[i].Count &gt;= plan.SpillPartialEntryThreshold)
+        {
+            var payload = Encoding.UTF8.GetBytes(
+                $&quot;{{\&quot;op\&quot;:\&quot;hash_agg_partial\&quot;,\&quot;batch\&quot;:{i},\&quot;entries\&quot;:{partials[i].Count}}}\n&quot;);
+            await context.SpillWriter.SpillChunkAsync(payload, ct).ConfigureAwait(false);
+        }
+    }
+}
+</code></pre>
+<p>UTF-8 path emits <code>hash_agg_partial_utf8</code>. Conditions:</p>
+<ol>
+<li><code>IExecutionContext.SpillWriter.IsEnabled</code></li>
+<li><code>SpillPartialEntryThreshold &gt; 0</code></li>
+<li>Partial dictionary entry count ≥ threshold</li>
+</ol>
+<p>Operator still completes in memory — instrumentation for profiling and future spill.</p>
+<p><code>ISpillWriter</code> defined in <code>src/RainDB.Abstractions/Execution/ISpillWriter.cs</code>.</p>
+<h2 id="validation-and-parallelism">10.18 Validation and parallelism</h2>
+<p><code>ValidatePlan</code> checks:</p>
+<ul>
+<li>Table id match</li>
+<li>Key types: fixed-width or <code>Utf8</code> only</li>
+<li>Filter column indices in range</li>
+<li>Aggregate type rules (<code>Min</code>/<code>Max</code> on <code>Float64</code> only; <code>Sum</code> on <code>Int32</code>/<code>Int64</code>/<code>Float64</code>)</li>
+</ul>
+<p>Parallelism: same three modes as <code>VectorizedScanEngine</code> — sequential, <code>Parallel.For</code>, channel scheduler via <code>RunChannelMorselsAsync</code>. Merge and materialize are sequential.</p>
+<h2 id="groupedjoinphysicalplan-integration">10.19 GroupedJoinPhysicalPlan integration</h2>
+<p><code>DefaultQueryExecutor</code> handles <code>GroupedJoinPhysicalPlan</code>:</p>
+<pre><code class="language-csharp">// src/RainDB.Query/Execution/DefaultQueryExecutor.cs
+var joinResult = await JoinExecutionEngine.ExecuteAsync(grouped.Join, probeCols2, buildCols2, context);
+var ephemeral = new EphemeralColumnarTableSource(
+    grouped.Aggregate.TableId, &quot;_grouped_join_&quot;, grouped.Join.OutputSchema, colResult.Batches);
+return await HashAggregateEngine.ExecuteAsync(grouped.Aggregate, ephemeral, context);
+</code></pre>
+<p>Join output becomes input to hash aggregation — <code>GROUP BY</code> on joined columns without persisting intermediate results.</p>
+<h2 id="fixedwidthkeycompare">10.20 FixedWidthKeyCompare</h2>
+<pre><code class="language-csharp">// src/RainDB.Query/Execution/FixedWidthKeyCompare.cs
+internal static int ComparePart(RainDbType type, ulong xa, ulong xb) =&gt;
+    type switch
+    {
+        RainDbType.Int32 =&gt; ((int)(uint)xa).CompareTo((int)(uint)xb),
+        RainDbType.Int64 =&gt; ((long)xa).CompareTo((long)xb),
+        RainDbType.Float64 =&gt; CompareFloat64Bits(xa, xb),
+        RainDbType.Boolean =&gt; ((xa != 0) ? 1 : 0).CompareTo(xb != 0 ? 1 : 0),
+        _ =&gt; xa.CompareTo(xb),
+    };
+</code></pre>
+<p>Shared across hash aggregate sort, join sort-merge, and composite key compare.</p>
+<h2 id="example-trace">10.21 Example trace</h2>
+<pre><code class="language-sql">SELECT region, SUM(amount), COUNT(*)
+FROM sales
+WHERE active = 1
+GROUP BY region;
+</code></pre>
+<pre><code>ExecuteAsync
+batch 0: partial map { &quot;us&quot; → [sum=100, count=5], &quot;eu&quot; → [sum=200, count=3] }
+batch 1: partial map { &quot;us&quot; → [sum=50, count=2], &quot;ap&quot; → [sum=80, count=1] }
+MergePartials → global { us: [150, 7], eu: [200, 3], ap: [80, 1] }
+SortKeys → [ap, eu, us] (lexicographic on region column)
+MaterializeOutput → ColumnarBatch(3 rows, [region, sum, count])
+</code></pre>
+<h2 id="tests-and-limitations">10.22 Tests and limitations</h2>
+<p>Tests: <code>HashAggregatePhysicalTests</code>, <code>SqlGroupByTests</code> in <code>tests/RainDB.Tests/</code>.</p>
+<table class="table">
+<thead>
+<tr>
+<th>Limitation</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>No <code>DISTINCT</code> aggregates</td>
+<td><code>COUNT(DISTINCT x)</code> not supported</td>
+</tr>
+<tr>
+<td>No <code>AVG</code> builtin</td>
+<td>Use <code>SUM/COUNT</code></td>
+</tr>
+<tr>
+<td>In-memory only</td>
+<td>Spill hook is metrics-only</td>
+</tr>
+<tr>
+<td>No sort-aggregation</td>
+<td>Hash-only grouping</td>
+</tr>
+<tr>
+<td>SIMD</td>
+<td>Per-row <code>AggregateRowOps</code>, no AVX2 grouped sum</td>
+</tr>
+</tbody>
+</table>
+<h2 id="summary">10.23 Summary</h2>
+<p>Hash aggregation in RainDB follows a classic partial-aggregate pattern:</p>
+<ol>
+<li><strong>Encode</strong> row keys as <code>GroupKey</code> or <code>CompositeJoinKey</code></li>
+<li><strong>Accumulate</strong> per batch in isolated hash maps using <code>AggregateRowOps</code></li>
+<li><strong>Merge</strong> partials with associative <code>Combine</code></li>
+<li><strong>Sort</strong> keys for deterministic output order</li>
+<li><strong>Materialize</strong> column chunks with SQL-correct null bits on aggregates</li>
+</ol>
+<p>The UTF-8 path reuses join key infrastructure (<code>CompositeJoinKey</code>, <code>CompositeJoinKeyBuilder</code>, <code>CompositeJoinKeyComparer</code>), keeping equality semantics consistent across <code>GROUP BY</code> and <code>JOIN</code> operators.</p>
+</div>
+          <footer class="doc-footer">
+            <p>Generated by <strong>hoihky</strong> with <strong>MDWeb</strong> and with assistance from <strong>AI</strong></p>
+
+          </footer>
+        </article>
+
+        
+                <aside class="toc" aria-label="On this page">
+                  <p class="toc-title">On this page</p>
+                  <ul>
+                    
+                        <li class="toc-h1">
+                          <a href="#chapter-10-hash-aggregation">Chapter 10: Hash Aggregation</a>
+                        </li>
+                        
+                        <li class="toc-h1">
+                          <a href="#part-i-theory">Part I: Theory</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#101-hash-table-based-grouping">10.1 Hash table based grouping</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#multiset-semantics">Multiset semantics</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#hash-function-requirements">Hash function requirements</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#102-open-addressing-vs-closed-addressing">10.2 Open addressing vs closed addressing</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#closed-addressing-separate-chaining">Closed addressing (separate chaining)</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#open-addressing">Open addressing</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#engine-choice">Engine choice</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#103-hash-aggregation-vs-sort-aggregation">10.3 Hash aggregation vs sort aggregation</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#hash-aggregation">Hash aggregation</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#sort-aggregation">Sort aggregation</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#hybrid-decisions">Hybrid decisions</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#104-memory-bounds-and-spill">10.4 Memory bounds and spill</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#grace-hash-aggregation-spill-to-disk">Grace hash aggregation (spill to disk)</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#partial-spill-strategies">Partial spill strategies</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#memory-estimation">Memory estimation</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#105-multi-column-group-keys">10.5 Multi-column group keys</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#lexicographic-ordering">Lexicographic ordering</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#106-handling-variable-length-keys">10.6 Handling variable-length keys</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#107-output-ordering-of-group-by">10.7 Output ordering of GROUP BY</a>
+                        </li>
+                        
+                        <li class="toc-h1">
+                          <a href="#part-ii-raindb-implementation">Part II: RainDB Implementation</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#108-hashaggregatephysicalplan">10.8 HashAggregatePhysicalPlan</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#output-slot-layout">Output slot layout</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#109-engine-entry-and-dual-code-paths">10.9 Engine entry and dual code paths</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#empty-table">Empty table</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1010-groupkey-and-fixedwidthgroupkeybuilder">10.10 GroupKey and FixedWidthGroupKeyBuilder</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#buildkey-from-a-row">BuildKey from a row</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#physicalvaluetoulong">PhysicalValueToULong</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1011-accumulatebatch-fixed-width-path">10.11 AccumulateBatch (fixed-width path)</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1012-compositejoinkey-utf-8-path">10.12 CompositeJoinKey UTF-8 path</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#deepclone-on-merge">DeepClone on merge</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1013-mergepartials">10.13 MergePartials</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1014-aggregaterowops">10.14 AggregateRowOps</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#addcountstar-addcountcolumn">AddCountStar / AddCountColumn</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#addrow">AddRow</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#combine">Combine</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1015-sorting-group-keys">10.15 Sorting group keys</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1016-materializeoutput">10.16 MaterializeOutput</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#materializekeycolumn">MaterializeKeyColumn</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#shouldemitaggregatenull">ShouldEmitAggregateNull</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1017-spill-hook">10.17 Spill hook</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1018-validation-and-parallelism">10.18 Validation and parallelism</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1019-groupedjoinphysicalplan-integration">10.19 GroupedJoinPhysicalPlan integration</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1020-fixedwidthkeycompare">10.20 FixedWidthKeyCompare</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1021-example-trace">10.21 Example trace</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1022-tests-and-limitations">10.22 Tests and limitations</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1023-summary">10.23 Summary</a>
+                        </li>
+                        
+                  </ul>
+                </aside>
+                
+      </main>
+    </div>
+  </div>
+  <script src="assets/vendor/mermaid.min.js"></script>
+  <script src="assets/vendor/highlight.min.js"></script>
+  <script src="assets/js/site.js"></script>
+</body>
+</html>

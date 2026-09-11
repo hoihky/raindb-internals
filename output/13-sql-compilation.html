@@ -1,0 +1,1142 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Chapter 13: SQL Compilation · Building an OLAP Database Engine from Scratch with RainDB</title>
+  <meta name="description" content="Generated documentation site">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="assets/css/site.css">
+  <link rel="stylesheet" href="assets/vendor/atom-one-dark.min.css">
+</head>
+<body>
+  <div class="site">
+    <header class="topbar">
+      <button class="sidebar-toggle" id="sidebar-toggle" aria-label="Toggle navigation">☰</button>
+      <a href="index.html" class="brand">Building an OLAP Database Engine from Scratch with RainDB</a>
+      <div class="search-wrap">
+        <input type="search" id="search" placeholder="Search docs…" autocomplete="off">
+      </div>
+    </header>
+
+    <div class="layout">
+      <aside class="sidebar" id="sidebar">
+        <nav class="nav" aria-label="Documentation">
+          <ul class="nav-list">
+            
+                        <li class="nav-item depth-0">
+                          
+                            <a href="index.html" class="nav-link">Building an OLAP Database Engine from Scratch</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="01-olap-fundamentals.html" class="nav-link">Chapter 1: OLAP Fundamentals</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="02-architecture-and-modules.html" class="nav-link">Chapter 2: Architecture and Modules</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="03-columnar-storage-model.html" class="nav-link">Chapter 3: Columnar Storage Model</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="04-chunk-data-structures.html" class="nav-link">Chapter 4: Chunk Data Structures</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="05-catalog-and-tables.html" class="nav-link">Chapter 5: Catalog and Tables</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="06-buffer-management.html" class="nav-link">Chapter 6: Buffer Management</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="07-execution-pipeline.html" class="nav-link">Chapter 7: Execution Pipeline</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="08-vectorized-scan-filter-project.html" class="nav-link">Chapter 8: Vectorized Scan, Filter, and Project</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="09-global-aggregates.html" class="nav-link">Chapter 9: Global Aggregates</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="10-hash-aggregation.html" class="nav-link">Chapter 10: Hash Aggregation</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="11-joins.html" class="nav-link">Chapter 11: Joins</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="12-sort-and-limit.html" class="nav-link">Chapter 12: Sort and Limit</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0 is-active">
+                          
+                            <a href="13-sql-compilation.html" class="nav-link">Chapter 13: SQL Compilation</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="14-persistence.html" class="nav-link">Chapter 14: Persistence</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="15-future-extensions.html" class="nav-link">Chapter 15: Future Extensions</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="16-mmap-io.html" class="nav-link">Chapter 16: mmap I/O</a>
+                            
+                        </li>
+                        
+          </ul>
+        </nav>
+      </aside>
+
+      <main class="content">
+        <article class="doc">
+          <header class="doc-header">
+            <h1>Chapter 13: SQL Compilation</h1>
+          </header>
+          <div class="doc-body"><h1 id="chapter-13-sql-compilation">Chapter 13: SQL Compilation</h1>
+<p>SQL compilation is the bridge between declarative queries and executable plans. Every OLAP engine that accepts SQL text must transform human-readable statements into structures the runtime can execute efficiently. This chapter first explains how database compilers work in general — lexer through code generation, grammars, intermediate representations, and prepared statements — then walks RainDB's staged pipeline from <code>SqlLexer</code> through physical plan lowering.</p>
+<hr />
+<h1 id="part-i-concepts">Part I — Concepts</h1>
+<h2 id="compiler-phases-from-text-to-execution">13.1 Compiler phases: from text to execution</h2>
+<p>Turning SQL into runnable work is a pipeline of distinct transformations. Engines differ in detail, but the stages recur often enough to be worth naming:</p>
+<pre><code class="language-text">SQL text
+→ Lexical analysis (characters → tokens)
+→ Syntax analysis (tokens → parse tree / AST)
+→ Semantic analysis (types, scopes, catalog binding)
+→ Logical planning (relational algebra IR)
+→ Optimization (rule-based or cost-based rewrites)
+→ Physical planning (algorithms, layouts)
+→ Code generation (interpreted tree, bytecode, or native code)
+→ Execution
+</code></pre>
+<h3 id="lexical-analysis">Lexical analysis</h3>
+<p>The scanner walks the input left to right and emits <strong>tokens</strong>: reserved words, identifiers, numeric and string literals, comparison operators, and delimiters. SQL lexers are frequently hand-coded because token boundaries are awkward for generic generators — multi-character operators, keyword/identifier overlap, and literal edge cases all need special cases.</p>
+<p>Whitespace and comments are skipped. Each token carries a source offset so later phases can report precise errors.</p>
+<h3 id="syntax-analysis-parsing">Syntax analysis (parsing)</h3>
+<p>The parser checks whether the token stream matches a <strong>grammar</strong> and builds an <strong>abstract syntax tree (AST)</strong> whose nodes mirror language constructs (<code>SelectStatement</code>, <code>BinaryExpression</code>) without carrying parse-only scaffolding.</p>
+<p>Implementations range from <strong>recursive descent</strong> (readable, easy to extend clause by clause) to <strong>table-driven LR/GLR</strong> parsers generated from yacc-style specs. Statement-level SQL is mostly amenable to LR parsing; dialect forks and optional clauses still push many teams toward hybrid or hand-tuned front ends.</p>
+<h3 id="binding-and-semantic-analysis">Binding and semantic analysis</h3>
+<p>Syntax alone does not guarantee meaning. Semantic passes ask catalog-backed questions:</p>
+<ul>
+<li>Is <code>sales</code> a known table?</li>
+<li>Does <code>amount</code> resolve to a column on that table?</li>
+<li>Can <code>amount</code> be compared to <code>'hello'</code>?</li>
+<li>May <code>region</code> appear in <code>SELECT</code> without a matching <code>GROUP BY</code> entry?</li>
+</ul>
+<p><strong>Name resolution</strong> ties identifiers to catalog objects. <strong>Binding</strong> stamps stable handles — column ordinals, physical types — onto tree nodes. Ambiguity and missing objects should fail at compile time rather than at execution.</p>
+<h3 id="optimization">Optimization</h3>
+<p>An optimizer rewrites logical plans into semantically equivalent but cheaper shapes. Classic <strong>rule-based</strong> passes push predicates toward scans and prune unused columns. <strong>Cost-based</strong> optimizers rank alternatives with cardinality estimates drawn from table statistics. RainDB currently skips a dedicated optimizer and lowers logical nodes directly; Chapter 15 outlines what a fuller pass would add.</p>
+<h3 id="physical-planning-and-code-generation">Physical planning and code generation</h3>
+<p>Physical planning picks concrete algorithms: hash versus sort-merge join, full sort versus bounded top-N, scan parallelism. <strong>Code generation</strong> may materialize an interpreted operator tree (RainDB's approach today), emit vectorized bytecode (common in Velox- and DuckDB-style engines), or lower to LLVM IR (ClickHouse, HyPer). Whatever form it takes, the output is what the runtime executes.</p>
+<h3 id="where-raindb-sits-today">Where RainDB sits today</h3>
+<p>RainDB runs lex → parse → bind → physical plan. There is no separate optimizer stage and no bytecode tier — compiled queries become <code>IPhysicalPlan</code> instances ready for the executor.</p>
+<h2 id="context-free-grammars-and-sql">13.2 Context-free grammars and SQL</h2>
+<p>In the Chomsky hierarchy, <strong>context-free grammars (CFGs)</strong> allow productions with a single non-terminal on the left and any mix of terminals and non-terminals on the right. SQL <code>SELECT</code> syntax in standards and textbooks is usually written this way.</p>
+<p>A toy fragment might look like:</p>
+<pre><code class="language-text">&lt;select_statement&gt; ::= SELECT &lt;select_list&gt; FROM &lt;table_ref&gt; &lt;where_clause&gt;? &lt;group_clause&gt;? &lt;order_clause&gt;? &lt;limit_clause&gt;?
+&lt;where_clause&gt;     ::= WHERE &lt;boolean_expr&gt;
+&lt;boolean_expr&gt;     ::= &lt;comparison&gt; | &lt;boolean_expr&gt; AND &lt;boolean_expr&gt;
+</code></pre>
+<p>CFGs alone cannot enforce every SQL rule. Constraints such as &quot;aggregates may appear only in grouped or fully aggregated contexts&quot; belong in semantic analysis, not in the context-free layer.</p>
+<h3 id="ambiguity-and-precedence">Ambiguity and precedence</h3>
+<p>Expression grammars need explicit precedence: <code>AND</code> typically binds tighter than <code>OR</code>; arithmetic tighter than comparisons. Generator tools encode this in precedence tables; recursive-descent code encodes it by call nesting (<code>ParseOr</code> delegates to <code>ParseAnd</code>, which delegates to <code>ParseComparison</code>).</p>
+<h3 id="why-grammars-matter-to-implementers">Why grammars matter to implementers</h3>
+<ul>
+<li>A grammar document is the acceptance contract for the SQL surface.</li>
+<li>Regression suites often freeze <strong>golden trees</strong> for both valid and rejected inputs.</li>
+<li>New syntax usually lands as new productions first, then semantic rules, then execution support.</li>
+</ul>
+<p>RainDB's accepted subset is implied by <code>SelectParser</code> and locked down by <code>StrictSqlSubset</code> tests.</p>
+<h2 id="ast-vs-intermediate-representation-ir">13.3 AST vs intermediate representation (IR)</h2>
+<p>The parse tree and the execution plan answer different questions and should not be treated as interchangeable.</p>
+<table class="table">
+<thead>
+<tr>
+<th>Aspect</th>
+<th>AST (parse tree)</th>
+<th>IR (logical / physical plan)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Mirrors surface syntax</td>
+<td>Closely</td>
+<td>No — algebra-oriented</td>
+</tr>
+<tr>
+<td>Name usage</td>
+<td>Identifiers as written</td>
+<td>Logical: names; Physical: ordinals and ids</td>
+</tr>
+<tr>
+<td>Evaluation order</td>
+<td>Implicit</td>
+<td>Explicit tree or DAG</td>
+</tr>
+<tr>
+<td>Primary rewrite target</td>
+<td>Rarely</td>
+<td>Optimizer's main workspace</td>
+</tr>
+<tr>
+<td>Shared across front ends</td>
+<td>SQL-specific</td>
+<td>Reusable by SQL, LINQ, APIs</td>
+</tr>
+</tbody>
+</table>
+<h3 id="ast-characteristics">AST characteristics</h3>
+<p>A node like <code>BinaryExpression(&gt;, ColumnRef(amount), Literal(1.0))</code> records that the user wrote <code>amount &gt; 1.0</code>. It does not, by itself, disambiguate which table owns <code>amount</code> when several are visible — binding supplies that.</p>
+<h3 id="logical-ir">Logical IR</h3>
+<p>Logical IR states <strong>what</strong> to compute in relational terms: <code>TableScan(sales)</code>, <code>Filter(amount &gt; 1.0)</code>, <code>HashAggregate(groupBy=[region], agg=[sum(amount)])</code>. Human-readable names typically remain. SQL, LINQ, and programmatic planners can all target the same logical layer.</p>
+<h3 id="physical-ir">Physical IR</h3>
+<p>Physical IR states <strong>how</strong> to compute: <code>VectorizedScanPhysicalPlan(tableId, columnIndices, filters, ...)</code>, <code>HashJoinPhysicalPlan(...)</code>. Catalog handles, algorithm choices, and execution knobs live here.</p>
+<h3 id="raindbs-two-ir-layers">RainDB's two IR layers</h3>
+<p>RainDB defines <strong>logical nodes</strong> under <code>RainDB.Abstractions/Logical</code> (<code>LogicalTableScan</code>, <code>LogicalInnerJoin</code>) and <strong>physical plans</strong> under <code>RainDB.Query/Plans</code>. There is no public AST type hierarchy — <code>SelectParser</code> emits logical IR directly. That shortcut suits a narrow grammar; larger systems usually retain an explicit AST for tooling and parse-level <code>EXPLAIN</code>.</p>
+<h2 id="name-resolution-and-binding">13.4 Name resolution and binding</h2>
+<p><strong>Name resolution</strong> traverses lexical scopes and maps each identifier to exactly one catalog object:</p>
+<ul>
+<li>Table aliases introduced in <code>FROM</code></li>
+<li>Qualified (<code>sales.amount</code>) or bare (<code>amount</code>) column references</li>
+<li>Columns visible from enclosing scopes in correlated subqueries</li>
+</ul>
+<p>Inner scopes shadow outer ones; join predicates may legally reference columns from either side.</p>
+<p><strong>Binding</strong> records the resolved meaning in a form execution can use:</p>
+<pre><code class="language-text">&quot;sales&quot;.amount  →  TableId {guid}, column index 1, RainDbType.Float64
+</code></pre>
+<p>Bound artifacts depend on the live catalog. Identical SQL can compile differently after a schema change. Production engines track <strong>schema versions</strong> so cached plans can be discarded safely (see prepared statements below).</p>
+<h3 id="common-binding-errors">Common binding errors</h3>
+<table class="table">
+<thead>
+<tr>
+<th>Error</th>
+<th>Cause</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Unknown table</td>
+<td>Identifier absent from catalog</td>
+</tr>
+<tr>
+<td>Unknown column</td>
+<td>Name not in referenced table schema</td>
+</tr>
+<tr>
+<td>Ambiguous column</td>
+<td>Bare name matches multiple joined tables</td>
+</tr>
+<tr>
+<td>Invalid qualifier</td>
+<td><code>WHERE other.col</code> when only <code>sales</code> is in scope</td>
+</tr>
+</tbody>
+</table>
+<p>RainDB's strict subset rejects several ambiguous patterns during parsing — for example, bare column names in grouped join queries.</p>
+<h2 id="semantic-analysis">13.5 Semantic analysis</h2>
+<p>After names resolve, semantic passes enforce typing and structural SQL rules.</p>
+<h3 id="type-checking">Type checking</h3>
+<ul>
+<li>Predicates need compatible operand types (or well-defined casts)</li>
+<li><code>SUM</code> expects numeric operands</li>
+<li>Join keys must pair columns of compatible types</li>
+</ul>
+<h3 id="aggregate-and-grouping-rules">Aggregate and grouping rules</h3>
+<p>Standard SQL expects every non-aggregated <code>SELECT</code> expression either to appear in <code>GROUP BY</code> or to be functionally determined by the grouping key (engines differ on how far they take the latter). Catching violations at compile time avoids silent wrong answers at runtime.</p>
+<h3 id="set-operation-compatibility">Set operation compatibility</h3>
+<p><code>UNION</code> branches must align in column count and type. <code>INSERT</code> rows must fit the destination schema.</p>
+<h3 id="side-effects-and-volatility">Side effects and volatility</h3>
+<p>Volatile functions cannot be folded at compile time. RainDB's current subset exposes no user-defined functions.</p>
+<p>The output of semantic analysis is a <strong>bound logical plan</strong> eligible for optimization or direct lowering.</p>
+<h2 id="query-optimization-overview">13.6 Query optimization overview</h2>
+<p>Optimization explores equivalent plans and picks one with lower estimated cost. Two broad strategies dominate practice.</p>
+<h3 id="rule-based-optimization-rbo">Rule-based optimization (RBO)</h3>
+<p>A pipeline (or fixpoint loop) of deterministic rewrites:</p>
+<ul>
+<li><strong>Predicate pushdown</strong> — relocate filters next to scans</li>
+<li><strong>Projection pruning</strong> — drop columns no operator downstream reads</li>
+<li><strong>Constant folding</strong> — reduce <code>1 + 2</code> at compile time</li>
+<li><strong>Join reordering</strong> (where semantics permit) — commute or regroup joins</li>
+</ul>
+<p>Rules are quick, predictable, and testable without statistics.</p>
+<h3 id="cost-based-optimization-cbo">Cost-based optimization (CBO)</h3>
+<p>Each candidate plan receives an estimated cost built from <strong>statistics</strong>:</p>
+<ul>
+<li>Base table row counts</li>
+<li>Distinct-value counts (NDV) per column</li>
+<li>Skew-capturing histograms</li>
+<li>Join selectivity models</li>
+</ul>
+<p>Search may use dynamic programming over join orders (System R lineage) or greedy heuristics common in large-scale OLAP. CBO pays off most when many tables join and cardinalities are skewed.</p>
+<h3 id="raindbs-position">RainDB's position</h3>
+<p>RainDB lowers logical plans with fixed physical choices — hash join by default, no predicate pushdown yet. Chapter 15 covers statistics and cost-based planning as future work.</p>
+<h2 id="prepared-statements">13.7 Prepared statements</h2>
+<p><strong>Prepared statements</strong> decouple compilation from repeated execution:</p>
+<ol>
+<li><strong>Prepare</strong> — parse, bind, and optionally optimize once; retain a plan template</li>
+<li><strong>Execute</strong> — bind parameter values and run the stored plan</li>
+</ol>
+<p>Benefits include:</p>
+<ul>
+<li><strong>Amortized compile cost</strong> — the same shape runs millions of times in OLTP-style workloads</li>
+<li><strong>Injection resistance</strong> — parameters are data, not concatenated text</li>
+<li><strong>Plan stability</strong> — execution shape stays fixed until statistics or schema drift</li>
+</ul>
+<h3 id="parameter-binding">Parameter binding</h3>
+<p>Placeholders stand in for literals: <code>WHERE amount &gt; ?</code> supplies <code>1.0</code> at execute time. Physical filters can store values in dedicated slots (<code>ColumnCompareFilter.ImmediateBits</code>) without re-resolving column indices.</p>
+<h3 id="plan-cache-invalidation">Plan cache invalidation</h3>
+<p>Reuse is unsafe when:</p>
+<ul>
+<li>A referenced table's schema changes (columns added, dropped, or retyped)</li>
+<li>Statistics refresh materially alters cost estimates (in CBO engines)</li>
+<li>Operator semantics change across engine versions</li>
+</ul>
+<p>A common pattern attaches a <code>SchemaVersion</code> to each table, records versions at prepare time, and revalidates before execute.</p>
+<h3 id="raindb-status">RainDB status</h3>
+<p>RainDB parses and binds on every <code>ExecuteSqlAsync</code> call today. <code>MemoryTable.SchemaVersion</code> is in place for a future cache. The async <code>CompileAsync</code> signature leaves room for disk-backed catalog access and cache I/O.</p>
+<hr />
+<h1 id="part-ii-raindb">Part II — RainDB</h1>
+<p>RainDB exposes SQL as the primary query surface for embedded analytics. The compiler is deliberately staged: <strong>lex</strong> the text into tokens, <strong>parse</strong> tokens into logical IR that still uses table and column <em>names</em>, <strong>bind</strong> those names against the live catalog to produce column indices and physical types, then <strong>lower</strong> the bound logical plan into <code>IPhysicalPlan</code> nodes that the query executor already understands.</p>
+<h2 id="why-three-stages">13.8 Why three stages?</h2>
+<p>OLAP engines separate parsing from binding for three practical reasons:</p>
+<ol>
+<li><strong>Catalog independence.</strong> Tests can parse SQL into <code>LogicalPlan</code> without constructing tables. The parser never touches <code>ICatalog</code>.</li>
+<li><strong>Shared lowering.</strong> <code>LogicalTableScanBinder</code> and <code>LogicalJoinBinder</code> are reused by <code>StrictSqlSubset.CompilePhysicalPlan</code> and <code>DefaultSqlCompiler</code> alike. A future LINQ compiler targets the same logical nodes.</li>
+<li><strong>Fail-fast semantics.</strong> Unsupported SQL is rejected at compile time via <code>SqlCompileException</code>, not at runtime with silent wrong answers. RainDB's strict subset prefers a hard error over guessing.</li>
+</ol>
+<p>The end-to-end path from <code>RainDbEngine.ExecuteSqlAsync</code> looks like this:</p>
+<pre><code class="language-text">SQL string
+→ SqlLexer + SelectParser        (RainDB.Sql/Parsing)
+→ LogicalPlan / ILogicalRoot     (RainDB.Abstractions/Logical)
+→ LogicalTableScanBinder or
+  LogicalJoinBinder              (RainDB.Sql/Compilation)
+→ IPhysicalPlan                  (RainDB.Query/Plans)
+→ DefaultQueryExecutor           (RainDB.Query/Execution)
+</code></pre>
+<pre><code class="language-csharp">// src/RainDB.Driver/RainDbEngine.cs
+public async ValueTask&lt;IQueryResult&gt; ExecuteSqlAsync(string sql, CancellationToken cancellationToken = default)
+{
+    var ctx = CreateSession(cancellationToken);
+    var plan = await SqlCompiler.CompileAsync(sql, Catalog, cancellationToken).ConfigureAwait(false);
+    return await Executor.ExecuteAsync(plan, ctx).ConfigureAwait(false);
+}
+</code></pre>
+<p>Compilation is synchronous inside <code>CompileAsync</code> today (it returns <code>ValueTask.FromResult</code>), but the async signature leaves room for disk-backed catalog lookups or plan-cache I/O later.</p>
+<h2 id="the-strict-sql-subset">13.9 The strict SQL subset</h2>
+<p><code>StrictSqlSubset</code> is both documentation and a test-friendly entry point. It exposes parse-only and parse-and-bind helpers without requiring <code>ISqlCompiler</code>:</p>
+<pre><code class="language-csharp">// src/RainDB.Sql/StrictSqlSubset.cs
+public static class StrictSqlSubset
+{
+    public static LogicalPlan ParseLogicalPlan(string sql) =&gt; SqlParser.Parse(sql);
+
+    public static IPhysicalPlan CompilePhysicalPlan(
+        string sql,
+        ICatalog catalog,
+        VectorizedScanExecutionOptions scanOptions = default) =&gt;
+        CompileRoot(ParseLogicalPlan(sql).Root, catalog, scanOptions);
+}
+</code></pre>
+<p>Supported shapes today:</p>
+<table class="table">
+<thead>
+<tr>
+<th>Feature</th>
+<th>Supported</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>SELECT *</code> or column list</td>
+<td>Yes</td>
+<td><code>*</code> is mutually exclusive with explicit aggregates in grouped queries</td>
+</tr>
+<tr>
+<td><code>FROM</code> single table</td>
+<td>Yes</td>
+<td></td>
+</tr>
+<tr>
+<td><code>INNER JOIN … ON</code> equi-keys</td>
+<td>Yes</td>
+<td>Keys must be <code>table.column = table.column</code>; multiple keys ANDed</td>
+</tr>
+<tr>
+<td><code>WHERE</code></td>
+<td>Yes</td>
+<td>Conjunctive (<code>AND</code> only); one comparison per conjunct</td>
+</tr>
+<tr>
+<td><code>GROUP BY</code> + aggregates</td>
+<td>Yes</td>
+<td><code>SUM</code>, <code>MIN</code>, <code>MAX</code>, <code>COUNT</code>, <code>COUNT(*)</code></td>
+</tr>
+<tr>
+<td>Global aggregate (no <code>GROUP BY</code>)</td>
+<td>Yes</td>
+<td>Exactly one aggregate in <code>SELECT</code></td>
+</tr>
+<tr>
+<td><code>ORDER BY</code> / <code>LIMIT</code></td>
+<td>Partial</td>
+<td>Only on non-grouped, non-global-aggregate scans and joins</td>
+</tr>
+<tr>
+<td><code>DISTINCT</code>, <code>HAVING</code>, subqueries</td>
+<td>No</td>
+<td>Parser throws <code>SqlCompileException</code></td>
+</tr>
+<tr>
+<td><code>LEFT</code>/<code>RIGHT</code>/<code>FULL</code> join</td>
+<td>No</td>
+<td>Only <code>INNER JOIN</code> tokenized as keyword</td>
+</tr>
+</tbody>
+</table>
+<p>When you add SQL surface area, extend the parser first, then logical IR if needed, then binders, then executors — in that order.</p>
+<h2 id="sqllexer-hand-written-tokenization">13.10 SqlLexer: hand-written tokenization</h2>
+<p><code>SqlLexer</code> lives in <code>src/RainDB.Sql/Parsing/SqlLexer.cs</code>. It is intentionally small: ASCII identifiers, <code>--</code> line comments, and a fixed keyword set. There is no Unicode identifier support; table and column names must be ASCII letters, digits, and underscore.</p>
+<h3 id="token-model">13.10.1 Token model</h3>
+<pre><code class="language-csharp">internal enum SqlTokenKind
+{
+    EndOfFile,
+    Identifier,
+    Star,
+    Comma,
+    LParen,
+    RParen,
+    Eq, Ne, Lt, Le, Gt, Ge,
+    Semicolon,
+    Dot,
+    StringLiteral,
+    Number,
+    KwSelect, KwFrom, KwWhere,
+    KwInner, KwJoin, KwOn, KwAnd,
+}
+
+internal readonly record struct SqlToken(SqlTokenKind Kind, int Start, int Length);
+</code></pre>
+<p>Each token records <strong>start offset and length</strong> into the original source string. Error messages reference positions; <code>Lexeme</code> reconstructs the substring without allocating until needed:</p>
+<pre><code class="language-csharp">public ReadOnlySpan&lt;char&gt; Lexeme(in SqlToken t) =&gt; _src.AsSpan(t.Start, t.Length);
+</code></pre>
+<h3 id="saverestore-for-speculative-parsing">13.10.2 Save/restore for speculative parsing</h3>
+<p><code>SelectParser.TryParseAggregationCall</code> uses lexer checkpointing. It advances past a function-looking identifier; if <code>(</code> does not follow, it rewinds:</p>
+<pre><code class="language-csharp">var savePos = _lexer.Save();
+var saveTok = _cur;
+Advance();
+if (_cur.Kind != SqlTokenKind.LParen)
+{
+    _lexer.Restore(savePos);
+    _cur = saveTok;
+    return false;
+}
+</code></pre>
+<p>This pattern avoids a separate &quot;is this an aggregate call?&quot; grammar production. The lexer exposes <code>Save()</code> / <code>Restore(int)</code> as thin wrappers over <code>_pos</code>.</p>
+<h3 id="literals-keywords-and-operators">13.10.3 Literals, keywords, and operators</h3>
+<p><strong>Strings</strong> use single quotes with SQL-style <code>''</code> escaping; unterminated strings throw <code>SqlCompileException</code>. <strong>Numbers</strong> accept optional sign, integer part, and optional fraction. <strong>Booleans</strong> (<code>TRUE</code>/<code>FALSE</code>) are recognized in <code>ParseLiteral</code>, not in the lexer.</p>
+<p><code>ClassifyKeyword</code> uppercases identifiers on the stack for <code>SELECT</code>, <code>FROM</code>, <code>WHERE</code>, <code>INNER</code>, <code>JOIN</code>, <code>ON</code>, <code>AND</code>. Words like <code>GROUP</code>, <code>ORDER</code>, and <code>LIMIT</code> stay as <code>Identifier</code> tokens — <code>SelectParser</code> matches them with <code>LexemeEqualsIgnoreCase</code>.</p>
+<p>Comparison operators: <code>=</code>, <code>!=</code>/<code>&lt;&gt;</code> → <code>Ne</code>, <code>&lt;</code>, <code>&lt;=</code>, <code>&gt;</code>, <code>&gt;=</code>. Line comments (<code>--</code>) are skipped; there is no block comment syntax.</p>
+<h2 id="sqlparser-and-selectparser">13.11 SqlParser and SelectParser</h2>
+<p><code>SqlParser.Parse</code> trims input, constructs <code>SqlLexer</code> and private <code>SelectParser</code>, and returns <code>LogicalPlan</code>:</p>
+<pre><code class="language-csharp">// src/RainDB.Sql/Parsing/SqlParser.cs
+public static LogicalPlan Parse(string sql)
+{
+    ArgumentException.ThrowIfNullOrWhiteSpace(sql);
+    var trimmed = sql.Trim();
+    var lexer = new SqlLexer(trimmed);
+    var parser = new SelectParser(lexer, trimmed);
+    return parser.Parse();
+}
+</code></pre>
+<p><code>SelectParser</code> is recursive descent with a single current token <code>_cur</code>. The top-level <code>Parse()</code> method encodes the grammar's major branches.</p>
+<h3 id="parse-order">13.11.1 Parse order</h3>
+<p>Every statement follows:</p>
+<ol>
+<li><code>SELECT</code> → <code>ParseSelectItems</code></li>
+<li><code>FROM</code> → <code>ParseFromClause</code> (table or inner join)</li>
+<li>Optional <code>WHERE</code>, <code>GROUP BY</code>, <code>ORDER BY</code>, <code>LIMIT</code> depending on shape</li>
+<li><code>ExpectEnd</code> (optional trailing <code>;</code>, then EOF)</li>
+</ol>
+<h3 id="select-list-shapes">13.11.2 SELECT list shapes</h3>
+<p><code>ParseSelectItems</code> returns a list of <code>LogicalSelectListItem</code> and sets <code>starOnly</code>:</p>
+<ul>
+<li><code>SELECT *</code> → empty list, <code>starOnly = true</code></li>
+<li>Column projections → <code>LogicalColumnProjection</code></li>
+<li>Aggregates → <code>LogicalAggregationCall</code> via <code>TryParseAggregationCall</code></li>
+</ul>
+<p><code>DISTINCT</code> is explicitly rejected:</p>
+<pre><code class="language-csharp">if (_cur.Kind == SqlTokenKind.Identifier &amp;&amp; LexemeEqualsIgnoreCase(_cur, &quot;DISTINCT&quot;))
+throw new SqlCompileException(&quot;DISTINCT is not supported in the strict SQL subset.&quot;);
+</code></pre>
+<h3 id="from-clause-single-table-vs-join">13.11.3 FROM clause: single table vs join</h3>
+<pre><code class="language-csharp">private FromClause ParseFromClause()
+{
+    var left = ExpectIdentifier(&quot;table name&quot;);
+    if (_cur.Kind != SqlTokenKind.KwInner)
+        return new SingleTableFrom(left);
+
+    Advance();
+    Expect(SqlTokenKind.KwJoin, &quot;JOIN&quot;);
+    var right = ExpectIdentifier(&quot;table name&quot;);
+    Expect(SqlTokenKind.KwOn, &quot;ON&quot;);
+    // ... ParseJoinEquiConditions ...
+    return new JoinFrom(left, right, leftKeys, rightKeys);
+}
+</code></pre>
+<p>Join keys must equate one qualified column from the left table with one from the right. <code>MapJoinPair</code> accepts either column order and normalizes into left/right key lists.</p>
+<h3 id="where-conjunctive-predicates">13.11.4 WHERE: conjunctive predicates</h3>
+<p><code>TryParseWhereClause</code> requires <code>WHERE</code> then parses <code>ParseWherePredicate</code>, then zero or more <code>AND</code> conjuncts:</p>
+<pre><code class="language-csharp">private SimpleWhereClause ParseWherePredicate()
+{
+    // optional table.column qualifier
+    var op = ParseCompareOp();
+    var lit = ParseLiteral();
+    return new SimpleWhereClause
+    {
+        QualifierTableName = qualifier,
+        ColumnName = column,
+        Operator = op,
+        Literal = lit,
+    };
+}
+</code></pre>
+<p>Each conjunct becomes one <code>SimpleWhereClause</code> in a list. There is no <code>OR</code>, no parentheses, no expression trees.</p>
+<h3 id="group-by-validation">13.11.5 GROUP BY validation</h3>
+<p>When <code>GROUP BY</code> is present on a single-table scan, the parser builds:</p>
+<pre><code class="language-csharp">return new LogicalPlan(new LogicalTableScan
+{
+    TableName = table,
+    WhereConjuncts = whereConjuncts,
+    GroupByColumns = groupByColsSingle,
+    SelectList = selectItems,
+});
+</code></pre>
+<p><code>ValidateGroupedSelect</code> enforces SQL grouping rules at parse time: every bare column in <code>SELECT</code> must appear in <code>GROUP BY</code>. Aggregates are validated by <code>ValidateAggregationCall</code>.</p>
+<p>For joins with <code>GROUP BY</code>, qualified columns are mandatory (<code>table.column</code>) because unqualified names are ambiguous.</p>
+<h3 id="non-grouped-branches-and-sortlimit">13.11.6 Non-grouped branches and sort/limit</h3>
+<p>Non-grouped scans choose among <code>SELECT *</code> (<code>Projection = null</code>), a lone global aggregate, or a column projection list; mixing bare columns with aggregates without <code>GROUP BY</code> is an error. Join queries mirror the same split on <code>LogicalInnerJoin</code>.</p>
+<p><code>RejectOrderByLimitAfterGrouped</code> rejects <code>ORDER BY</code>/<code>LIMIT</code> on grouped or global-aggregate queries. Otherwise the parser attaches <code>OrderBy</code> and <code>Limit</code> to the logical node; the binder lowers them to <code>SortTopNPhysicalPlan</code>.</p>
+<h2 id="logical-ir-1">13.12 Logical IR</h2>
+<p>Logical nodes live in <code>RainDB.Abstractions/Logical</code>. They use <strong>names</strong>, not indices.</p>
+<h3 id="logicaltablescan">13.12.1 LogicalTableScan</h3>
+<pre><code class="language-csharp">// src/RainDB.Abstractions/Logical/LogicalTableScan.cs
+public sealed class LogicalTableScan : ILogicalRoot
+{
+    public required string TableName { get; init; }
+    public IReadOnlyList&lt;LogicalColumnProjection&gt;? Projection { get; init; }
+    public IReadOnlyList&lt;LogicalColumnProjection&gt;? GroupByColumns { get; init; }
+    public IReadOnlyList&lt;LogicalSelectListItem&gt;? SelectList { get; init; }
+    public IReadOnlyList&lt;SimpleWhereClause&gt;? WhereConjuncts { get; init; }
+    public LogicalAggregate? Aggregate { get; init; }
+    public IReadOnlyList&lt;LogicalSortKey&gt;? OrderBy { get; init; }
+    public int? Limit { get; init; }
+}
+</code></pre>
+<p><code>Explain()</code> on logical nodes produces human-readable plan text for debugging and future <code>EXPLAIN</code> SQL support.</p>
+<h3 id="other-logical-nodes">13.12.2 Other logical nodes</h3>
+<p><code>SimpleWhereClause</code> stores optional <code>QualifierTableName</code>, <code>ColumnName</code>, <code>ScalarCompareOp</code>, and <code>SqlLiteral</code> (kind + raw text; coercion happens in the binder). <code>LogicalInnerJoin</code> carries left/right table names, parallel qualified join key lists, optional <code>WhereConjuncts</code>, projection or grouped select list, and optional sort/limit. Keeping <code>ILogicalRoot</code> in Abstractions lets tests assert on parsed plans without referencing <code>RainDB.Sql</code>.</p>
+<h2 id="defaultsqlcompiler">13.13 DefaultSqlCompiler</h2>
+<p>The production compiler is a thin switch over logical roots:</p>
+<pre><code class="language-csharp">// src/RainDB.Sql/Compilation/DefaultSqlCompiler.cs
+public sealed class DefaultSqlCompiler : ISqlCompiler
+{
+    private readonly VectorizedScanExecutionOptions _defaultScanOptions;
+
+    public ValueTask&lt;IPhysicalPlan&gt; CompileAsync(string sql, ICatalog catalog, CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(sql);
+        ArgumentNullException.ThrowIfNull(catalog);
+        cancellationToken.ThrowIfCancellationRequested();
+        var logical = SqlParser.Parse(sql);
+        IPhysicalPlan plan = logical.Root switch
+        {
+            LogicalTableScan s =&gt; LogicalTableScanBinder.BindAndLower(s, catalog, _defaultScanOptions),
+            LogicalInnerJoin j =&gt; LogicalJoinBinder.BindAndLower(j, catalog, PhysicalJoinAlgorithm.Hash, _defaultScanOptions),
+            _ =&gt; throw new InvalidOperationException($&quot;Unsupported logical root {logical.Root.GetType().Name}.&quot;),
+        };
+        return ValueTask.FromResult(plan);
+    }
+}
+</code></pre>
+<p>Notable details:</p>
+<ul>
+<li><strong>Hash join is the default</strong> algorithm passed to <code>LogicalJoinBinder</code>. Phase B roadmap work will make this heuristic-driven.</li>
+<li><strong><code>VectorizedScanExecutionOptions</code></strong> flows into every physical plan (parallelism, channel scheduler, AVX2 sum). Inject options at construction time for session-level tuning.</li>
+</ul>
+<h2 id="logicaltablescanbinder-overview">13.14 LogicalTableScanBinder overview</h2>
+<p><code>LogicalTableScanBinder.BindAndLower</code> is the heart of single-table lowering:</p>
+<pre><code class="language-csharp">// src/RainDB.Sql/Compilation/LogicalTableScanBinder.cs
+public static IPhysicalPlan BindAndLower(
+    LogicalTableScan scan,
+    ICatalog catalog,
+    VectorizedScanExecutionOptions scanOptions = default)
+{
+    if (!catalog.TryGetTable(scan.TableName, out var ts) || ts is null)
+        throw new SqlCompileException($&quot;Table '{scan.TableName}' does not exist in the catalog or is not a columnar table.&quot;);
+    if (ts is not IColumnarTableSource colTable)
+        throw new SqlCompileException($&quot;Table '{scan.TableName}' is registered but is not a columnar table source.&quot;);
+
+    if (scan.GroupByColumns is { Count: &gt; 0 })
+        return BindHashAggregate(scan, colTable, ts.Schema, scanOptions);
+
+    return BindVectorizedScan(scan, colTable, ts.Schema, scanOptions);
+}
+</code></pre>
+<p>Binding steps common to both paths:</p>
+<ol>
+<li>Resolve <code>TableName</code> → <code>IColumnarTableSource</code> and <code>TableSchema</code></li>
+<li>Validate <code>WHERE</code> table qualifiers reference the scanned table only</li>
+<li>Build <code>ColumnCompareFilter[]</code> from <code>WhereConjuncts</code></li>
+<li>Emit the appropriate physical plan with <code>TableId</code>, indices, filters, and options</li>
+</ol>
+<h2 id="bindvectorizedscan">13.15 BindVectorizedScan</h2>
+<p><code>BindVectorizedScan</code> handles <code>SELECT *</code>, column projections, global aggregates, and sort/limit wrapping.</p>
+<h3 id="output-column-indices">13.15.1 Output column indices</h3>
+<pre><code class="language-csharp">if (scan.Projection is null)
+{
+    outputIndices = new int[colCount];
+    for (var i = 0; i &lt; colCount; i++)
+        outputIndices[i] = i;
+}
+else
+{
+    outputIndices = new int[scan.Projection.Count];
+    for (var i = 0; i &lt; scan.Projection.Count; i++)
+    {
+        var p = scan.Projection[i];
+        ValidateProjectionTableQualifier(p, scan.TableName);
+        outputIndices[i] = ResolveColumn(schema, p.ColumnName, scan.TableName);
+    }
+}
+</code></pre>
+<p><code>ResolveColumn</code> is case-insensitive linear search over <code>TableSchema.Columns</code>. A future catalog index would replace this hot path for wide schemas.</p>
+<h3 id="global-aggregate-branch">13.15.2 Global aggregate branch</h3>
+<p>When <code>scan.Aggregate</code> is set:</p>
+<pre><code class="language-csharp">if (a.Kind == AggregateKind.Count &amp;&amp; a.ColumnName is null)
+    spec = new AggregateSpec(-1, AggregateKind.Count);
+else if (a.Kind == AggregateKind.Count)
+    spec = new AggregateSpec(ResolveColumn(schema, a.ColumnName!, scan.TableName), AggregateKind.Count);
+else
+    spec = new AggregateSpec(ResolveColumn(schema, a.ColumnName!, scan.TableName), a.Kind);
+</code></pre>
+<p><code>AggregateSpec.SourceColumnIndex == -1</code> means <code>COUNT(*)</code>. <code>ValidateAggregate</code> enforces type rules (<code>SUM</code> only on numeric types, <code>MIN</code>/<code>MAX</code> on <code>Float64</code> today).</p>
+<h3 id="sorttopn-wrapping">13.15.3 SortTopN wrapping</h3>
+<p>If the scan is not a global aggregate and has <code>ORDER BY</code> or <code>LIMIT</code>:</p>
+<pre><code class="language-csharp">var scanPlan = new VectorizedScanPhysicalPlan(colTable.Id, outputIndices, filters, aggregate, scanOptions);
+if (scan.Aggregate is not null)
+    return scanPlan;
+if (scan.OrderBy is not { Count: &gt; 0 } &amp;&amp; scan.Limit is null)
+    return scanPlan;
+
+var sortSpecs = scan.OrderBy is { Count: &gt; 0 } ob
+    ? BuildTableSortKeySpecs(schema, scan.TableName, ob)
+    : Array.Empty&lt;SortKeyPhysicalSpec&gt;();
+return new SortTopNPhysicalPlan(colTable.Id, outputIndices, filters, sortSpecs, scan.Limit, scanOptions);
+</code></pre>
+<p><code>BuildTableSortKeySpecs</code> rejects non-sortable types (only fixed-width and <code>Utf8</code> today).</p>
+<h2 id="bindhashaggregate">13.16 BindHashAggregate</h2>
+<p>Grouped queries lower to <code>HashAggregatePhysicalPlan</code>.</p>
+<h3 id="group-key-indices">13.16.1 Group key indices</h3>
+<pre><code class="language-csharp">var groupIndices = new int[scan.GroupByColumns!.Count];
+for (var i = 0; i &lt; scan.GroupByColumns.Count; i++)
+{
+    var p = scan.GroupByColumns[i];
+    ValidateProjectionTableQualifier(p, scan.TableName);
+    groupIndices[i] = ResolveColumn(schema, p.ColumnName, scan.TableName);
+}
+</code></pre>
+<h3 id="select-list-output-slots">13.16.2 SELECT list → output slots</h3>
+<p>The binder walks <code>SelectList</code> in output order, building parallel arrays of <code>AggregateSpec</code> and <code>HashAggregateOutputSlot</code>:</p>
+<pre><code class="language-csharp">case LogicalColumnProjection col:
+    if (!keyOrdinal.TryGetValue(NormalizeGroupKey(col, scan.TableName), out var ko))
+        throw new SqlCompileException(
+            $&quot;Column '{ExplainProj(col)}' is not listed in GROUP BY for table '{scan.TableName}'.&quot;);
+    slots.Add(new HashAggregateOutputSlot(HashAggregateOutputColumnKind.GroupKey, ko));
+    break;
+case LogicalAggregationCall agg:
+    aggs.Add(ToAggregateSpec(schema, agg, scan.TableName));
+    slots.Add(new HashAggregateOutputSlot(HashAggregateOutputColumnKind.Aggregate, aggs.Count - 1));
+    break;
+</code></pre>
+<p><code>NormalizeGroupKey</code> uses an internal <code>\u001f</code> separator between table qualifier and column name so <code>&quot;sales\u001fregion&quot;</code> keys stay unambiguous.</p>
+<h3 id="physical-plan-emission">13.16.3 Physical plan emission</h3>
+<pre><code class="language-csharp">return new HashAggregatePhysicalPlan(
+colTable.Id,
+groupIndices,
+aggs.ToArray(),
+slots.ToArray(),
+filters,
+scanOptions);
+</code></pre>
+<p>Filters are identical <code>ColumnCompareFilter[]</code> used by vectorized scan — hash aggregation applies them per batch before accumulating groups.</p>
+<h2 id="filter-building-where-columncomparefilter">13.17 Filter building: WHERE → ColumnCompareFilter</h2>
+<p>Filter construction is shared between table scan and join binders via <code>BuildColumnCompareFilters</code> and <code>BuildColumnCompareFilter</code>.</p>
+<h3 id="conjunctive-array">13.17.1 Conjunctive array</h3>
+<pre><code class="language-csharp">internal static ColumnCompareFilter[]? BuildColumnCompareFilters(
+    IReadOnlyList&lt;SimpleWhereClause&gt;? conjuncts,
+    TableSchema schema,
+    string tableName)
+{
+    if (conjuncts is null or { Count: 0 })
+        return null;
+    var arr = new ColumnCompareFilter[conjuncts.Count];
+    for (var i = 0; i &lt; conjuncts.Count; i++)
+        arr[i] = BuildColumnCompareFilter(conjuncts[i], schema, tableName);
+    return arr;
+}
+</code></pre>
+<p><code>null</code> means no filter. Non-null arrays are ANDed at execution time.</p>
+<h3 id="columncomparefilter-structure">13.17.2 ColumnCompareFilter structure</h3>
+<pre><code class="language-csharp">// src/RainDB.Query/Plans/VectorizedScanPhysicalPlan.cs
+public readonly record struct ColumnCompareFilter(
+    int ColumnIndex,
+    ScalarCompareOp Op,
+    long ImmediateBits,
+    byte[]? Utf8LiteralBytes = null);
+</code></pre>
+<p>Fixed-width columns store the comparison value in <code>ImmediateBits</code>:</p>
+<ul>
+<li><code>Int32</code> / <code>Int64</code> / <code>Boolean</code> → integer bits in the low bits of <code>long</code></li>
+<li><code>Float64</code> → <code>BitConverter.DoubleToInt64Bits(d)</code></li>
+</ul>
+<p>UTF-8 columns use <code>Utf8LiteralBytes</code> and only support <code>Eq</code> and <code>Ne</code>:</p>
+<pre><code class="language-csharp">if (wt == RainDbType.Utf8)
+{
+    if (where.Operator is not (ScalarCompareOp.Eq or ScalarCompareOp.Ne))
+        throw new SqlCompileException(
+            $&quot;WHERE on UTF-8 column '{where.ColumnName}' (table '{tableName}') supports only '=' and '!=' or '&lt;&gt;' with a string literal.&quot;);
+    if (where.Literal.Kind != SqlLiteralKind.String)
+        throw new SqlCompileException(
+            $&quot;UTF-8 column '{where.ColumnName}' (table '{tableName}') requires a single-quoted string literal.&quot;);
+    var bytes = Encoding.UTF8.GetBytes(where.Literal.Text);
+    return new ColumnCompareFilter(wi, where.Operator, 0, bytes);
+}
+</code></pre>
+<h3 id="literal-coercion">13.17.3 Literal coercion</h3>
+<p><code>CoerceLiteralToImmediateBits</code> is strict — no implicit casts. Integer columns reject float literals; float columns accept integer text by widening to <code>double</code> then storing <code>BitConverter.DoubleToInt64Bits</code>. Execution kernels never parse strings at runtime.</p>
+<h3 id="table-qualifier-validation">13.17.4 Table qualifier validation</h3>
+<pre><code class="language-csharp">internal static void ValidateWhereTableQualifier(SimpleWhereClause? where, string scannedTableName)
+{
+    if (where?.QualifierTableName is { } q &amp;&amp; !q.Equals(scannedTableName, StringComparison.OrdinalIgnoreCase))
+        throw new SqlCompileException(
+            $&quot;WHERE references table '{q}' but the FROM clause scans '{scannedTableName}' only.&quot;);
+}
+</code></pre>
+<p>Single-table scans reject <code>other_table.col</code> in <code>WHERE</code> even if <code>other_table</code> exists in the catalog.</p>
+<h2 id="execution-how-filters-run">13.18 Execution: how filters run</h2>
+<p>After lowering, <code>SelectionEvaluator</code> in <code>RainDB.Query/Vectorized</code> consumes <code>ColumnCompareFilter[]</code>:</p>
+<pre><code class="language-csharp">internal static int FillSelectedRowsConjunctive(
+    IColumnarBatch batch,
+    ReadOnlySpan&lt;ColumnCompareFilter&gt; filters,
+    Span&lt;int&gt; dest)
+{
+    var count = FillSelectedRows(batch.Columns[filters[0].ColumnIndex], filters[0], dest);
+    for (var f = 1; f &lt; filters.Length; f++)
+    {
+        var col = batch.Columns[filters[f].ColumnIndex];
+        count = filters[f].Utf8LiteralBytes is not null || col.PhysicalType == RainDbType.Utf8
+            ? IntersectUtf8(col, filters[f], dest, count)
+            : FixedWidthSelectionKernels.IntersectSelectedIndices(col, filters[f], dest, count);
+    }
+    return count;
+}
+</code></pre>
+<p>The first predicate fills a dense selection vector; later predicates intersect in place. This is the compile-time <code>AND</code> of <code>WHERE</code> realized at vectorized execution time.</p>
+<h2 id="logicaljoinbinder-brief">13.19 LogicalJoinBinder (brief)</h2>
+<p>Join lowering mirrors scan binding:</p>
+<ul>
+<li>Resolve both tables and validate key column types match</li>
+<li>Split <code>WHERE</code> conjuncts to probe/build sides via <code>ResolveJoinWhere</code></li>
+<li>Build <code>JoinPhysicalPlan</code> or <code>GroupedJoinPhysicalPlan</code></li>
+<li>Optionally wrap with <code>SortTopNPhysicalPlan</code></li>
+</ul>
+<p><code>LogicalTableScanBinder.BuildColumnCompareFilters</code> is reused for per-side filters. When reading join code, look for the same <code>ColumnCompareFilter</code> and <code>ValidateWhereTableQualifier</code> patterns.</p>
+<h2 id="error-handling">13.20 Error handling</h2>
+<p>All compile failures throw <code>SqlCompileException</code>. Parser errors include token positions; binder errors reference table/column names and unsupported type combinations. <code>IsReservedWord</code> blocks using <code>SELECT</code>, <code>FROM</code>, and other keywords as identifiers. Tests in <code>src/RainDB.Tests/SqlStrictSubsetCompilerTests.cs</code> and <code>SqlGroupByTests.cs</code> lock accepted shapes and error messages.</p>
+<h2 id="worked-example-grouped-aggregate">13.21 Worked example: grouped aggregate</h2>
+<p>SQL:</p>
+<pre><code class="language-sql">SELECT region, SUM(amount)
+FROM sales
+WHERE amount &gt; 1.0
+GROUP BY region
+</code></pre>
+<p><strong>Parse</strong> → <code>LogicalTableScan</code> with:</p>
+<ul>
+<li><code>WhereConjuncts</code>: one <code>SimpleWhereClause</code> (<code>amount</code>, <code>Gt</code>, float literal <code>1.0</code>)</li>
+<li><code>GroupByColumns</code>: <code>[region]</code></li>
+<li><code>SelectList</code>: <code>[region projection, SUM(amount) call]</code></li>
+</ul>
+<p><strong>Bind</strong> → <code>HashAggregatePhysicalPlan</code>:</p>
+<ul>
+<li><code>TableId</code> from catalog entry <code>sales</code></li>
+<li><code>GroupKeyColumnIndices</code>: <code>[index of region]</code></li>
+<li><code>Aggregates</code>: <code>[AggregateSpec(amount_index, Sum)]</code></li>
+<li><code>OutputColumns</code>: group key slot 0, aggregate slot 0</li>
+<li><code>Filters</code>: <code>[ColumnCompareFilter(amount_index, Gt, double_bits)]</code></li>
+</ul>
+<p><strong>Execute</strong> → <code>HashAggregateEngine.ExecuteAsync</code> scans batches, applies filters per batch, accumulates partial hash maps, merges, sorts keys, materializes output batch.</p>
+<h2 id="linq-and-second-front-ends">13.22 LINQ and second front ends</h2>
+<p><code>DefaultLinqCompiler</code> currently returns <code>ExplainOnlyPhysicalPlan</code>. The intended architecture is <code>Expression tree → Logical IR → existing binders → IPhysicalPlan</code>. See Chapter 15 for LINQ and plan-cache roadmap detail.</p>
+<h2 id="checklist-adding-a-new-sql-feature">13.23 Checklist: adding a new SQL feature</h2>
+<ol>
+<li><strong>Lexer</strong> — new tokens only if syntactic keywords are required</li>
+<li><strong>SelectParser</strong> — new productions; extend logical IR fields if needed</li>
+<li><strong>Logical Explain</strong> — update <code>Explain()</code> for debuggability</li>
+<li><strong>Binder</strong> — validation + lowering to existing or new physical plans</li>
+<li><strong>Executor</strong> — implement operator if no plan exists yet</li>
+<li><strong>Tests</strong> — parser unit tests, binder error tests, end-to-end SQL tests</li>
+<li><strong>Book / Programming Guide</strong> — document the new surface</li>
+</ol>
+<h2 id="summary">13.24 Summary</h2>
+<p><strong>Part I</strong> covered the general SQL compilation pipeline: lexer, parser, semantic analysis, logical and physical IR, optimization families, and prepared statements. <strong>Part II</strong> showed how RainDB implements a strict staged translator — <code>SqlLexer</code> and <code>SelectParser</code> produce logical IR; <code>LogicalTableScanBinder</code> and <code>LogicalJoinBinder</code> resolve catalog names and lower <code>WHERE</code> conjuncts to <code>ColumnCompareFilter</code> arrays consumed directly by vectorized execution. Extending SQL means extending this pipeline while keeping logical IR as the shared contract between SQL, LINQ, and programmatic planners.</p>
+</div>
+          <footer class="doc-footer">
+            <p>Generated by <strong>hoihky</strong> with <strong>MDWeb</strong> and with assistance from <strong>AI</strong></p>
+
+          </footer>
+        </article>
+
+        
+                <aside class="toc" aria-label="On this page">
+                  <p class="toc-title">On this page</p>
+                  <ul>
+                    
+                        <li class="toc-h1">
+                          <a href="#chapter-13-sql-compilation">Chapter 13: SQL Compilation</a>
+                        </li>
+                        
+                        <li class="toc-h1">
+                          <a href="#part-i-concepts">Part I — Concepts</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#131-compiler-phases-from-text-to-execution">13.1 Compiler phases: from text to execution</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#lexical-analysis">Lexical analysis</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#syntax-analysis-parsing">Syntax analysis (parsing)</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#binding-and-semantic-analysis">Binding and semantic analysis</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#optimization">Optimization</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#physical-planning-and-code-generation">Physical planning and code generation</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#where-raindb-sits-today">Where RainDB sits today</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#132-context-free-grammars-and-sql">13.2 Context-free grammars and SQL</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#ambiguity-and-precedence">Ambiguity and precedence</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#why-grammars-matter-to-implementers">Why grammars matter to implementers</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#133-ast-vs-intermediate-representation-ir">13.3 AST vs intermediate representation (IR)</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#ast-characteristics">AST characteristics</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#logical-ir">Logical IR</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#physical-ir">Physical IR</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#raindbs-two-ir-layers">RainDB's two IR layers</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#134-name-resolution-and-binding">13.4 Name resolution and binding</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#common-binding-errors">Common binding errors</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#135-semantic-analysis">13.5 Semantic analysis</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#type-checking">Type checking</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#aggregate-and-grouping-rules">Aggregate and grouping rules</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#set-operation-compatibility">Set operation compatibility</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#side-effects-and-volatility">Side effects and volatility</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#136-query-optimization-overview">13.6 Query optimization overview</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#rule-based-optimization-rbo">Rule-based optimization (RBO)</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#cost-based-optimization-cbo">Cost-based optimization (CBO)</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#raindbs-position">RainDB's position</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#137-prepared-statements">13.7 Prepared statements</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#parameter-binding">Parameter binding</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#plan-cache-invalidation">Plan cache invalidation</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#raindb-status">RainDB status</a>
+                        </li>
+                        
+                        <li class="toc-h1">
+                          <a href="#part-ii-raindb">Part II — RainDB</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#138-why-three-stages">13.8 Why three stages?</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#139-the-strict-sql-subset">13.9 The strict SQL subset</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1310-sqllexer-hand-written-tokenization">13.10 SqlLexer: hand-written tokenization</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#13101-token-model">13.10.1 Token model</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#13102-saverestore-for-speculative-parsing">13.10.2 Save/restore for speculative parsing</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#13103-literals-keywords-and-operators">13.10.3 Literals, keywords, and operators</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1311-sqlparser-and-selectparser">13.11 SqlParser and SelectParser</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#13111-parse-order">13.11.1 Parse order</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#13112-select-list-shapes">13.11.2 SELECT list shapes</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#13113-from-clause-single-table-vs-join">13.11.3 FROM clause: single table vs join</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#13114-where-conjunctive-predicates">13.11.4 WHERE: conjunctive predicates</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#13115-group-by-validation">13.11.5 GROUP BY validation</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#13116-non-grouped-branches-and-sortlimit">13.11.6 Non-grouped branches and sort/limit</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1312-logical-ir">13.12 Logical IR</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#13121-logicaltablescan">13.12.1 LogicalTableScan</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#13122-other-logical-nodes">13.12.2 Other logical nodes</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1313-defaultsqlcompiler">13.13 DefaultSqlCompiler</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1314-logicaltablescanbinder-overview">13.14 LogicalTableScanBinder overview</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1315-bindvectorizedscan">13.15 BindVectorizedScan</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#13151-output-column-indices">13.15.1 Output column indices</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#13152-global-aggregate-branch">13.15.2 Global aggregate branch</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#13153-sorttopn-wrapping">13.15.3 SortTopN wrapping</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1316-bindhashaggregate">13.16 BindHashAggregate</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#13161-group-key-indices">13.16.1 Group key indices</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#13162-select-list-output-slots">13.16.2 SELECT list → output slots</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#13163-physical-plan-emission">13.16.3 Physical plan emission</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1317-filter-building-where-columncomparefilter">13.17 Filter building: WHERE → ColumnCompareFilter</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#13171-conjunctive-array">13.17.1 Conjunctive array</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#13172-columncomparefilter-structure">13.17.2 ColumnCompareFilter structure</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#13173-literal-coercion">13.17.3 Literal coercion</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#13174-table-qualifier-validation">13.17.4 Table qualifier validation</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1318-execution-how-filters-run">13.18 Execution: how filters run</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1319-logicaljoinbinder-brief">13.19 LogicalJoinBinder (brief)</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1320-error-handling">13.20 Error handling</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1321-worked-example-grouped-aggregate">13.21 Worked example: grouped aggregate</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1322-linq-and-second-front-ends">13.22 LINQ and second front ends</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1323-checklist-adding-a-new-sql-feature">13.23 Checklist: adding a new SQL feature</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1324-summary">13.24 Summary</a>
+                        </li>
+                        
+                  </ul>
+                </aside>
+                
+      </main>
+    </div>
+  </div>
+  <script src="assets/vendor/mermaid.min.js"></script>
+  <script src="assets/vendor/highlight.min.js"></script>
+  <script src="assets/js/site.js"></script>
+</body>
+</html>

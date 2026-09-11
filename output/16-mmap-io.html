@@ -1,0 +1,1237 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Chapter 16: mmap I/O · Building an OLAP Database Engine from Scratch with RainDB</title>
+  <meta name="description" content="Generated documentation site">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="assets/css/site.css">
+  <link rel="stylesheet" href="assets/vendor/atom-one-dark.min.css">
+</head>
+<body>
+  <div class="site">
+    <header class="topbar">
+      <button class="sidebar-toggle" id="sidebar-toggle" aria-label="Toggle navigation">☰</button>
+      <a href="index.html" class="brand">Building an OLAP Database Engine from Scratch with RainDB</a>
+      <div class="search-wrap">
+        <input type="search" id="search" placeholder="Search docs…" autocomplete="off">
+      </div>
+    </header>
+
+    <div class="layout">
+      <aside class="sidebar" id="sidebar">
+        <nav class="nav" aria-label="Documentation">
+          <ul class="nav-list">
+            
+                        <li class="nav-item depth-0">
+                          
+                            <a href="index.html" class="nav-link">Building an OLAP Database Engine from Scratch</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="01-olap-fundamentals.html" class="nav-link">Chapter 1: OLAP Fundamentals</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="02-architecture-and-modules.html" class="nav-link">Chapter 2: Architecture and Modules</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="03-columnar-storage-model.html" class="nav-link">Chapter 3: Columnar Storage Model</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="04-chunk-data-structures.html" class="nav-link">Chapter 4: Chunk Data Structures</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="05-catalog-and-tables.html" class="nav-link">Chapter 5: Catalog and Tables</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="06-buffer-management.html" class="nav-link">Chapter 6: Buffer Management</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="07-execution-pipeline.html" class="nav-link">Chapter 7: Execution Pipeline</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="08-vectorized-scan-filter-project.html" class="nav-link">Chapter 8: Vectorized Scan, Filter, and Project</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="09-global-aggregates.html" class="nav-link">Chapter 9: Global Aggregates</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="10-hash-aggregation.html" class="nav-link">Chapter 10: Hash Aggregation</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="11-joins.html" class="nav-link">Chapter 11: Joins</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="12-sort-and-limit.html" class="nav-link">Chapter 12: Sort and Limit</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="13-sql-compilation.html" class="nav-link">Chapter 13: SQL Compilation</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="14-persistence.html" class="nav-link">Chapter 14: Persistence</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="15-future-extensions.html" class="nav-link">Chapter 15: Future Extensions</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0 is-active">
+                          
+                            <a href="16-mmap-io.html" class="nav-link">Chapter 16: mmap I/O</a>
+                            
+                        </li>
+                        
+          </ul>
+        </nav>
+      </aside>
+
+      <main class="content">
+        <article class="doc">
+          <header class="doc-header">
+            <h1>Chapter 16: mmap I/O</h1>
+          </header>
+          <div class="doc-body"><h1 id="chapter-16-mmap-io">Chapter 16: mmap I/O</h1>
+<p>Memory-mapped I/O is how analytical engines avoid copying entire column files into the heap before scanning them. This chapter begins with virtual memory, the <code>mmap</code> syscall, page caches, and zero-copy philosophy. Part II documents RainDB's <code>RNBFCOL1</code> column file format, <code>ColumnarFixedWidthMmapReader</code>, and integration plans with batch persistence.</p>
+<hr />
+<h1 id="part-i-concepts">Part I — Concepts</h1>
+<h2 id="virtual-memory-and-paging">16.1 Virtual memory and paging</h2>
+<p>Operating systems give each process a <strong>virtual address space</strong> — often 48 bits wide on x86-64 — far larger than installed RAM. The <strong>MMU</strong> walks <strong>page tables</strong> to translate virtual addresses into <strong>physical frames</strong>.</p>
+<h3 id="pages-and-page-frames">Pages and page frames</h3>
+<p>Addressable memory is sliced into fixed <strong>pages</strong> (commonly 4 KB; huge-page modes use 2 MB or 1 GB). A <strong>page frame</strong> is the physical RAM backing one page.</p>
+<pre><code class="language-text">Virtual address  →  page table lookup  →  physical frame (or page fault)
+</code></pre>
+<h3 id="why-virtual-memory-matters-for-databases">Why virtual memory matters for databases</h3>
+<ul>
+<li><strong>Isolation</strong> — one process cannot read another's mappings</li>
+<li><strong>Overcommit</strong> — virtual size can exceed RAM; pages materialize on fault</li>
+<li><strong>Shared mappings</strong> — multiple processes mapping one file share physical frames</li>
+<li><strong>mmap</strong> — file bytes appear at virtual addresses without an explicit <code>read()</code> buffer per access</li>
+</ul>
+<p>Engines use these properties to treat column files as lazily populated byte ranges.</p>
+<h2 id="mmap-syscall-semantics">16.2 mmap syscall semantics</h2>
+<p><strong>mmap</strong> links a virtual range to a file region (or anonymous memory). POSIX supplies <code>mmap</code>; Windows offers <code>MapViewOfFile</code> with similar semantics.</p>
+<h3 id="basic-operation">Basic operation</h3>
+<pre><code class="language-c">void *addr = mmap(NULL, length, PROT_READ, MAP_SHARED, fd, offset);
+</code></pre>
+<ul>
+<li><strong><code>fd</code></strong> — open file descriptor</li>
+<li><strong><code>offset</code></strong> — byte position in the file (typically page-aligned)</li>
+<li><strong><code>length</code></strong> — span to map</li>
+<li><strong><code>PROT_READ</code> / <code>PROT_WRITE</code></strong> — permitted access</li>
+<li><strong><code>MAP_SHARED</code></strong> — writable changes may propagate to other mappers and eventually to the file</li>
+</ul>
+<p>The call returns a virtual base pointer. Touching <code>addr[i]</code> on a cold page raises a <strong>page fault</strong>; the kernel loads the page from disk into the cache and wires the frame.</p>
+<h3 id="munmap">munmap</h3>
+<p><code>munmap(addr, length)</code> destroys the mapping. Further accesses fault or crash. Engines must align unmap with query lifetimes.</p>
+<h3 id="madvise-and-msync">madvise and msync</h3>
+<ul>
+<li><strong><code>madvise</code></strong> — performance hints (<code>MADV_SEQUENTIAL</code> for scans, <code>MADV_DONTNEED</code> to drop cached pages)</li>
+<li><strong><code>msync</code></strong> — flush dirty mapped pages (writable maps only)</li>
+</ul>
+<p>RainDB maps column files read-only for scans — no <code>msync</code> on the query hot path.</p>
+<h2 id="page-cache-and-buffer-cache">16.3 Page cache and buffer cache</h2>
+<p>The kernel <strong>page cache</strong> retains recently touched file pages in RAM. Both <code>read()</code> and mmap faults usually hit cached pages on repeat access.</p>
+<h3 id="unified-cache">Unified cache</h3>
+<p>On Linux, mmap and buffered <code>read()</code> share backing store for the same file offsets — warming one path benefits the other.</p>
+<h3 id="buffer-pool-vs-os-page-cache">Buffer pool vs OS page cache</h3>
+<p>Classic servers maintain an application <strong>buffer pool</strong> (InnoDB, PostgreSQL <code>shared_buffers</code>) when they need explicit pin/unpin policies, direct I/O to avoid double caching, or non-default page sizes.</p>
+<p>Many embedded OLAP engines lean on the <strong>OS cache via mmap</strong> for cold files and reserve application pools for query intermediates — RainDB's <code>HybridBufferPool</code> backs operator output, not file pages.</p>
+<h3 id="eviction">Eviction</h3>
+<p>Under memory pressure the kernel evicts cold cache pages. Valid mmap mappings remain; the next touch refaults from disk. Read-only analytics must accept <strong>non-deterministic</strong> cache residency.</p>
+<h2 id="demand-paging">16.4 Demand paging</h2>
+<p><strong>Demand paging</strong> defers physical reads until first access.</p>
+<pre><code class="language-text">mmap(1 TB file)  →  virtual mapping created instantly (no disk I/O)
+scan first row   →  fault on page 0  →  kernel reads 4 KB from disk
+scan row 10000   →  fault on another page  →  another 4 KB read
+</code></pre>
+<p>Sequential column scans benefit from kernel <strong>readahead</strong> prefetching the next pages.</p>
+<h3 id="implications-for-olap">Implications for OLAP</h3>
+<ul>
+<li><strong>Mapping is cheap</strong> — virtual size does not equal immediate I/O</li>
+<li><strong>Cold scans pay fault latency</strong> — first pass touches many pages</li>
+<li><strong>Warm repeats are fast</strong> — data already resident in cache</li>
+<li><strong>Random probes fault widely</strong> — poor spatial locality hurts</li>
+</ul>
+<h2 id="translation-lookaside-buffer-tlb">16.5 Translation lookaside buffer (TLB)</h2>
+<p>The <strong>TLB</strong> caches recent virtual→physical translations. Every load/store needs a translation; TLB misses trigger a page-table walk.</p>
+<h3 id="tlb-pressure">TLB pressure</h3>
+<p>Scanning very large mapped regions can <strong>thrash the TLB</strong> when the working set spans many small pages. Mitigations include:</p>
+<ul>
+<li><strong>Huge pages</strong> — one TLB entry covers more bytes</li>
+<li><strong>Sequential access patterns</strong> — friendlier to hardware prefetch</li>
+<li><strong>Fewer distinct mappings</strong> — reduce mapping churn</li>
+</ul>
+<p>Effects often show up between hundreds of megabytes and a few gigabytes — measure on deployment hardware.</p>
+<h2 id="zero-copy-io-philosophy">16.6 Zero-copy I/O philosophy</h2>
+<p><strong>Zero-copy</strong> here means application code consumes file bytes without an extra userspace copy between kernel buffers and algorithm input.</p>
+<h3 id="read-path-copy">read() path (copy)</h3>
+<pre><code class="language-text">disk → kernel page cache → copy to userspace buffer → application reads buffer
+</code></pre>
+<p>Allocating a managed <code>byte[]</code> and copying again adds a second userspace pass.</p>
+<h3 id="mmap-path-zero-copy-in-userspace">mmap path (zero-copy in userspace)</h3>
+<pre><code class="language-text">disk → kernel page cache → mapped virtual pages → application reads via pointer/span
+</code></pre>
+<p>No userspace <code>memcpy</code> on initial load; SIMD kernels can read mapped spans directly.</p>
+<h3 id="sendfile-and-other-zero-copy-apis">sendfile and other zero-copy APIs</h3>
+<p>Networking stacks expose <code>sendfile</code> and friends to pipe file pages into sockets without bouncing through userspace. HTTP exporters of Arrow or Parquet benefit; RainDB's mmap work targets local scan, not wire protocols.</p>
+<h3 id="when-zero-copy-wins">When zero-copy wins</h3>
+<ul>
+<li>Large fixed-width columns read sequentially</li>
+<li>Datasets bigger than RAM with a hot subset in cache</li>
+<li>Multiple readers sharing the same on-disk files</li>
+</ul>
+<h3 id="when-zero-copy-loses">When zero-copy loses</h3>
+<ul>
+<li>Tiny files where setup dominates</li>
+<li>Workloads that rewrite every value in userspace</li>
+<li>Environments with weak or broken mmap semantics — validate in target containers</li>
+</ul>
+<h2 id="mmap-vs-read-tradeoffs">16.7 mmap vs read() tradeoffs</h2>
+<table class="table">
+<thead>
+<tr>
+<th>Factor</th>
+<th>mmap</th>
+<th>read() / pread</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Initial setup</td>
+<td>Create mapping; pages load on fault</td>
+<td>Allocate buffer; syscall reads now</td>
+</tr>
+<tr>
+<td>Memory accounting</td>
+<td>Virtual size immediate; physical RAM grows with faults</td>
+<td>Heap buffer size known up front</td>
+</tr>
+<tr>
+<td>Random access</td>
+<td>Fault per touched page</td>
+<td>Explicit seek + read</td>
+</tr>
+<tr>
+<td>Portability</td>
+<td>Solid on major desktop OSes; edge cases differ</td>
+<td>Ubiquitous</td>
+</tr>
+<tr>
+<td>Error handling</td>
+<td>Truncated files may SIGBUS mid-access on some OSes</td>
+<td>Syscall returns error codes</td>
+</tr>
+<tr>
+<td>Lifetime</td>
+<td>Mapping must outlive consumers</td>
+<td>Buffer ownership is independent</td>
+</tr>
+<tr>
+<td>GC interaction</td>
+<td>Custom <code>MemoryManager&lt;byte&gt;</code> or unsafe pointers in .NET</td>
+<td>Plain <code>byte[]</code></td>
+</tr>
+</tbody>
+</table>
+<h3 id="net-specifics">.NET specifics</h3>
+<p><code>MemoryMappedFile</code> and <code>MemoryMappedViewAccessor</code> wrap the OS APIs. <code>SafeMemoryMappedViewHandle.AcquirePointer</code> yields native pointers for span-based consumption. <code>MemoryMarshal.TryGetArray</code> typically fails on mapped memory — by design.</p>
+<h2 id="column-file-layout-design-principles">16.8 Column file layout design principles</h2>
+<p>mmap-friendly column files share several layout conventions.</p>
+<h3 id="fixed-header-size">1. Fixed header size</h3>
+<p>Place magic, version, row count, and type at known offsets; validate before handing out pointers.</p>
+<h3 id="self-describing-payload-lengths">2. Self-describing payload lengths</h3>
+<p>The header records <code>nullBytes</code> and <code>valuesBytes</code>; readers confirm <code>fileSize &gt;= header + nullBytes + valuesBytes</code>.</p>
+<h3 id="alignment-optional">3. Alignment (optional)</h3>
+<p>Pad value arrays to 8- or 64-byte boundaries for SIMD. RainDB <code>RNBFCOL1</code> v1 packs tightly without alignment padding.</p>
+<h3 id="immutable-segments">4. Immutable segments</h3>
+<p>Sealed append-only files let readers map while writers produce new segments elsewhere.</p>
+<h3 id="separate-metadata-from-payload">5. Separate metadata from payload</h3>
+<p>Table and column names live in the catalog, keeping on-disk payloads small and reload-friendly.</p>
+<h3 id="versioned-magic">6. Versioned magic</h3>
+<p>Distinct magic strings (<code>RNBFCOL1</code>) identify families; a <code>uint32</code> version field reserves space for future compression flags.</p>
+<h3 id="no-pointers-in-file">7. No pointers in file</h3>
+<p>Store offsets from file base — files must remain position-independent.</p>
+<h2 id="lifetime-management-of-mapped-memory">16.9 Lifetime management of mapped memory</h2>
+<p>Correctness around mapping lifetime is the sharpest mmap footgun.</p>
+<h3 id="rules">Rules</h3>
+<ol>
+<li><strong>Never unmap while spans are live</strong> — otherwise use-after-free</li>
+<li><strong>Avoid deleting or replacing files under an active map</strong> — platform-dependent failure modes</li>
+<li><strong>Dispose in order</strong> — release acquired pointer, then accessor, then <code>MemoryMappedFile</code></li>
+<li><strong>Pin through async queries</strong> — keep <code>ColumnarFixedWidthMmapReader</code> alive until <code>IQueryResult</code> disposal</li>
+</ol>
+<h3 id="reference-counting-pattern">Reference counting pattern</h3>
+<pre><code class="language-text">Table holds List&lt;MmapHandle&gt;
+each handle: reader + ref count
+query acquires handle, releases on dispose
+eviction unmaps only when ref count == 0
+</code></pre>
+<p>RainDB Phase C2 will add formal pin/unpin in the buffer manager. Until then, tests must scope readers manually.</p>
+<h3 id="gc-and-finalizers">GC and finalizers</h3>
+<p>Do not depend on finalizers for prompt unmap — call <code>Dispose</code> explicitly. Long-lived maps of huge files inflate virtual size statistics even when pages are cold.</p>
+<hr />
+<h1 id="part-ii-raindb">Part II — RainDB</h1>
+<p>RainDB's default persistence path (Chapter 14) reads entire batch files into managed <code>byte[]</code> arrays during hydration. That is correct and simple, but it copies every fixed-width value through the heap before the scan engine touches it. For large analytic tables where numeric columns dominate, <strong>memory-mapped column files</strong> offer a zero-copy alternative: the operating system maps file pages into the process address space, and scan kernels read values directly from mapped spans.</p>
+<h2 id="scope-and-limitations">16.10 Scope and limitations</h2>
+<p>The mmap stack today supports <strong>only fixed-width</strong> <code>IColumnChunk</code> columns:</p>
+<ul>
+<li><code>Boolean</code>, <code>Int32</code>, <code>Int64</code>, <code>Float64</code> (per <code>ColumnTypeSizes.IsFixedWidth</code>)</li>
+<li><strong>Not</strong> <code>Utf8</code> or variable-length types in this file format</li>
+</ul>
+<p>Magic string: <code>RNBFCOL1</code> (RainDB Fixed COLumn, version 1).</p>
+<p>UTF-8 columns remain in <code>RainDbBatchBinaryCodec</code> batch files until a variable-length mmap layout is designed (Phase C, likely separate from fixed-width column files).</p>
+<h2 id="why-mmap-for-olap">16.11 Why mmap for OLAP?</h2>
+<table class="table">
+<thead>
+<tr>
+<th>Approach</th>
+<th>Pros</th>
+<th>Cons</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>File.ReadAllBytes</code> + <code>FixedWidthColumnChunk</code></td>
+<td>Simple; full ownership of bytes; works everywhere</td>
+<td>2× memory pressure during hydrate (file cache + managed copy); copy cost on load</td>
+</tr>
+<tr>
+<td>mmap + <code>MappedFixedWidthColumnChunk</code></td>
+<td>Zero-copy scan; OS page cache shared across processes</td>
+<td>Lifetime tied to <code>MemoryMappedFile</code>; unsafe pointer management; fixed layout only</td>
+</tr>
+<tr>
+<td>In-memory append-only batches</td>
+<td>Fastest writes; no IO during query</td>
+<td>Lost on process exit without persistence</td>
+</tr>
+</tbody>
+</table>
+<p>RainDB's Phase C1 goal: <strong>wire mmap chunks into table storage</strong> so file-backed tables query without hydrating full byte arrays. The types in this chapter are the building blocks; <code>LoadBatchesIntoTable</code> still uses <code>ReadAllBytes</code> until integration lands.</p>
+<h2 id="columnarfixedwidthfileformat-on-disk-layout">16.12 ColumnarFixedWidthFileFormat — on-disk layout</h2>
+<p><code>ColumnarFixedWidthFileFormat</code> in <code>src/RainDB.Core/IO/ColumnarFixedWidthFileFormat.cs</code> defines a single-column file.</p>
+<pre><code class="language-csharp">public static class ColumnarFixedWidthFileFormat
+{
+    public const int HeaderSizeBytes = 32;
+    public static ReadOnlySpan&lt;byte&gt; Magic =&gt; &quot;RNBFCOL1&quot;u8;
+}
+</code></pre>
+<h3 id="file-structure-overview">16.12.1 File structure overview</h3>
+<pre><code class="language-text">┌────────────────────────────────────────┐
+│  Header (32 bytes)                     │
+├────────────────────────────────────────┤
+│  Null bitmap (optional, nullBytes)     │
+├────────────────────────────────────────┤
+│  Values (rowCount * typeWidth bytes)   │
+└────────────────────────────────────────┘
+</code></pre>
+<p>Total file size:</p>
+<pre><code class="language-text">total = 32 + nullBytes + valuesBytes
+nullBytes = hasNulls ? NullBitmapBytes(rowCount) : 0
+valuesBytes = rowCount * FixedWidthBytes(physicalType)
+</code></pre>
+<h3 id="header-byte-by-byte">16.12.2 Header — byte by byte</h3>
+<p>All multi-byte integers are <strong>little-endian</strong>.</p>
+<table class="table">
+<thead>
+<tr>
+<th>Offset</th>
+<th>Size</th>
+<th>Field</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>0</td>
+<td>8</td>
+<td><code>magic</code></td>
+<td>ASCII <code>R N B F C O L 1</code> (<code>0x52 0x4E 0x42 0x46 0x43 0x4F 0x4C 0x31</code>)</td>
+</tr>
+<tr>
+<td>8</td>
+<td>4</td>
+<td><code>version</code></td>
+<td><code>uint32</code> format version; must be <code>1</code></td>
+</tr>
+<tr>
+<td>12</td>
+<td>4</td>
+<td><code>rowCount</code></td>
+<td><code>int32</code> number of rows; must be ≥ 0</td>
+</tr>
+<tr>
+<td>16</td>
+<td>1</td>
+<td><code>physicalType</code></td>
+<td><code>byte</code> cast of <code>RainDbType</code> enum</td>
+</tr>
+<tr>
+<td>17</td>
+<td>1</td>
+<td><code>flags</code></td>
+<td>Bit 0: <code>hasNulls</code> (1 = null bitmap present)</td>
+</tr>
+<tr>
+<td>18</td>
+<td>2</td>
+<td><code>_reserved</code></td>
+<td>Not written explicitly; remain zero in <code>WriteFile</code></td>
+</tr>
+<tr>
+<td>20</td>
+<td>4</td>
+<td><code>nullBytes</code></td>
+<td><code>int32</code> length of null bitmap section (0 if no nulls)</td>
+</tr>
+<tr>
+<td>24</td>
+<td>4</td>
+<td><code>valuesBytes</code></td>
+<td><code>int32</code> length of values section</td>
+</tr>
+<tr>
+<td>28</td>
+<td>4</td>
+<td><code>_reserved2</code></td>
+<td>Implicitly zero (header array default)</td>
+</tr>
+</tbody>
+</table>
+<p>The writer uses a 32-byte <code>header</code> array and fills known fields:</p>
+<pre><code class="language-csharp">Magic.CopyTo(header);
+BinaryPrimitives.WriteUInt32LittleEndian(header.AsSpan(8), 1);
+BinaryPrimitives.WriteInt32LittleEndian(header.AsSpan(12), rowCount);
+header[16] = (byte)chunk.PhysicalType;
+header[17] = (byte)(chunk.HasNulls ? 1 : 0);
+BinaryPrimitives.WriteInt32LittleEndian(header.AsSpan(20), nullBytes);
+BinaryPrimitives.WriteInt32LittleEndian(header.AsSpan(24), valuesBytes);
+</code></pre>
+<p>Bytes at offsets 18–19 and 28–31 are zero unless future versions assign them (e.g., checksum, compression codec id).</p>
+<h3 id="payload-layout">16.12.3 Payload layout</h3>
+<p>After the header:</p>
+<pre><code class="language-text">payloadStart = 32
+
+if hasNulls:
+  [payloadStart .. payloadStart + nullBytes)     → null bitmap
+  [payloadStart + nullBytes .. payloadStart + nullBytes + valuesBytes) → values
+
+else:
+  [payloadStart .. payloadStart + valuesBytes)   → values only
+</code></pre>
+<p>Null bitmap packing matches in-memory chunks: one bit per row, LSB-first within each byte (<code>ColumnTypeSizes.NullBitmapBytes</code>).</p>
+<p>Values are tightly packed little-endian physical representation (same as <code>FixedWidthColumnChunk.Values</code>).</p>
+<h3 id="writefile-implementation">16.12.4 WriteFile implementation</h3>
+<pre><code class="language-csharp">public static void WriteFile(string path, IColumnChunk chunk)
+{
+    if (!ColumnTypeSizes.IsFixedWidth(chunk.PhysicalType))
+        throw new ArgumentException(&quot;Only fixed-width columns can be written with this format.&quot;, nameof(chunk));
+
+    var rowCount = chunk.RowCount;
+    var w = ColumnTypeSizes.FixedWidthBytes(chunk.PhysicalType);
+    var nullBytes = chunk.HasNulls ? ColumnTypeSizes.NullBitmapBytes(rowCount) : 0;
+    var valuesBytes = rowCount * w;
+    // ... build header ...
+    using var fs = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.None);
+    fs.Write(header);
+    if (nullBytes &gt; 0)
+        fs.Write(chunk.NullBitmap.Span[..nullBytes]);
+    fs.Write(chunk.Values.Span[..valuesBytes]);
+}
+</code></pre>
+<p><strong>Preconditions enforced at write time:</strong></p>
+<ul>
+<li>Chunk is fixed-width</li>
+<li><code>chunk.Values</code> span is at least <code>valuesBytes</code></li>
+<li>If <code>hasNulls</code>, null bitmap span is at least <code>nullBytes</code></li>
+</ul>
+<p><strong>Not embedded in file:</strong> column name, table id, batch id — the path or catalog must carry metadata. Column files are dumb payloads.</p>
+<h3 id="example-hex-dump-conceptual">16.12.5 Example hex dump (conceptual)</h3>
+<p><code>Float64</code> column, 2 rows, no nulls, values <code>1.0</code> and <code>2.0</code>:</p>
+<pre><code class="language-text">Offset  Hex (abbreviated)     Meaning
+------  -----------------     -------
+0x00    52 4E 42 46 43 4F 4C 31  Magic RNBFCOL1
+0x08    01 00 00 00             version = 1
+0x0C    02 00 00 00             rowCount = 2
+0x10    ??                      RainDbType.Float64 byte
+0x11    00                      flags: no nulls
+0x14    00 00 00 00             nullBytes = 0
+0x18    10 00 00 00             valuesBytes = 16 (2 * 8)
+0x20    00 00 00 00 00 00 F0 3F  1.0 IEEE754 LE
+0x28    00 00 00 00 00 00 00 40  2.0 IEEE754 LE
+</code></pre>
+<h2 id="columnarfixedwidthmmapreader.open">16.13 ColumnarFixedWidthMmapReader.Open</h2>
+<p><code>ColumnarFixedWidthMmapReader</code> maps an existing file read-only and exposes <code>Chunk</code> as <code>IColumnChunk</code>.</p>
+<h3 id="open-sequence">16.13.1 Open sequence</h3>
+<pre><code class="language-csharp">public static ColumnarFixedWidthMmapReader Open(string path)
+{
+    var mmf = MemoryMappedFile.CreateFromFile(path, FileMode.Open, null, 0, MemoryMappedFileAccess.Read);
+    var accessor = mmf.CreateViewAccessor(0, 0, MemoryMappedFileAccess.Read);
+    // validate header + slice payload
+    return new ColumnarFixedWidthMmapReader(mmf, accessor, manager, chunk);
+}
+</code></pre>
+<p><code>CreateViewAccessor(0, 0, Read)</code> maps the <strong>entire file</strong> (0 size means to end of file).</p>
+<h3 id="validation-steps-mirrors-writefile">16.13.2 Validation steps (mirrors WriteFile)</h3>
+<pre><code class="language-csharp">if (capacity &gt; int.MaxValue)
+    throw new NotSupportedException(&quot;Mapped column file exceeds int.MaxValue bytes.&quot;);
+
+if (!span.StartsWith(ColumnarFixedWidthFileFormat.Magic))
+    throw new InvalidDataException(&quot;Unexpected column file magic.&quot;);
+
+var version = BinaryPrimitives.ReadUInt32LittleEndian(span.Slice(8, 4));
+if (version != 1)
+    throw new InvalidDataException($&quot;Unsupported column file version {version}.&quot;);
+
+var rowCount = BinaryPrimitives.ReadInt32LittleEndian(span.Slice(12, 4));
+if (rowCount &lt; 0)
+    throw new InvalidDataException(&quot;Invalid row count.&quot;);
+
+var type = (RainDbType)span[16];
+if (!ColumnTypeSizes.IsFixedWidth(type))
+    throw new InvalidDataException(&quot;Mapped column type must be fixed-width.&quot;);
+
+var hasNulls = (span[17] &amp; 1) != 0;
+var nullBytes = BinaryPrimitives.ReadInt32LittleEndian(span.Slice(20, 4));
+var valuesBytes = BinaryPrimitives.ReadInt32LittleEndian(span.Slice(24, 4));
+var w = ColumnTypeSizes.FixedWidthBytes(type);
+
+if (valuesBytes != checked(rowCount * w))
+    throw new InvalidDataException(&quot;Values byte length does not match row count and type width.&quot;);
+
+var expectedNull = hasNulls ? ColumnTypeSizes.NullBitmapBytes(rowCount) : 0;
+if (nullBytes != expectedNull)
+    throw new InvalidDataException(&quot;Null bitmap size does not match header flags / row count.&quot;);
+
+var total = ColumnarFixedWidthFileFormat.HeaderSizeBytes + nullBytes + valuesBytes;
+if (span.Length &lt; total)
+    throw new InvalidDataException(&quot;Column file truncated.&quot;);
+</code></pre>
+<p>Strict validation prevents silent misreads if files are hand-edited or truncated.</p>
+<h3 id="slicing-mapped-memory">16.13.3 Slicing mapped memory</h3>
+<pre><code class="language-csharp">var payloadStart = ColumnarFixedWidthFileFormat.HeaderSizeBytes;
+ReadOnlyMemory&lt;byte&gt; nullMem;
+ReadOnlyMemory&lt;byte&gt; valuesMem;
+if (nullBytes == 0)
+{
+    nullMem = ReadOnlyMemory&lt;byte&gt;.Empty;
+    valuesMem = bytes.Slice(payloadStart, valuesBytes);
+}
+else
+{
+    nullMem = bytes.Slice(payloadStart, nullBytes);
+    valuesMem = bytes.Slice(payloadStart + nullBytes, valuesBytes);
+}
+
+var chunk = new MappedFixedWidthColumnChunk(type, rowCount, hasNulls, nullMem, valuesMem);
+</code></pre>
+<p><code>bytes</code> is <code>ReadOnlyMemory&lt;byte&gt;</code> from <code>MmapBytesMemoryManager</code> covering the <strong>whole file</strong>. Slices are offsets into the map — no allocation for value data.</p>
+<h3 id="dispose-lifecycle">16.13.4 Dispose lifecycle</h3>
+<pre><code class="language-csharp">public void Dispose()
+{
+    _manager.ReleasePointer();
+    _accessor.Dispose();
+    _mmf.Dispose();
+}
+</code></pre>
+<p>Callers must dispose the reader (or wrap in <code>using</code>) before deleting or replacing the underlying file on disk. Undefined behavior if the file shrinks while mapped.</p>
+<h2 id="mmapbytesmemorymanager-unsafe-pointer-bridge">16.14 MmapBytesMemoryManager — unsafe pointer bridge</h2>
+<p>.NET's <code>ReadOnlyMemory&lt;byte&gt;</code> over mmap requires a custom <code>MemoryManager&lt;byte&gt;</code>:</p>
+<pre><code class="language-csharp">private sealed unsafe class MmapBytesMemoryManager : MemoryManager&lt;byte&gt;
+{
+    private readonly MemoryMappedViewAccessor _accessor;
+    private byte* _pointer;
+    private readonly int _length;
+
+    public MmapBytesMemoryManager(MemoryMappedViewAccessor accessor, int length)
+    {
+        _accessor = accessor;
+        _length = length;
+        _pointer = null;
+        accessor.SafeMemoryMappedViewHandle.AcquirePointer(ref _pointer);
+        if (_pointer == null)
+            throw new InvalidOperationException(&quot;Failed to acquire memory-mapped pointer.&quot;);
+    }
+
+    public override Span&lt;byte&gt; GetSpan() =&gt; new(_pointer, _length);
+    public override MemoryHandle Pin(int elementIndex = 0) =&gt; new(_pointer + elementIndex);
+    public override void Unpin() { }
+
+    protected override bool TryGetArray(out ArraySegment&lt;byte&gt; segment)
+    {
+        segment = default;
+        return false;  // cannot expose as managed array
+    }
+
+    public void ReleasePointer()
+    {
+        if (_pointer != null)
+        {
+            _accessor.SafeMemoryMappedViewHandle.ReleasePointer();
+            _pointer = null;
+        }
+    }
+
+    protected override void Dispose(bool disposing) =&gt; ReleasePointer();
+}
+</code></pre>
+<h3 id="why-unsafe">Why unsafe?</h3>
+<p><code>MemoryMappedViewAccessor</code> exposes a native pointer via <code>SafeMemoryMappedViewHandle.AcquirePointer</code>. The manager wraps that pointer as a <code>Span&lt;byte&gt;</code> for interop with existing kernels that expect <code>ReadOnlyMemory&lt;byte&gt;</code> on chunks.</p>
+<h3 id="pinunpin">Pin/Unpin</h3>
+<p><code>Pin</code> returns a pointer offset for callers using <code>fixed</code> or interop. <code>Unpin</code> is empty because the mapping stays valid until dispose — there is no movable GC object behind the pointer.</p>
+<h3 id="trygetarray-returns-false">TryGetArray returns false</h3>
+<p>Forces consumers down the span path. Code that assumes <code>MemoryMarshal.TryGetArray</code> will fail — by design, so accidental heap copies are not silently introduced.</p>
+<h2 id="mappedfixedwidthcolumnchunk-zero-copy-icolumnchunk">16.15 MappedFixedWidthColumnChunk — zero-copy IColumnChunk</h2>
+<pre><code class="language-csharp">private sealed class MappedFixedWidthColumnChunk : IColumnChunk
+{
+    public MappedFixedWidthColumnChunk(
+        RainDbType type,
+        int rowCount,
+        bool hasNulls,
+        ReadOnlyMemory&lt;byte&gt; nullBitmap,
+        ReadOnlyMemory&lt;byte&gt; values)
+    {
+        PhysicalType = type;
+        RowCount = rowCount;
+        HasNulls = hasNulls;
+        NullBitmap = nullBitmap;
+        Values = values;
+    }
+
+    public RainDbType PhysicalType { get; }
+    public int RowCount { get; }
+    public bool HasNulls { get; }
+    public ReadOnlyMemory&lt;byte&gt; NullBitmap { get; }
+    public ReadOnlyMemory&lt;byte&gt; Values { get; }
+}
+</code></pre>
+<p>Implements the same <code>IColumnChunk</code> surface as <code>FixedWidthColumnChunk</code>. Scan and filter code paths that read via <code>column.Values.Span</code> and <code>SelectionEvaluator.IsNull(nullBitmap, row, hasNulls)</code> work unchanged.</p>
+<h3 id="zero-copy-scan-path">Zero-copy scan path</h3>
+<pre><code class="language-text">SQL query
+→ VectorizedScanPhysicalPlan
+→ VectorizedScanEngine.ProcessOneBatch
+→ batch.Columns[i] is MappedFixedWidthColumnChunk
+→ FixedWidthSelectionKernels read Values.Span (mapped)
+→ ProjectGather copies only selected rows to pooled output (if projection narrows rows)
+</code></pre>
+<p><strong>Full column scan without filter</strong> may still avoid copying values if the engine passes mapped spans through. <strong>Projection with selection</strong> copies matching rows into pooled chunks — that is expected; mmap saves the <em>hydration</em> copy, not necessarily all query-time gathers.</p>
+<h3 id="comparison-to-fixedwidthcolumnchunk">Comparison to FixedWidthColumnChunk</h3>
+<table class="table">
+<thead>
+<tr>
+<th>Property</th>
+<th><code>FixedWidthColumnChunk</code></th>
+<th><code>MappedFixedWidthColumnChunk</code></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Backing store</td>
+<td><code>byte[]</code> or pooled memory</td>
+<td>mmap file</td>
+</tr>
+<tr>
+<td>Lifetime</td>
+<td>GC / pool return</td>
+<td><code>ColumnarFixedWidthMmapReader</code> dispose</td>
+</tr>
+<tr>
+<td>Writable</td>
+<td>Can construct for append</td>
+<td>Read-only</td>
+</tr>
+<tr>
+<td>Scan API</td>
+<td><code>IColumnChunk</code></td>
+<td><code>IColumnChunk</code></td>
+</tr>
+</tbody>
+</table>
+<h2 id="end-to-end-usage-example">16.16 End-to-end usage example</h2>
+<p>Write a column file from an in-memory chunk, then mmap it back:</p>
+<pre><code class="language-csharp">using RainDB.Core.Columnar;
+using RainDB.Core.IO;
+using RainDB.Schema;
+
+// Build in-memory chunk
+var values = new byte[16]; // 2 x Float64
+BitConverter.TryWriteBytes(values.AsSpan(0), 1.0);
+BitConverter.TryWriteBytes(values.AsSpan(8), 2.0);
+var chunk = new FixedWidthColumnChunk(RainDbType.Float64, 2, values, ReadOnlyMemory&lt;byte&gt;.Empty, hasNulls: false);
+
+var path = Path.Combine(Path.GetTempPath(), &quot;amount.col&quot;);
+ColumnarFixedWidthFileFormat.WriteFile(path, chunk);
+
+using var reader = ColumnarFixedWidthMmapReader.Open(path);
+var mapped = reader.Chunk;
+Assert.Equal(2, mapped.RowCount);
+Assert.Equal(RainDbType.Float64, mapped.PhysicalType);
+// mapped.Values.Span reads directly from file mapping
+</code></pre>
+<p>Use in a <code>ColumnarBatch</code> for engine tests (manual composition):</p>
+<pre><code class="language-csharp">var batch = new ColumnarBatch(mapped.RowCount, new IColumnChunk[] { mapped });
+// Pass to operators that accept IColumnarBatch — ensure reader stays alive for batch lifetime
+</code></pre>
+<p><strong>Lifetime rule:</strong> Keep <code>ColumnarFixedWidthMmapReader</code> alive while any scan references <code>mapped</code>.</p>
+<h2 id="integration-roadmap-with-persistence">16.17 Integration roadmap with persistence</h2>
+<p>Current persistence (Chapter 14) uses monolithic <code>.batch</code> files. mmap integration options:</p>
+<h3 id="option-a-sidecar-column-files-per-batch">Option A — sidecar column files per batch</h3>
+<pre><code class="language-text">tables/{tableId}/
+000000.batch          # manifest or UTF-8 columns only
+000000.col0           # mmap Float64 amount
+000000.col1           # mmap Int32 quantity
+</code></pre>
+<p>Hydration:</p>
+<ol>
+<li>Read small <code>.batch</code> manifest listing column types and sidecar paths</li>
+<li>mmap each fixed-width sidecar → <code>MappedFixedWidthColumnChunk</code></li>
+<li>Load UTF-8 columns from batch body as today</li>
+</ol>
+<h3 id="option-b-column-major-table-directory">Option B — column-major table directory</h3>
+<pre><code class="language-text">tables/{tableId}/
+meta.json
+columns/
+  amount.rnbfcol
+  quantity.rnbfcol
+  region.batch-utf8
+</code></pre>
+<p>Append becomes column-append or new segment files per column. Harder for atomic multi-column append; better for read-heavy workloads.</p>
+<h3 id="option-c-hybrid-hydrate">Option C — hybrid hydrate</h3>
+<p>On <code>LoadBatchesIntoTable</code>:</p>
+<pre><code class="language-csharp">// (future sketch)
+if (File.Exists(fixedWidthSidecar))
+    chunks[i] = ColumnarFixedWidthMmapReader.Open(sidecar).Chunk;
+else
+    chunks[i] = DecodeColumnFromBatch(bytes, i);
+</code></pre>
+<p>Minimal change surface: only replace <code>ReadAllBytes</code> + <code>DecodeBatch</code> for eligible columns.</p>
+<h3 id="catalog-changes">Catalog changes</h3>
+<p><code>catalog.json</code> might gain optional <code>storageMode: &quot;mmap&quot; | &quot;batch&quot;</code> per table. Default remains batch for compatibility.</p>
+<h3 id="buffer-manager-phase-c2">Buffer manager (Phase C2)</h3>
+<p>Long-lived maps need pin/unpin when memory cap exceeded:</p>
+<pre><code class="language-csharp">// (planned)
+interface IMappedColumnHandle
+{
+    IColumnChunk Chunk { get; }
+    void Pin();
+    void Unpin();
+}
+</code></pre>
+<p><code>ColumnarFixedWidthMmapReader</code> becomes internal to handle implementation.</p>
+<h2 id="when-to-use-mmap-vs-in-memory-bytes">16.18 When to use mmap vs in-memory bytes</h2>
+<h3 id="prefer-mmap-when">Prefer mmap when</h3>
+<ul>
+<li>Table (or column) size exceeds comfortable RAM fraction</li>
+<li>Multiple processes read same data (OS shares page cache)</li>
+<li>Workload is scan-heavy, append-rare</li>
+<li>Column is fixed-width numeric (fits <code>RNBFCOL1</code> today)</li>
+<li>Latency of first touch can be lazy (page faults on scan)</li>
+</ul>
+<h3 id="prefer-in-memory-bytes-when">Prefer in-memory bytes when</h3>
+<ul>
+<li>Dataset fits easily in RAM and you want predictable performance</li>
+<li>High append rate (mmap files require rewrite or segment append policy)</li>
+<li>UTF-8 or mixed-type batches without sidecar decomposition</li>
+<li>Need writable chunks for in-query transforms</li>
+<li>Running on platforms with weak mmap semantics (some containers — test first)</li>
+</ul>
+<h3 id="hybrid-strategy-recommended-product-direction">Hybrid strategy (recommended product direction)</h3>
+<table class="table">
+<thead>
+<tr>
+<th>Tier</th>
+<th>Storage</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Hot recent batches</td>
+<td>In-memory <code>MemoryTable</code> segments</td>
+</tr>
+<tr>
+<td>Cold sealed batches</td>
+<td>mmap column files</td>
+</tr>
+<tr>
+<td>UTF-8 dimensions</td>
+<td>Batch codec or future UTF-8 mmap layout</td>
+</tr>
+</tbody>
+</table>
+<p>RainDB has not implemented tiering yet; Phase C1 starts with &quot;hydrate to mmap instead of copy&quot; for whole fixed-width columns.</p>
+<h2 id="interaction-with-raindbbatchbinarycodec">16.19 Interaction with RainDbBatchBinaryCodec</h2>
+<table class="table">
+<thead>
+<tr>
+<th>Format</th>
+<th>Magic</th>
+<th>Granularity</th>
+<th>UTF-8</th>
+<th>mmap-friendly</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Batch v1</td>
+<td><code>RNBATCH1</code></td>
+<td>Whole batch, all columns</td>
+<td>Yes</td>
+<td>Poor (decode copies)</td>
+</tr>
+<tr>
+<td>Column v1</td>
+<td><code>RNBFCOL1</code></td>
+<td>Single fixed-width column</td>
+<td>No</td>
+<td>Yes</td>
+</tr>
+</tbody>
+</table>
+<p>Converting batch → column files (export tool):</p>
+<pre><code class="language-csharp">// (illustrative migration utility)
+void ExportFixedColumns(IColumnarBatch batch, string dir)
+{
+    for (var i = 0; i &lt; batch.Columns.Count; i++)
+    {
+        var c = batch.Columns[i];
+        if (ColumnTypeSizes.IsFixedWidth(c.PhysicalType))
+            ColumnarFixedWidthFileFormat.WriteFile(Path.Combine(dir, $&quot;col{i}.rnbfcol&quot;), c);
+    }
+}
+</code></pre>
+<p>Round-trip for fixed-width: <code>WriteFile</code> → <code>Open</code> → compare spans.</p>
+<h2 id="error-handling-and-security">16.20 Error handling and security</h2>
+<table class="table">
+<thead>
+<tr>
+<th>Condition</th>
+<th>Result</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Truncated file</td>
+<td><code>InvalidDataException</code></td>
+</tr>
+<tr>
+<td>Wrong magic</td>
+<td><code>InvalidDataException</code></td>
+</tr>
+<tr>
+<td><code>valuesBytes</code> mismatch</td>
+<td><code>InvalidDataException</code></td>
+</tr>
+<tr>
+<td>Non-fixed-width type byte</td>
+<td><code>InvalidDataException</code></td>
+</tr>
+<tr>
+<td>File &gt; 2GB on 32-bit</td>
+<td><code>NotSupportedException</code> (int length)</td>
+</tr>
+</tbody>
+</table>
+<p>For hostile files, validation before pointer exposure prevents out-of-bounds slice on header fields. Do not mmap untrusted paths without size caps at open time in hosted scenarios.</p>
+<h2 id="testing-recommendations">16.21 Testing recommendations</h2>
+<p>When integration lands, add tests for:</p>
+<ol>
+<li>WriteFile → Open → row count and value equality</li>
+<li>Null bitmap round-trip with <code>hasNulls = true</code></li>
+<li>Dispose reader → ensure no use-after-free if scan held spans (document as unsupported)</li>
+<li>Persistence reopen with mmap chunks + SQL <code>SELECT SUM(col)</code></li>
+<li>Mixed batch: one mmap column + one UTF-8 in-memory column in same batch</li>
+</ol>
+<p>Property: <code>valuesBytes == rowCount * FixedWidthBytes(type)</code> for all valid files.</p>
+<h2 id="performance-notes">16.22 Performance notes</h2>
+<ul>
+<li><strong>First scan</strong> after open may page-fault; subsequent scans hit OS cache</li>
+<li><strong>SIMD kernels</strong> work on mapped spans if pinned spans are contiguous (they are)</li>
+<li><strong>No extra copy</strong> on hydrate vs <code>ReadAllBytes</code> + new <code>FixedWidthColumnChunk</code></li>
+<li><strong>Projection</strong> still allocates pooled output for selected rows — mmap does not eliminate gather copies</li>
+</ul>
+<p>Benchmark compare (manual, Phase A5):</p>
+<pre><code class="language-text">Hydrate 1M-row Float64 column:
+  ReadAllBytes + DecodeBatch  vs  ColumnarFixedWidthMmapReader.Open
+Scan SUM(amount) where amount &gt; 0:
+  in-memory chunk vs mapped chunk (should be near parity after warm-up)
+</code></pre>
+<h2 id="future-header-versions">16.23 Future header versions</h2>
+<p>Reserved header bytes (18–19, 28–31) enable:</p>
+<ul>
+<li><code>version = 2</code> with compression codec id in reserved bytes</li>
+<li>Checksum at offset 28</li>
+<li>Row count as <code>int64</code> for very large columns (would require header size bump)</li>
+</ul>
+<p>Readers must reject unknown versions (as today for <code>version != 1</code>).</p>
+<h2 id="summary">16.24 Summary</h2>
+<p><strong>Part I</strong> covered virtual memory, mmap semantics, page cache interaction, demand paging, TLB effects, zero-copy philosophy, mmap vs <code>read()</code> tradeoffs, column file design principles, and mapped memory lifetime rules. <strong>Part II</strong> showed how RainDB implements these ideas: <code>ColumnarFixedWidthFileFormat</code> writes a 32-byte <code>RNBFCOL1</code> header; <code>ColumnarFixedWidthMmapReader.Open</code> validates and constructs <code>MappedFixedWidthColumnChunk</code> via unsafe <code>MmapBytesMemoryManager</code>; scan pipelines consume mapped chunks through the same <code>IColumnChunk</code> interface as heap-backed columns. UTF-8 and multi-column batches still use <code>RainDbBatchBinaryCodec</code> until Phase C wires sidecar column files and buffer management into <code>RainDbFileDatabase</code>.</p>
+</div>
+          <footer class="doc-footer">
+            <p>Generated by <strong>hoihky</strong> with <strong>MDWeb</strong> and with assistance from <strong>AI</strong></p>
+
+          </footer>
+        </article>
+
+        
+                <aside class="toc" aria-label="On this page">
+                  <p class="toc-title">On this page</p>
+                  <ul>
+                    
+                        <li class="toc-h1">
+                          <a href="#chapter-16-mmap-io">Chapter 16: mmap I/O</a>
+                        </li>
+                        
+                        <li class="toc-h1">
+                          <a href="#part-i-concepts">Part I — Concepts</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#161-virtual-memory-and-paging">16.1 Virtual memory and paging</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#pages-and-page-frames">Pages and page frames</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#why-virtual-memory-matters-for-databases">Why virtual memory matters for databases</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#162-mmap-syscall-semantics">16.2 mmap syscall semantics</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#basic-operation">Basic operation</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#munmap">munmap</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#madvise-and-msync">madvise and msync</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#163-page-cache-and-buffer-cache">16.3 Page cache and buffer cache</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#unified-cache">Unified cache</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#buffer-pool-vs-os-page-cache">Buffer pool vs OS page cache</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#eviction">Eviction</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#164-demand-paging">16.4 Demand paging</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#implications-for-olap">Implications for OLAP</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#165-translation-lookaside-buffer-tlb">16.5 Translation lookaside buffer (TLB)</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#tlb-pressure">TLB pressure</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#166-zero-copy-io-philosophy">16.6 Zero-copy I/O philosophy</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#read-path-copy">read() path (copy)</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#mmap-path-zero-copy-in-userspace">mmap path (zero-copy in userspace)</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#sendfile-and-other-zero-copy-apis">sendfile and other zero-copy APIs</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#when-zero-copy-wins">When zero-copy wins</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#when-zero-copy-loses">When zero-copy loses</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#167-mmap-vs-read-tradeoffs">16.7 mmap vs read() tradeoffs</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#net-specifics">.NET specifics</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#168-column-file-layout-design-principles">16.8 Column file layout design principles</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#1-fixed-header-size">1. Fixed header size</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#2-self-describing-payload-lengths">2. Self-describing payload lengths</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#3-alignment-optional">3. Alignment (optional)</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#4-immutable-segments">4. Immutable segments</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#5-separate-metadata-from-payload">5. Separate metadata from payload</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#6-versioned-magic">6. Versioned magic</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#7-no-pointers-in-file">7. No pointers in file</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#169-lifetime-management-of-mapped-memory">16.9 Lifetime management of mapped memory</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#rules">Rules</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#reference-counting-pattern">Reference counting pattern</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#gc-and-finalizers">GC and finalizers</a>
+                        </li>
+                        
+                        <li class="toc-h1">
+                          <a href="#part-ii-raindb">Part II — RainDB</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1610-scope-and-limitations">16.10 Scope and limitations</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1611-why-mmap-for-olap">16.11 Why mmap for OLAP?</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1612-columnarfixedwidthfileformat-on-disk-layout">16.12 ColumnarFixedWidthFileFormat — on-disk layout</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#16121-file-structure-overview">16.12.1 File structure overview</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#16122-header-byte-by-byte">16.12.2 Header — byte by byte</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#16123-payload-layout">16.12.3 Payload layout</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#16124-writefile-implementation">16.12.4 WriteFile implementation</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#16125-example-hex-dump-conceptual">16.12.5 Example hex dump (conceptual)</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1613-columnarfixedwidthmmapreaderopen">16.13 ColumnarFixedWidthMmapReader.Open</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#16131-open-sequence">16.13.1 Open sequence</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#16132-validation-steps-mirrors-writefile">16.13.2 Validation steps (mirrors WriteFile)</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#16133-slicing-mapped-memory">16.13.3 Slicing mapped memory</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#16134-dispose-lifecycle">16.13.4 Dispose lifecycle</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1614-mmapbytesmemorymanager-unsafe-pointer-bridge">16.14 MmapBytesMemoryManager — unsafe pointer bridge</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#why-unsafe">Why unsafe?</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#pinunpin">Pin/Unpin</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#trygetarray-returns-false">TryGetArray returns false</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1615-mappedfixedwidthcolumnchunk-zero-copy-icolumnchunk">16.15 MappedFixedWidthColumnChunk — zero-copy IColumnChunk</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#zero-copy-scan-path">Zero-copy scan path</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#comparison-to-fixedwidthcolumnchunk">Comparison to FixedWidthColumnChunk</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1616-end-to-end-usage-example">16.16 End-to-end usage example</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1617-integration-roadmap-with-persistence">16.17 Integration roadmap with persistence</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#option-a-sidecar-column-files-per-batch">Option A — sidecar column files per batch</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#option-b-column-major-table-directory">Option B — column-major table directory</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#option-c-hybrid-hydrate">Option C — hybrid hydrate</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#catalog-changes">Catalog changes</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#buffer-manager-phase-c2">Buffer manager (Phase C2)</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1618-when-to-use-mmap-vs-in-memory-bytes">16.18 When to use mmap vs in-memory bytes</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#prefer-mmap-when">Prefer mmap when</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#prefer-in-memory-bytes-when">Prefer in-memory bytes when</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#hybrid-strategy-recommended-product-direction">Hybrid strategy (recommended product direction)</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1619-interaction-with-raindbbatchbinarycodec">16.19 Interaction with RainDbBatchBinaryCodec</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1620-error-handling-and-security">16.20 Error handling and security</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1621-testing-recommendations">16.21 Testing recommendations</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1622-performance-notes">16.22 Performance notes</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1623-future-header-versions">16.23 Future header versions</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1624-summary">16.24 Summary</a>
+                        </li>
+                        
+                  </ul>
+                </aside>
+                
+      </main>
+    </div>
+  </div>
+  <script src="assets/vendor/mermaid.min.js"></script>
+  <script src="assets/vendor/highlight.min.js"></script>
+  <script src="assets/js/site.js"></script>
+</body>
+</html>

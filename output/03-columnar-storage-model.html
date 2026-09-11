@@ -1,0 +1,2041 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Chapter 3: Columnar Storage Model · Building an OLAP Database Engine from Scratch with RainDB</title>
+  <meta name="description" content="Generated documentation site">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="assets/css/site.css">
+  <link rel="stylesheet" href="assets/vendor/atom-one-dark.min.css">
+</head>
+<body>
+  <div class="site">
+    <header class="topbar">
+      <button class="sidebar-toggle" id="sidebar-toggle" aria-label="Toggle navigation">☰</button>
+      <a href="index.html" class="brand">Building an OLAP Database Engine from Scratch with RainDB</a>
+      <div class="search-wrap">
+        <input type="search" id="search" placeholder="Search docs…" autocomplete="off">
+      </div>
+    </header>
+
+    <div class="layout">
+      <aside class="sidebar" id="sidebar">
+        <nav class="nav" aria-label="Documentation">
+          <ul class="nav-list">
+            
+                        <li class="nav-item depth-0">
+                          
+                            <a href="index.html" class="nav-link">Building an OLAP Database Engine from Scratch</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="01-olap-fundamentals.html" class="nav-link">Chapter 1: OLAP Fundamentals</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="02-architecture-and-modules.html" class="nav-link">Chapter 2: Architecture and Modules</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0 is-active">
+                          
+                            <a href="03-columnar-storage-model.html" class="nav-link">Chapter 3: Columnar Storage Model</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="04-chunk-data-structures.html" class="nav-link">Chapter 4: Chunk Data Structures</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="05-catalog-and-tables.html" class="nav-link">Chapter 5: Catalog and Tables</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="06-buffer-management.html" class="nav-link">Chapter 6: Buffer Management</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="07-execution-pipeline.html" class="nav-link">Chapter 7: Execution Pipeline</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="08-vectorized-scan-filter-project.html" class="nav-link">Chapter 8: Vectorized Scan, Filter, and Project</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="09-global-aggregates.html" class="nav-link">Chapter 9: Global Aggregates</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="10-hash-aggregation.html" class="nav-link">Chapter 10: Hash Aggregation</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="11-joins.html" class="nav-link">Chapter 11: Joins</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="12-sort-and-limit.html" class="nav-link">Chapter 12: Sort and Limit</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="13-sql-compilation.html" class="nav-link">Chapter 13: SQL Compilation</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="14-persistence.html" class="nav-link">Chapter 14: Persistence</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="15-future-extensions.html" class="nav-link">Chapter 15: Future Extensions</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="16-mmap-io.html" class="nav-link">Chapter 16: mmap I/O</a>
+                            
+                        </li>
+                        
+          </ul>
+        </nav>
+      </aside>
+
+      <main class="content">
+        <article class="doc">
+          <header class="doc-header">
+            <h1>Chapter 3: Columnar Storage Model</h1>
+          </header>
+          <div class="doc-body"><h1 id="chapter-3-columnar-storage-model">Chapter 3: Columnar Storage Model</h1>
+<p>RainDB's storage model is deliberately small: a handful of schema types, two chunk implementations for fixed-width and UTF-8 data, batches that tie columns together, and tables that hold append-only batch lists. This chapter begins with the theoretical foundations of columnar storage — tradeoffs, metadata, cache behavior, and schema evolution — before examining each RainDB type in depth.</p>
+<h1 id="part-i-concepts-and-theory">Part I: Concepts and Theory</h1>
+<h2 id="columnar-versus-row-oriented-tradeoffs">3.1 Columnar versus row-oriented tradeoffs</h2>
+<p>Row versus column layout is the biggest storage decision in analytical database design. Quantifying the tradeoffs keeps you from assuming &quot;column stores are always faster&quot; without checking what the query actually touches.</p>
+<h3 id="read-amplification">Read amplification</h3>
+<p><strong>Read amplification</strong> measures how many bytes must move from storage to answer a query, relative to the bytes the query logically needs.</p>
+<p>Consider a table with 10 million rows and 20 columns averaging 40 bytes each (800 MB total):</p>
+<table class="table">
+<thead>
+<tr>
+<th>Query</th>
+<th>Row store bytes read</th>
+<th>Column store bytes read</th>
+<th>Ratio</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>SELECT SUM(amount)</code> (1 of 20 cols)</td>
+<td>~800 MB</td>
+<td>~80 MB</td>
+<td>10×</td>
+</tr>
+<tr>
+<td><code>SELECT *</code> (all columns)</td>
+<td>~800 MB</td>
+<td>~800 MB</td>
+<td>1×</td>
+</tr>
+<tr>
+<td><code>SELECT id, amount</code> (2 of 20 cols)</td>
+<td>~800 MB</td>
+<td>~120 MB</td>
+<td>6.7×</td>
+</tr>
+</tbody>
+</table>
+<p>Column stores pay off when <strong>column selectivity</strong> is high — queries touch few columns relative to table width. They offer no advantage when queries need most columns.</p>
+<h3 id="write-amplification">Write amplification</h3>
+<p><strong>Write amplification</strong> measures how many bytes must be written per logical insert.</p>
+<table class="table">
+<thead>
+<tr>
+<th>Operation</th>
+<th>Row store</th>
+<th>Column store</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Insert 1 row (20 cols)</td>
+<td>Write ~800 bytes (one row)</td>
+<td>Write ~800 bytes (20 column appends)</td>
+</tr>
+<tr>
+<td>Insert 64K-row batch</td>
+<td>Write ~52 MB (one segment)</td>
+<td>Write ~52 MB (batched column appends)</td>
+</tr>
+<tr>
+<td>Update 1 column in 1 row</td>
+<td>Rewrite ~800 bytes (one row)</td>
+<td>Rewrite one column segment (may be large)</td>
+</tr>
+</tbody>
+</table>
+<p>Row stores win on <strong>single-row updates</strong>. Column stores win on <strong>batch append</strong> when writes amortize across many rows per column.</p>
+<h3 id="compression-ratio">Compression ratio</h3>
+<p>Homogeneous columns compress far better than heterogeneous rows:</p>
+<table class="table">
+<thead>
+<tr>
+<th>Column type</th>
+<th>Typical compression</th>
+<th>Technique</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Low-cardinality string (<code>country</code>)</td>
+<td>10–50×</td>
+<td>Dictionary encoding</td>
+</tr>
+<tr>
+<td>Sorted integer (<code>timestamp</code>)</td>
+<td>5–20×</td>
+<td>Delta + RLE</td>
+</tr>
+<tr>
+<td>Random float (<code>price</code>)</td>
+<td>1.5–3×</td>
+<td>Gorilla / XOR encoding</td>
+</tr>
+<tr>
+<td>Mixed row (20 columns)</td>
+<td>2–4×</td>
+<td>General-purpose (LZ4, Zstd)</td>
+</tr>
+</tbody>
+</table>
+<p>Columnar layout lets you pick a <strong>per-column codec</strong>. A row store must compress the entire row with one algorithm.</p>
+<h3 id="quantitative-summary">Quantitative summary</h3>
+<table class="table">
+<thead>
+<tr>
+<th>Dimension</th>
+<th>Row-oriented</th>
+<th>Column-oriented</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Point lookup (PK)</td>
+<td>Excellent</td>
+<td>Poor (unless indexed)</td>
+</tr>
+<tr>
+<td>Full table scan (few cols)</td>
+<td>Poor</td>
+<td>Excellent</td>
+</tr>
+<tr>
+<td>Full table scan (all cols)</td>
+<td>Comparable</td>
+<td>Comparable</td>
+</tr>
+<tr>
+<td>Single-row update</td>
+<td>Excellent</td>
+<td>Poor</td>
+</tr>
+<tr>
+<td>Batch append</td>
+<td>Good</td>
+<td>Excellent</td>
+</tr>
+<tr>
+<td>Compression</td>
+<td>Moderate</td>
+<td>Excellent</td>
+</tr>
+<tr>
+<td>Schema width sensitivity</td>
+<td>Low</td>
+<td>High (wider = bigger win)</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="zone-maps-and-minmax-metadata">3.2 Zone maps and min/max metadata</h2>
+<p><strong>Zone maps</strong> (min/max indexes, column statistics, data skipping) store aggregate metadata per storage zone — a batch, stripe, or page. They let the engine skip zones that cannot satisfy a predicate.</p>
+<h3 id="structure">Structure</h3>
+<p>For each column in each zone:</p>
+<pre><code class="language-text">Zone(batch_id=7, column=&quot;sale_date&quot;):
+min = 2025-01-15
+max = 2025-01-31
+null_count = 0
+row_count = 65536
+</code></pre>
+<h3 id="predicate-evaluation">Predicate evaluation</h3>
+<p>Query: <code>WHERE sale_date BETWEEN '2025-01-01' AND '2025-01-20'</code></p>
+<pre><code class="language-text">for each zone in table:
+if zone.max(sale_date) &lt; '2025-01-01' OR zone.min(sale_date) &gt; '2025-01-20':
+  skip zone    // no rows can match
+else:
+  scan zone
+</code></pre>
+<h3 id="effectiveness-conditions">Effectiveness conditions</h3>
+<p>Zone maps work well when:</p>
+<ol>
+<li>Data is <strong>sorted or clustered</strong> by the filtered column</li>
+<li>Zones are <strong>large enough</strong> to amortize metadata overhead</li>
+<li>Queries have <strong>range predicates</strong> on indexed columns</li>
+</ol>
+<p>They fail when:</p>
+<ul>
+<li>Data is randomly ordered (every zone's min/max spans the full range)</li>
+<li>Predicates hit high-cardinality columns with uniform distribution</li>
+<li>Zones are too small (metadata cost exceeds skip benefit)</li>
+</ul>
+<h3 id="beyond-minmax">Beyond min/max</h3>
+<p>Modern systems extend zone maps with:</p>
+<table class="table">
+<thead>
+<tr>
+<th>Statistic</th>
+<th>Use</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Distinct count</td>
+<td>Join cardinality estimation</td>
+</tr>
+<tr>
+<td>Histogram</td>
+<td>Range selectivity estimation</td>
+</tr>
+<tr>
+<td>Bloom filter</td>
+<td>Membership tests for equality</td>
+</tr>
+<tr>
+<td>Dictionary</td>
+<td>Low-cardinality equality</td>
+</tr>
+</tbody>
+</table>
+<p>RainDB Phase 1 does not implement zone maps, but the <strong>batch-per-zone</strong> model in <code>MemoryTable.Batches</code> is the natural attachment point for future min/max metadata per batch.</p>
+<hr />
+<h2 id="batch-sizing-and-the-cache-hierarchy">3.3 Batch sizing and the cache hierarchy</h2>
+<p>Analytical engines process data in <strong>batches</strong> (vectors, morsels) sized to fit CPU caches. The cache hierarchy explains why 64K rows keeps showing up as a sweet spot.</p>
+<h3 id="cache-levels">Cache levels</h3>
+<table class="table">
+<thead>
+<tr>
+<th>Level</th>
+<th>Typical size</th>
+<th>Latency</th>
+<th>Scope</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>L1d</td>
+<td>32 KB per core</td>
+<td>~4 cycles</td>
+<td>Per core</td>
+</tr>
+<tr>
+<td>L2</td>
+<td>256 KB – 1 MB per core</td>
+<td>~12 cycles</td>
+<td>Per core</td>
+</tr>
+<tr>
+<td>L3</td>
+<td>10 – 60 MB shared</td>
+<td>~40 cycles</td>
+<td>Socket</td>
+</tr>
+<tr>
+<td>DRAM</td>
+<td>GBs</td>
+<td>~200 cycles</td>
+<td>System</td>
+</tr>
+</tbody>
+</table>
+<h3 id="working-set-calculation">Working set calculation</h3>
+<p>For a batch of <code>N</code> rows and a query touching <code>C</code> fixed-width columns:</p>
+<pre><code class="language-text">working_set = N × C × column_width + N / 8 × C  (null bitmaps)
+</code></pre>
+<p>Example: <code>N = 65536</code>, <code>C = 2</code> (<code>Int32</code> + <code>Float64</code>):</p>
+<pre><code class="language-text">working_set = 65536 × (4 + 8) + 65536/8 × 2
+= 786432 + 16384
+= 802816 bytes ≈ 784 KB
+</code></pre>
+<p>This fits in L2/L3 on modern CPUs during a single operator pass.</p>
+<h3 id="batch-size-tradeoffs">Batch size tradeoffs</h3>
+<table class="table">
+<thead>
+<tr>
+<th>Batch size</th>
+<th>L1 fit?</th>
+<th>SIMD efficiency</th>
+<th>Parallelism</th>
+<th>Memory per operator</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1K rows</td>
+<td>Yes</td>
+<td>Poor (short loops)</td>
+<td>High (many batches)</td>
+<td>Low</td>
+</tr>
+<tr>
+<td>64K rows</td>
+<td>Partial</td>
+<td>Good</td>
+<td>Moderate</td>
+<td>Moderate</td>
+</tr>
+<tr>
+<td>1M rows</td>
+<td>No (spills L3)</td>
+<td>Excellent</td>
+<td>Low (few batches)</td>
+<td>High</td>
+</tr>
+</tbody>
+</table>
+<h3 id="the-64k1m-range">The 64K–1M range</h3>
+<p>Production OLAP engines converge on <strong>64K–1M rows</strong> per vector because:</p>
+<ul>
+<li><strong>64K</strong> amortizes per-batch dispatch overhead while keeping most single-column working sets in L2/L3</li>
+<li><strong>1M</strong> caps resident set per operator (a 1M-row <code>Float64</code> column is 8 MB)</li>
+<li>Below 64K, SIMD loop overhead dominates; above 1M, cache misses dominate</li>
+</ul>
+<p>RainDB encodes this policy in <code>VectorChunkLimits</code> (see Part II).</p>
+<h3 id="multi-column-queries">Multi-column queries</h3>
+<p>When a query touches many columns, working set grows linearly. A 64K-row batch with 20 <code>Float64</code> columns is <code>65536 × 20 × 8 = 10.5 MB</code> — exceeding L3. Engines mitigate this by:</p>
+<ul>
+<li><strong>Late materialization</strong> — filter on one column first, then project survivors</li>
+<li><strong>Smaller batches</strong> for wide tables</li>
+<li><strong>Column-at-a-time processing</strong> — load one column, process, evict, load next</li>
+</ul>
+<hr />
+<h2 id="append-only-analytics-storage">3.4 Append-only analytics storage</h2>
+<p>Most analytical databases default to <strong>append-only</strong> writes. That choice explains RainDB's <code>MemoryTable</code> design.</p>
+<h3 id="append-only-model">Append-only model</h3>
+<pre><code class="language-text">Write path:  new_batch → append to batch list (no in-place mutation)
+Read path:   scan batch list in order (or parallel per batch)
+</code></pre>
+<h3 id="advantages">Advantages</h3>
+<table class="table">
+<thead>
+<tr>
+<th>Advantage</th>
+<th>Explanation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>No update locks</strong></td>
+<td>Readers never block writers (MVCC-friendly)</td>
+</tr>
+<tr>
+<td><strong>Sequential writes</strong></td>
+<td>Disk and memory bandwidth maximized</td>
+</tr>
+<tr>
+<td><strong>Immutability</strong></td>
+<td>Batches can be shared across threads without synchronization</td>
+</tr>
+<tr>
+<td><strong>Compaction optional</strong></td>
+<td>Background merge of small batches into larger ones</td>
+</tr>
+<tr>
+<td><strong>Time-travel</strong></td>
+<td>Old batches retained for snapshot isolation</td>
+</tr>
+</tbody>
+</table>
+<h3 id="disadvantages">Disadvantages</h3>
+<table class="table">
+<thead>
+<tr>
+<th>Disadvantage</th>
+<th>Mitigation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Deletes require tombstones or rewrite</td>
+<td><code>DELETE</code> marks rows; compaction removes</td>
+</tr>
+<tr>
+<td>Updates are copy-on-write</td>
+<td>Append corrected batch; mark old batch stale</td>
+</tr>
+<tr>
+<td>Small frequent appends create many tiny batches</td>
+<td>Buffer in memory; flush at threshold</td>
+</tr>
+<tr>
+<td>Storage grows until compaction</td>
+<td>Scheduled merge jobs</td>
+</tr>
+</tbody>
+</table>
+<h3 id="lsm-tree-connection">LSM-tree connection</h3>
+<p>Log-structured merge (LSM) trees in RocksDB, Cassandra, and many OLAP systems are append-only at the memtable level. Columnar batches are the analytical analogue of LSM <strong>sorted runs</strong> — immutable segments merged in the background.</p>
+<p>RainDB's <code>MemoryTable._batches</code> list is a simplified append-only log without background compaction in Phase 1.</p>
+<hr />
+<h2 id="schema-evolution-in-analytical-systems">3.5 Schema evolution in analytical systems</h2>
+<p>Analytical tables outlive the code that created them. Schemas change: columns added, types widened, columns retired. <strong>Schema evolution</strong> strategies differ between row and column stores.</p>
+<h3 id="challenges">Challenges</h3>
+<table class="table">
+<thead>
+<tr>
+<th>Challenge</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Backward compatibility</strong></td>
+<td>Old batches lack new columns</td>
+</tr>
+<tr>
+<td><strong>Forward compatibility</strong></td>
+<td>New code reads old data</td>
+</tr>
+<tr>
+<td><strong>Type changes</strong></td>
+<td><code>Int32</code> → <code>Int64</code> requires conversion</td>
+</tr>
+<tr>
+<td><strong>Column removal</strong></td>
+<td>Old batches still carry removed columns</td>
+</tr>
+<tr>
+<td><strong>Rename</strong></td>
+<td>Logical name changes, physical data unchanged</td>
+</tr>
+</tbody>
+</table>
+<h3 id="evolution-strategies">Evolution strategies</h3>
+<p><strong>1. Schema-on-read (flexible)</strong></p>
+<p>Each batch carries its own schema version. Reader fills missing columns with defaults or NULL.</p>
+<pre><code class="language-text">Batch 0 (schema v1): [id, amount]
+Batch 1 (schema v2): [id, amount, region]   ← new column, default NULL for v1 batches
+</code></pre>
+<p><strong>2. Schema-on-write (rigid)</strong></p>
+<p>All batches must match current schema before append. Migration rewrites old batches.</p>
+<p><strong>3. Column mapping (Parquet-style)</strong></p>
+<p>File metadata stores schema evolution history. Reader applies mapping rules.</p>
+<h3 id="default-values-and-null">Default values and NULL</h3>
+<p>When a new column <code>region</code> is added:</p>
+<table class="table">
+<thead>
+<tr>
+<th>Strategy</th>
+<th>Old batch behavior</th>
+<th>Query behavior</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Default literal</td>
+<td><code>region = 'UNKNOWN'</code> for all old rows</td>
+<td>No NULLs</td>
+</tr>
+<tr>
+<td>NULL fill</td>
+<td><code>region = NULL</code> for all old rows</td>
+<td>Three-valued logic</td>
+</tr>
+<tr>
+<td>Physical rewrite</td>
+<td>Rewrite all batches with new column</td>
+<td>Uniform schema</td>
+</tr>
+</tbody>
+</table>
+<h3 id="raindbs-hook">RainDB's hook</h3>
+<p><code>MemoryTable.BumpSchemaVersion()</code> increments a version counter and fires <code>SchemaVersionChanged</code>. Phase 1 does not expose <code>ALTER TABLE</code>, but the hook prepares planners to invalidate cached plans when schema changes.</p>
+<hr />
+<h2 id="null-semantics-in-the-sql-standard">3.6 NULL semantics in the SQL standard</h2>
+<p>NULL is not a value — it is a <strong>marker</strong> for missing or unknown data. SQL's three-valued logic (3VL) governs every NULL interaction.</p>
+<h3 id="three-valued-logic">Three-valued logic</h3>
+<p>SQL predicates evaluate to <code>TRUE</code>, <code>FALSE</code>, or <code>UNKNOWN</code> (NULL):</p>
+<table class="table">
+<thead>
+<tr>
+<th>Expression</th>
+<th>Result</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>NULL = NULL</code></td>
+<td>UNKNOWN (not TRUE!)</td>
+</tr>
+<tr>
+<td><code>NULL = 5</code></td>
+<td>UNKNOWN</td>
+</tr>
+<tr>
+<td><code>NULL IS NULL</code></td>
+<td>TRUE</td>
+</tr>
+<tr>
+<td><code>TRUE AND NULL</code></td>
+<td>UNKNOWN</td>
+</tr>
+<tr>
+<td><code>FALSE AND NULL</code></td>
+<td>FALSE</td>
+</tr>
+<tr>
+<td><code>NOT NULL</code></td>
+<td>UNKNOWN</td>
+</tr>
+</tbody>
+</table>
+<h3 id="where-clause-behavior">WHERE clause behavior</h3>
+<p><code>WHERE</code> keeps only rows where the predicate is <strong>TRUE</strong>. Rows evaluating to FALSE or UNKNOWN are filtered out.</p>
+<pre><code class="language-sql">SELECT * FROM t WHERE amount &gt; 100;
+-- Rows with amount = NULL are excluded (UNKNOWN &gt; 100 is UNKNOWN)
+</code></pre>
+<h3 id="aggregate-behavior">Aggregate behavior</h3>
+<table class="table">
+<thead>
+<tr>
+<th>Aggregate</th>
+<th>NULL input behavior</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>COUNT(*)</code></td>
+<td>Counts all rows including NULLs</td>
+</tr>
+<tr>
+<td><code>COUNT(column)</code></td>
+<td>Counts non-NULL values only</td>
+</tr>
+<tr>
+<td><code>SUM(column)</code></td>
+<td>Ignores NULLs; returns NULL if all NULL</td>
+</tr>
+<tr>
+<td><code>AVG(column)</code></td>
+<td><code>SUM / COUNT(non-null)</code></td>
+</tr>
+<tr>
+<td><code>MIN/MAX</code></td>
+<td>Ignores NULLs</td>
+</tr>
+</tbody>
+</table>
+<h3 id="null-storage-representation">NULL storage representation</h3>
+<p>Columnar engines store NULLs via:</p>
+<ol>
+<li><strong>Validity bitmap</strong> — one bit per row (1 = null, or 1 = valid, convention varies)</li>
+<li><strong>Sentinel values</strong> — reserved value means NULL (e.g., <code>Int32.MinValue</code>)</li>
+<li><strong>Separate null array</strong> — parallel boolean array</li>
+</ol>
+<p>RainDB uses a <strong>validity bitmap</strong> with convention <strong>1 = null</strong>, <strong>0 = non-null</strong>. When <code>HasNulls</code> is false, the bitmap is omitted entirely.</p>
+<h3 id="null-and-vectorization">NULL and vectorization</h3>
+<p>NULL bitmaps complicate SIMD fast paths:</p>
+<pre><code class="language-text">Scalar with nulls:
+  for i in 0..N-1:
+    if not is_null(bitmap, i):
+      sum += values[i]
+
+SIMD without nulls:
+  for i in 0..N-1 step 4:
+    sum_vec = ADD(sum_vec, LOAD(values[i..i+3]))
+</code></pre>
+<p>Engines branch on <code>HasNulls</code> once per column, then choose scalar or SIMD path. RainDB's <code>AggregateIntrinsics.SumFloat64</code> assumes no nulls; callers filter first.</p>
+<hr />
+<h2 id="column-homogeneity-and-type-systems">3.7 Column homogeneity and type systems</h2>
+<p>Columnar storage requires <strong>homogeneous columns</strong> — every value in a chunk shares the same physical type. Row stores mix types within a single row.</p>
+<h3 id="physical-versus-logical-types">Physical versus logical types</h3>
+<table class="table">
+<thead>
+<tr>
+<th>Layer</th>
+<th>Example</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Logical (SQL)</td>
+<td><code>VARCHAR(255)</code>, <code>DECIMAL(18,2)</code></td>
+<td>User-facing, constraints</td>
+</tr>
+<tr>
+<td>Physical (storage)</td>
+<td><code>Utf8</code>, <code>Int64</code> (fixed-point scaled)</td>
+<td>Engine-internal, performance</td>
+</tr>
+</tbody>
+</table>
+<p>RainDB's <code>RainDbType</code> enum is the physical type system:</p>
+<pre><code class="language-text">Int32, Int64, Float64, Boolean, Utf8
+</code></pre>
+<p>A closed physical type set enables exhaustive switch expressions in kernels and predictable memory layout.</p>
+<h3 id="type-width-and-alignment">Type width and alignment</h3>
+<table class="table">
+<thead>
+<tr>
+<th>Type</th>
+<th>Width</th>
+<th>Alignment concern</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>Int32</code></td>
+<td>4 bytes</td>
+<td>Natural for <code>MemoryMarshal.Cast&lt;byte, int&gt;</code></td>
+</tr>
+<tr>
+<td><code>Int64</code></td>
+<td>8 bytes</td>
+<td>Natural for <code>Cast&lt;byte, long&gt;</code></td>
+</tr>
+<tr>
+<td><code>Float64</code></td>
+<td>8 bytes</td>
+<td>AVX2 loads require 32-byte alignment for optimal performance</td>
+</tr>
+<tr>
+<td><code>Boolean</code></td>
+<td>1 byte</td>
+<td>RainDB uses byte-wide, not bit-packed in values</td>
+</tr>
+<tr>
+<td><code>Utf8</code></td>
+<td>Variable</td>
+<td>Offset table + contiguous blob</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="immutability-in-columnar-pipelines">3.8 Immutability in columnar pipelines</h2>
+<p>Immutability shows up everywhere in analytical engine design. Once a batch is written, nothing mutates it in place.</p>
+<h3 id="why-immutable-batches">Why immutable batches?</h3>
+<table class="table">
+<thead>
+<tr>
+<th>Reason</th>
+<th>Benefit</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Thread safety</td>
+<td>Multiple workers scan same batch without locks</td>
+</tr>
+<tr>
+<td>Cache sharing</td>
+<td>Read-only memory mapped across processes</td>
+</tr>
+<tr>
+<td>Simplified reasoning</td>
+<td>No read-write races during query execution</td>
+</tr>
+<tr>
+<td>Cheap &quot;copy&quot;</td>
+<td>Output batch is new; input batch unchanged</td>
+</tr>
+</tbody>
+</table>
+<h3 id="copy-on-write-for-operators">Copy-on-write for operators</h3>
+<pre><code class="language-text">Input batch (immutable)
+→ Filter → new batch with fewer rows (new chunks, copied values)
+→ Project → new batch with subset of columns (may share unchanged column chunks)
+→ Aggregate → scalar result (no batch output)
+</code></pre>
+<p>Operators that shrink data allocate new chunks. Operators that transform in place (e.g., adding a computed column) produce new batches.</p>
+<h3 id="raindbs-contract">RainDB's contract</h3>
+<p><code>IColumnChunk.Values</code> returns <code>ReadOnlyMemory&lt;byte&gt;</code>. After <code>ColumnarBatch</code> construction, no public API mutates chunk bytes. Query output uses <code>PooledFixedWidthColumnChunk</code> with rented buffers that are written once during materialization, then treated as immutable.</p>
+<hr />
+<h2 id="storage-invariants-general">3.9 Storage invariants (general)</h2>
+<p>Regardless of implementation, columnar storage systems enforce a common set of invariants:</p>
+<ol>
+<li><strong>Column homogeneity</strong> — one chunk, one physical type</li>
+<li><strong>Row alignment</strong> — all columns in a batch share <code>RowCount</code></li>
+<li><strong>Positional correspondence</strong> — row <code>i</code> in column A corresponds to row <code>i</code> in column B</li>
+<li><strong>Schema consistency</strong> — batch column count and types match table schema</li>
+<li><strong>Null bitmap consistency</strong> — <code>HasNulls</code> flag matches bitmap content</li>
+</ol>
+<p>Violating any invariant produces silent data corruption at query time. Validation at construction (not at scan) is the standard defense.</p>
+<hr />
+<h2 id="exercises-theory">3.10 Exercises (theory)</h2>
+<h3 id="exercise-3.1-read-amplification">Exercise 3.1 — Read amplification</h3>
+<p>A table has 50 columns averaging 16 bytes each, 5 million rows. How many MB does a column store read for <code>SELECT SUM(col_7)</code> where <code>col_7</code> is <code>Float64</code>?</p>
+<h3 id="exercise-3.2-zone-map-skip">Exercise 3.2 — Zone map skip</h3>
+<p>A table has 100 batches. Each batch's <code>date</code> column has min/max spanning 3 days. A query filters <code>date = '2025-06-15'</code>. How many batches can be skipped if data is sorted by date? If randomly ordered?</p>
+<h3 id="exercise-3.3-cache-fit">Exercise 3.3 — Cache fit</h3>
+<p>Calculate working set for a 64K-row batch with columns: <code>Int32</code>, <code>Float64</code>, <code>Utf8</code> (avg 20 bytes/string). Does it fit in L2 (512 KB)?</p>
+<h3 id="exercise-3.4-null-logic">Exercise 3.4 — NULL logic</h3>
+<p>Evaluate: <code>WHERE (amount &gt; 100) AND (discount IS NOT NULL)</code>. What happens to a row with <code>amount = NULL, discount = 5</code>?</p>
+<h3 id="exercise-3.5-schema-evolution">Exercise 3.5 — Schema evolution</h3>
+<p>A table gains column <code>tax_rate</code> (Float64, default 0.0). Describe read behavior for old batches that lack this column under schema-on-read with NULL fill versus default fill.</p>
+<h3 id="exercise-3.6-append-only-delete">Exercise 3.6 — Append-only delete</h3>
+<p>Design a tombstone strategy for logical row deletion in an append-only column store without rewriting existing batches.</p>
+<hr />
+<h1 id="part-ii-raindb-implementation">Part II: RainDB Implementation</h1>
+<hr />
+<h2 id="design-principles">3.11 Design principles</h2>
+<p>Before reading individual types, internalize four invariants RainDB enforces everywhere:</p>
+<ol>
+<li><strong>Column homogeneity</strong> — one chunk, one <code>RainDbType</code>; no mixed-type arrays inside a chunk.</li>
+<li><strong>Row alignment across columns</strong> — within a batch, every column chunk has identical <code>RowCount</code>.</li>
+<li><strong>Immutable batches after append</strong> — operators read <code>ReadOnlyMemory&lt;byte&gt;</code>; mutation happens only when building new output batches.</li>
+<li><strong>Schema is logical; chunks are physical</strong> — <code>TableSchema</code> describes names and types; <code>IColumnChunk</code> holds bytes.</li>
+</ol>
+<p>Violating any invariant produces <code>ArgumentException</code> at construction or append time, not silent corruption at query time.</p>
+<hr />
+<h2 id="raindbtype-the-physical-type-system">3.12 RainDbType — the physical type system</h2>
+<pre><code class="language-csharp">// src/RainDB.Abstractions/Schema/RainDbType.cs
+public enum RainDbType
+{
+    Int32,
+    Int64,
+    Float64,
+    Boolean,
+    /// &lt;summary&gt;Length-prefixed UTF-8 or dictionary-encoded string bucket (implementation-specific).&lt;/summary&gt;
+    Utf8,
+}
+</code></pre>
+<h3 id="semantic-mapping">Semantic mapping</h3>
+<table class="table">
+<thead>
+<tr>
+<th>RainDbType</th>
+<th>.NET conceptual type</th>
+<th>Storage width</th>
+<th>Chunk class</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>Int32</code></td>
+<td><code>int</code></td>
+<td>4 bytes</td>
+<td><code>FixedWidthColumnChunk</code></td>
+</tr>
+<tr>
+<td><code>Int64</code></td>
+<td><code>long</code></td>
+<td>8 bytes</td>
+<td><code>FixedWidthColumnChunk</code></td>
+</tr>
+<tr>
+<td><code>Float64</code></td>
+<td><code>double</code></td>
+<td>8 bytes</td>
+<td><code>FixedWidthColumnChunk</code></td>
+</tr>
+<tr>
+<td><code>Boolean</code></td>
+<td><code>bool</code></td>
+<td>1 byte (<code>sizeof(byte)</code>)</td>
+<td><code>FixedWidthColumnChunk</code></td>
+</tr>
+<tr>
+<td><code>Utf8</code></td>
+<td>string (logical)</td>
+<td>variable</td>
+<td><code>Utf8ColumnChunk</code> or <code>Utf8LengthPrefixedColumnChunk</code></td>
+</tr>
+</tbody>
+</table>
+<h3 id="why-a-small-enum">Why a small enum?</h3>
+<p>OLAP engines benefit from a <strong>closed world</strong> of physical types during Phase 1:</p>
+<ul>
+<li>Switch expressions in kernels (<code>FixedWidthSelectionKernels</code>) exhaustively handle known types.</li>
+<li><code>ColumnTypeSizes.FixedWidthBytes</code> throws on <code>Utf8</code> — forcing variable-width code paths.</li>
+<li>Future types (<code>Date32</code>, <code>Decimal128</code>) extend the enum without breaking batch shape.</li>
+</ul>
+<h3 id="columndef-named-schema-columns">ColumnDef — named schema columns</h3>
+<pre><code class="language-csharp">// src/RainDB.Abstractions/Schema/ColumnDef.cs
+public readonly record struct ColumnDef(string Name, RainDbType Type);
+</code></pre>
+<p><code>TableSchema</code> holds an ordered list of <code>ColumnDef</code>. Column <strong>index</strong> in the schema equals column index in <code>batch.Columns[i]</code>.</p>
+<hr />
+<h2 id="columntypesizes-width-and-null-bitmap-math">3.13 ColumnTypeSizes — width and null bitmap math</h2>
+<pre><code class="language-csharp">// src/RainDB.Core/Columnar/ColumnTypeSizes.cs
+public static class ColumnTypeSizes
+{
+    public static int FixedWidthBytes(RainDbType type) =&gt;
+        type switch
+        {
+            RainDbType.Int32 =&gt; sizeof(int),
+            RainDbType.Int64 =&gt; sizeof(long),
+            RainDbType.Float64 =&gt; sizeof(double),
+            RainDbType.Boolean =&gt; sizeof(byte),
+            RainDbType.Utf8 =&gt; throw new ArgumentException(&quot;UTF-8 columns are variable width.&quot;, nameof(type)),
+            _ =&gt; throw new ArgumentOutOfRangeException(nameof(type)),
+        };
+
+    public static bool IsFixedWidth(RainDbType type) =&gt; type != RainDbType.Utf8;
+
+    public static int NullBitmapBytes(int rowCount) =&gt; rowCount == 0 ? 0 : (rowCount + 7) &gt;&gt; 3;
+}
+</code></pre>
+<h3 id="fixedwidthbytes">FixedWidthBytes</h3>
+<p>Returns native CLR <code>sizeof</code> for each primitive. <strong>Boolean stores one byte per row</strong>, not one bit — simplifies alignment and SIMD-adjacent scalar loops at the cost of space versus packed bits in the values array.</p>
+<p>Calling <code>FixedWidthBytes(RainDbType.Utf8)</code> throws — UTF-8 payload length is derived from offsets or length prefixes (Chapter 4).</p>
+<h3 id="isfixedwidth">IsFixedWidth</h3>
+<p>Gateway for constructors:</p>
+<pre><code class="language-csharp">if (!ColumnTypeSizes.IsFixedWidth(type))
+throw new ArgumentException(&quot;Use Utf8ColumnChunk for Utf8.&quot;, nameof(type));
+</code></pre>
+<h3 id="nullbitmapbytes-the-formula">NullBitmapBytes — the formula</h3>
+<pre><code>bytes = (rowCount + 7) &gt;&gt; 3   // equivalent to ceil(rowCount / 8)
+</code></pre>
+<table class="table">
+<thead>
+<tr>
+<th>rowCount</th>
+<th>bits needed</th>
+<th>bytes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>0</td>
+<td>0</td>
+<td>0</td>
+</tr>
+<tr>
+<td>1</td>
+<td>1</td>
+<td>1</td>
+</tr>
+<tr>
+<td>7</td>
+<td>7</td>
+<td>1</td>
+</tr>
+<tr>
+<td>8</td>
+<td>8</td>
+<td>1</td>
+</tr>
+<tr>
+<td>9</td>
+<td>9</td>
+<td>2</td>
+</tr>
+<tr>
+<td>64</td>
+<td>64</td>
+<td>8</td>
+</tr>
+<tr>
+<td>65536</td>
+<td>65536</td>
+<td>8192</td>
+</tr>
+</tbody>
+</table>
+<p>RainDB packs <strong>one bit per row</strong> in the null bitmap. Bit semantics (from <code>IColumnChunk</code> documentation):</p>
+<ul>
+<li><strong>1 = null</strong></li>
+<li><strong>0 = non-null</strong></li>
+<li>Row <code>i</code> → byte <code>i &gt;&gt; 3</code>, mask <code>1 &lt;&lt; (i &amp; 7)</code></li>
+</ul>
+<p>When <code>HasNulls</code> is <code>false</code>, <code>NullBitmap</code> may be empty and kernels skip bitmap checks entirely.</p>
+<hr />
+<h2 id="tableschema-and-matchesbatch">3.14 TableSchema and MatchesBatch</h2>
+<pre><code class="language-csharp">// src/RainDB.Abstractions/Schema/TableSchema.cs
+public sealed class TableSchema
+{
+    public TableSchema(IReadOnlyList&lt;ColumnDef&gt; columns)
+    {
+        ArgumentNullException.ThrowIfNull(columns);
+        if (columns.Count == 0)
+            throw new ArgumentException(&quot;Schema requires at least one column.&quot;, nameof(columns));
+        Columns = columns;
+        var names = new HashSet&lt;string&gt;(StringComparer.Ordinal);
+        foreach (var c in columns)
+        {
+            if (!names.Add(c.Name))
+                throw new ArgumentException($&quot;Duplicate column name: {c.Name}&quot;, nameof(columns));
+        }
+    }
+
+    public IReadOnlyList&lt;ColumnDef&gt; Columns { get; }
+
+    public bool MatchesBatch(IColumnarBatch batch)
+    {
+        ArgumentNullException.ThrowIfNull(batch);
+        if (batch.Columns.Count != Columns.Count || batch.RowCount &lt; 0)
+            return false;
+        if (batch.RowCount == 0)
+            return batch.Columns.All(c =&gt; c.RowCount == 0);
+        for (var i = 0; i &lt; Columns.Count; i++)
+        {
+            var col = batch.Columns[i];
+            if (col.RowCount != batch.RowCount)
+                return false;
+            if (col.PhysicalType != Columns[i].Type)
+                return false;
+        }
+        return true;
+    }
+}
+</code></pre>
+<h3 id="constructor-guarantees">Constructor guarantees</h3>
+<ul>
+<li>At least one column</li>
+<li>Unique column names (case-sensitive ordinal comparer)</li>
+</ul>
+<h3 id="matchesbatch-algorithm-step-by-step">MatchesBatch algorithm step-by-step</h3>
+<p>Given <code>TableSchema</code> with columns <code>[region: Utf8, amount: Float64]</code> and a candidate batch:</p>
+<ol>
+<li><strong>Null check</strong> — batch must not be null.</li>
+<li><strong>Arity</strong> — <code>batch.Columns.Count</code> must equal <code>Columns.Count</code> (2).</li>
+<li><strong>Row count sign</strong> — <code>batch.RowCount &gt;= 0</code>.</li>
+<li><strong>Empty batch shortcut</strong> — if <code>batch.RowCount == 0</code>, every column chunk must also have <code>RowCount == 0</code>.</li>
+<li><strong>Per-column loop</strong> — for each index <code>i</code>:
+<ul>
+<li><code>batch.Columns[i].RowCount == batch.RowCount</code></li>
+<li><code>batch.Columns[i].PhysicalType == Columns[i].Type</code></li>
+</ul>
+</li>
+</ol>
+<h3 id="what-matchesbatch-does-not-check">What MatchesBatch does NOT check</h3>
+<ul>
+<li>Column <strong>names</strong> (only positional types matter at storage layer)</li>
+<li>Value ranges (no min/max constraints)</li>
+<li>UTF-8 validity (invalid UTF-8 may throw at decode time)</li>
+<li>Null bitmap consistency with <code>HasNulls</code> flag (chunk constructors validate that)</li>
+</ul>
+<h3 id="worked-example-matching-batch">Worked example — matching batch</h3>
+<p>Schema:</p>
+<pre><code class="language-csharp">var schema = new TableSchema([
+    new ColumnDef(&quot;x&quot;, RainDbType.Int32),
+    new ColumnDef(&quot;y&quot;, RainDbType.Float64),
+]);
+</code></pre>
+<p>Valid batch (2 rows):</p>
+<pre><code class="language-csharp">var col0 = new FixedWidthColumnChunk(RainDbType.Int32, 2, new byte[8], ReadOnlyMemory&lt;byte&gt;.Empty, hasNulls: false);
+var col1 = new FixedWidthColumnChunk(RainDbType.Float64, 2, new byte[16], ReadOnlyMemory&lt;byte&gt;.Empty, hasNulls: false);
+var batch = new ColumnarBatch(2, new IColumnChunk[] { col0, col1 });
+Assert.True(schema.MatchesBatch(batch));
+</code></pre>
+<p>Invalid — type mismatch at index 0:</p>
+<pre><code class="language-csharp">var bad = new FixedWidthColumnChunk(RainDbType.Int64, 2, new byte[16], ReadOnlyMemory&lt;byte&gt;.Empty, hasNulls: false);
+var batch = new ColumnarBatch(2, new IColumnChunk[] { bad, col1 });
+Assert.False(schema.MatchesBatch(batch));
+</code></pre>
+<p>Test reference:</p>
+<pre><code class="language-csharp">// tests/RainDB.Tests/ColumnarAndCatalogTests.cs
+[Fact]
+public void MemoryTable_AppendBatch_rejects_type_mismatch()
+{
+    var schema = new TableSchema([new ColumnDef(&quot;x&quot;, RainDbType.Int32)]);
+    var table = new MemoryTable(&quot;t&quot;, schema);
+    var col = new FixedWidthColumnChunk(RainDbType.Int64, 1, new byte[8], ReadOnlyMemory&lt;byte&gt;.Empty, hasNulls: false);
+    var batch = new ColumnarBatch(1, new IColumnChunk[] { col });
+    Assert.Throws&lt;ArgumentException&gt;(() =&gt; table.AppendBatch(batch));
+}
+</code></pre>
+<hr />
+<h2 id="columnarbatch-batch-level-validation">3.15 ColumnarBatch — batch-level validation</h2>
+<pre><code class="language-csharp">// src/RainDB.Core/Columnar/ColumnarBatch.cs
+public sealed class ColumnarBatch : IColumnarBatch
+{
+    public ColumnarBatch(int rowCount, IReadOnlyList&lt;IColumnChunk&gt; columns)
+    {
+        if (rowCount &lt; 0)
+            throw new ArgumentOutOfRangeException(nameof(rowCount));
+        ArgumentNullException.ThrowIfNull(columns);
+        if (columns.Count == 0)
+            throw new ArgumentException(&quot;At least one column required.&quot;, nameof(columns));
+        for (var i = 0; i &lt; columns.Count; i++)
+        {
+            var c = columns[i];
+            ArgumentNullException.ThrowIfNull(c);
+            if (c.RowCount != rowCount)
+                throw new ArgumentException(
+                    $&quot;Column {i} row count {c.RowCount} != batch row count {rowCount}.&quot;,
+                    nameof(columns));
+        }
+
+        RowCount = rowCount;
+        Columns = columns;
+    }
+
+    public int RowCount { get; }
+    public IReadOnlyList&lt;IColumnChunk&gt; Columns { get; }
+}
+</code></pre>
+<h3 id="differences-from-matchesbatch">Differences from MatchesBatch</h3>
+<table class="table">
+<thead>
+<tr>
+<th>Check</th>
+<th>ColumnarBatch ctor</th>
+<th>TableSchema.MatchesBatch</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Column count &gt; 0</td>
+<td>Yes</td>
+<td>Schema already requires ≥1</td>
+</tr>
+<tr>
+<td>Non-null columns</td>
+<td>Yes</td>
+<td>Assumes non-null list elements</td>
+</tr>
+<tr>
+<td>Row count alignment</td>
+<td>Yes</td>
+<td>Yes</td>
+</tr>
+<tr>
+<td>Physical type vs schema</td>
+<td>No</td>
+<td>Yes</td>
+</tr>
+<tr>
+<td>Duplicate names</td>
+<td>No</td>
+<td>At schema level</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Pattern:</strong> Construct <code>ColumnarBatch</code> first (structural validity), then <code>MemoryTable.AppendBatch</code> calls <code>MatchesBatch</code> (semantic validity against table schema).</p>
+<h3 id="building-from-scratch-minimal-batch">Building from scratch — minimal batch</h3>
+<pre><code class="language-csharp">using RainDB.Columnar;
+using RainDB.Core.Columnar;
+using RainDB.Schema;
+using System.Buffers.Binary;
+
+static ColumnarBatch SingleInt32Column(int[] values)
+{
+    var n = values.Length;
+    var bytes = new byte[n * sizeof(int)];
+    for (var i = 0; i &lt; n; i++)
+        BinaryPrimitives.WriteInt32LittleEndian(bytes.AsSpan(i * 4), values[i]);
+    var chunk = new FixedWidthColumnChunk(
+        RainDbType.Int32, n, bytes, ReadOnlyMemory&lt;byte&gt;.Empty, hasNulls: false);
+    return new ColumnarBatch(n, new IColumnChunk[] { chunk });
+}
+</code></pre>
+<hr />
+<h2 id="vectorchunklimits-ingest-policy">3.16 VectorChunkLimits — ingest policy</h2>
+<pre><code class="language-csharp">// src/RainDB.Core/Columnar/VectorChunkLimits.cs
+public static class VectorChunkLimits
+{
+    public const int MinRows = 64 * 1024;
+    public const int MaxRows = 1024 * 1024;
+
+    public static void ValidateRowCount(int rowCount, bool enforce) { /* ... */ }
+}
+</code></pre>
+<h3 id="integration-with-memorytable">Integration with MemoryTable</h3>
+<pre><code class="language-csharp">// src/RainDB.Core/Tables/MemoryTable.cs (AppendCore excerpt)
+VectorChunkLimits.ValidateRowCount(batch.RowCount, Options.StrictVectorChunkRows);
+_batches.Add(batch);
+</code></pre>
+<h3 id="memorytableoptions">MemoryTableOptions</h3>
+<pre><code class="language-csharp">// src/RainDB.Core/Tables/MemoryTableOptions.cs
+public readonly record struct MemoryTableOptions(
+    bool StrictVectorChunkRows = false,
+    IRainDbBatchPersistence? BatchPersistence = null)
+{
+    public static MemoryTableOptions Default =&gt; default;
+}
+</code></pre>
+<table class="table">
+<thead>
+<tr>
+<th>Mode</th>
+<th>StrictVectorChunkRows</th>
+<th>Acceptable batch sizes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Tests / demos</td>
+<td><code>false</code> (default)</td>
+<td>1 row to millions</td>
+</tr>
+<tr>
+<td>Production ingest</td>
+<td><code>true</code></td>
+<td>0 or [65536, 1048576]</td>
+</tr>
+</tbody>
+</table>
+<h3 id="strict-mode-tests">Strict mode tests</h3>
+<pre><code class="language-csharp">// Rejects 2-row batch when strict
+var opts = new MemoryTableOptions(StrictVectorChunkRows: true);
+var table = new MemoryTable(&quot;t&quot;, schema, options: opts);
+var batch = new ColumnarBatch(2, /* ... */);
+Assert.Throws&lt;ArgumentOutOfRangeException&gt;(() =&gt; table.AppendBatch(batch));
+
+// Accepts exactly MinRows
+const int n = VectorChunkLimits.MinRows;
+var values = new byte[n * sizeof(int)];
+var col = new FixedWidthColumnChunk(RainDbType.Int32, n, values, ReadOnlyMemory&lt;byte&gt;.Empty, hasNulls: false);
+table.AppendBatch(new ColumnarBatch(n, new IColumnChunk[] { col }));
+Assert.Equal(n, table.RowCount);
+</code></pre>
+<h3 id="why-separate-from-columnarbatch">Why separate from ColumnarBatch?</h3>
+<p>Batch struct validates <strong>shape</strong>; table options validate <strong>policy</strong>. Same 100-row batch is structurally valid but policy-rejected under strict mode.</p>
+<hr />
+<h2 id="memorytable-append-only-batch-list">3.17 MemoryTable — append-only batch list</h2>
+<pre><code class="language-csharp">// src/RainDB.Core/Tables/MemoryTable.cs
+public sealed class MemoryTable : ITableSource, IColumnarTableSource
+{
+    private readonly List&lt;IColumnarBatch&gt; _batches = new();
+
+    public MemoryTable(string name, TableSchema schema, TableId? id = null, MemoryTableOptions options = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(name);
+        Name = name;
+        Schema = schema;
+        Id = id ?? TableId.New();
+        Options = options;
+    }
+
+    public TableId Id { get; }
+    public string Name { get; }
+    public TableSchema Schema { get; }
+    public MemoryTableOptions Options { get; }
+    public IReadOnlyList&lt;IColumnarBatch&gt; Batches =&gt; _batches;
+
+    public long RowCount
+    {
+        get
+        {
+            long sum = 0;
+            foreach (var b in _batches)
+                sum += b.RowCount;
+            return sum;
+        }
+    }
+
+    public void AppendBatch(IColumnarBatch batch) =&gt; AppendCore(batch, notifyPersistence: true);
+
+    internal void AppendHydratedBatch(IColumnarBatch batch) =&gt; AppendCore(batch, notifyPersistence: false);
+</code></pre>
+<h3 id="append-pipeline">Append pipeline</h3>
+<pre class="mermaid">flowchart TD
+    A["AppendBatch(batch)"] --> B{"Schema.MatchesBatch?"}
+    B -->|no| X["ArgumentException"]
+    B -->|yes| C{"VectorChunkLimits&lt;br/>(strict?)"}
+    C -->|fail| Y["ArgumentOutOfRangeException"]
+    C -->|ok| D["_batches.Add"]
+    D --> E{"BatchPersistence?"}
+    E -->|yes| F["OnBatchAppended"]
+    F -->|throws| G["Remove batch, rethrow"]
+    E -->|no| H["Done"]
+</pre>
+<h3 id="persistence-hook">Persistence hook</h3>
+<p>When <code>Options.BatchPersistence</code> is set (file database), failed persistence <strong>rolls back</strong> the in-memory append:</p>
+<pre><code class="language-csharp">try
+{
+    persistence.OnBatchAppended(Id, Name, _batches.Count - 1, batch);
+}
+catch
+{
+    _batches.RemoveAt(_batches.Count - 1);
+    throw;
+}
+</code></pre>
+<p><code>AppendHydratedBatch</code> skips persistence — used when reloading batches from disk to avoid duplicate writes.</p>
+<h3 id="schema-versioning">Schema versioning</h3>
+<pre><code class="language-csharp">public int BumpSchemaVersion()
+{
+    var v = Interlocked.Increment(ref _schemaVersion);
+    SchemaVersionChanged?.Invoke(this, new SchemaVersionChangedEventArgs(v));
+    return v;
+}
+</code></pre>
+<p>Planners can cache plans keyed by <code>(TableId, SchemaVersion)</code> and invalidate on bump. Phase 1 SQL does not expose <code>ALTER TABLE</code>, but the hook exists for evolution.</p>
+<hr />
+<h2 id="null-bitmap-bit-math-with-examples">3.18 Null bitmap — bit math with examples</h2>
+<h3 id="setting-and-reading-bits">Setting and reading bits</h3>
+<pre><code class="language-csharp">static void SetNull(Span&lt;byte&gt; bitmap, int row, bool isNull)
+{
+    var byteIndex = row &gt;&gt; 3;
+    var bitMask = (byte)(1 &lt;&lt; (row &amp; 7));
+    if (isNull)
+        bitmap[byteIndex] |= bitMask;
+    else
+        bitmap[byteIndex] &amp;= (byte)~bitMask;
+}
+
+static bool IsNull(ReadOnlySpan&lt;byte&gt; bitmap, int row, bool hasNulls)
+{
+    if (!hasNulls) return false;
+    var byteIndex = row &gt;&gt; 3;
+    var bitMask = (byte)(1 &lt;&lt; (row &amp; 7));
+    return (bitmap[byteIndex] &amp; bitMask) != 0;
+}
+</code></pre>
+<p>This matches <code>SelectionEvaluator.IsNull</code> used in query kernels.</p>
+<h3 id="worked-example-10-rows-rows-2-and-7-null">Worked example — 10 rows, rows 2 and 7 null</h3>
+<pre><code>row:     0  1  2  3  4  5  6  7  8  9
+null?:   .  .  N  .  .  .  .  N  .  .
+
+byte 0 (rows 0-7): bit2=1, bit7=1 → 0b10000100 = 0x84
+byte 1 (rows 8-9): all zero           → 0b00000000 = 0x00
+
+NullBitmapBytes(10) = (10+7)&gt;&gt;3 = 2 bytes
+</code></pre>
+<p>Building the bitmap:</p>
+<pre><code class="language-csharp">var rowCount = 10;
+var bitmap = new byte[ColumnTypeSizes.NullBitmapBytes(rowCount)];
+SetNull(bitmap, 2, true);
+SetNull(bitmap, 7, true);
+var chunk = new FixedWidthColumnChunk(
+    RainDbType.Int32, rowCount, valuesBytes, bitmap, hasNulls: true);
+</code></pre>
+<h3 id="hasnulls-optimization">HasNulls optimization</h3>
+<p>When no nulls exist in a column:</p>
+<pre><code class="language-csharp">new FixedWidthColumnChunk(type, n, values, ReadOnlyMemory&lt;byte&gt;.Empty, hasNulls: false);
+</code></pre>
+<p>Kernels branch on <code>hasNulls</code> once per column, not per row in the common non-null case.</p>
+<h3 id="nullable-int32-values-with-null-at-row-1">Nullable Int32 values with null at row 1</h3>
+<p>Sample data: <code>[100, null, 300]</code></p>
+<pre><code class="language-csharp">var values = new byte[12];
+BinaryPrimitives.WriteInt32LittleEndian(values.AsSpan(0), 100);
+BinaryPrimitives.WriteInt32LittleEndian(values.AsSpan(4), 0);   // placeholder
+BinaryPrimitives.WriteInt32LittleEndian(values.AsSpan(8), 300);
+
+var bitmap = new byte[1];
+SetNull(bitmap, 1, true);
+
+var chunk = new FixedWidthColumnChunk(RainDbType.Int32, 3, values, bitmap, hasNulls: true);
+</code></pre>
+<p>Aggregates must skip row 1 — <code>VectorizedScanEngine</code> aggregate paths check null bitmap before accumulating.</p>
+<hr />
+<h2 id="complete-batch-builder-tutorial">3.19 Complete batch builder tutorial</h2>
+<p>This tutorial builds the <code>order_lines</code> table from <code>samples/RainDB.AnalyticsDemo</code> step by step.</p>
+<h3 id="step-1-define-schema">Step 1: Define schema</h3>
+<pre><code class="language-csharp">var schema = new TableSchema([
+    new ColumnDef(&quot;region&quot;, RainDbType.Utf8),
+    new ColumnDef(&quot;quantity&quot;, RainDbType.Int32),
+    new ColumnDef(&quot;line_total&quot;, RainDbType.Float64),
+]);
+var table = new MemoryTable(&quot;order_lines&quot;, schema);
+</code></pre>
+<h3 id="step-2-helper-utf-8-column-from-strings">Step 2: Helper — UTF-8 column from strings</h3>
+<pre><code class="language-csharp">using System.Text;
+
+static Utf8ColumnChunk Utf8Column(string[] rows)
+{
+    var offsets = new int[rows.Length + 1];
+    var blob = new List&lt;byte&gt;(rows.Length * 8);
+    for (var i = 0; i &lt; rows.Length; i++)
+    {
+        offsets[i] = blob.Count;
+        blob.AddRange(Encoding.UTF8.GetBytes(rows[i]));
+    }
+    offsets[^1] = blob.Count;
+    return new Utf8ColumnChunk(
+        rows.Length, offsets, blob.ToArray(),
+        ReadOnlyMemory&lt;byte&gt;.Empty, hasNulls: false);
+}
+</code></pre>
+<p><strong>Offset invariant:</strong> <code>offsets[i+1] - offsets[i]</code> = byte length of row <code>i</code>. <code>offsets[0] == 0</code>, <code>offsets[^1] == values.Length</code>.</p>
+<h3 id="step-3-helper-int32-column">Step 3: Helper — Int32 column</h3>
+<pre><code class="language-csharp">static FixedWidthColumnChunk Int32Column(int[] values)
+{
+    var bytes = new byte[values.Length * sizeof(int)];
+    for (var i = 0; i &lt; values.Length; i++)
+        BinaryPrimitives.WriteInt32LittleEndian(bytes.AsSpan(i * 4), values[i]);
+    return new FixedWidthColumnChunk(
+        RainDbType.Int32, values.Length, bytes,
+        ReadOnlyMemory&lt;byte&gt;.Empty, hasNulls: false);
+}
+</code></pre>
+<h3 id="step-4-helper-float64-column">Step 4: Helper — Float64 column</h3>
+<pre><code class="language-csharp">static FixedWidthColumnChunk Float64Column(double[] values)
+{
+    var bytes = new byte[values.Length * sizeof(double)];
+    for (var i = 0; i &lt; values.Length; i++)
+        BinaryPrimitives.WriteDoubleLittleEndian(bytes.AsSpan(i * 8), values[i]);
+    return new FixedWidthColumnChunk(
+        RainDbType.Float64, values.Length, bytes,
+        ReadOnlyMemory&lt;byte&gt;.Empty, hasNulls: false);
+}
+</code></pre>
+<h3 id="step-5-assemble-batch-1-4-rows">Step 5: Assemble batch 1 (4 rows)</h3>
+<pre><code class="language-csharp">table.AppendBatch(new ColumnarBatch(
+4,
+[
+    Utf8Column([&quot;US-East&quot;, &quot;US-West&quot;, &quot;EU&quot;, &quot;US-East&quot;]),
+    Int32Column([12, 4, 20, 2]),
+    Float64Column([1200d, 199.5d, 4500d, 49.99d]),
+]));
+</code></pre>
+<h3 id="step-6-assemble-batch-2-3-rows">Step 6: Assemble batch 2 (3 rows)</h3>
+<pre><code class="language-csharp">table.AppendBatch(new ColumnarBatch(
+3,
+[
+    Utf8Column([&quot;US-West&quot;, &quot;EU&quot;, &quot;US-East&quot;]),
+    Int32Column([1, 50, 6]),
+    Float64Column([9.99d, 12000d, 300d]),
+]));
+</code></pre>
+<h3 id="step-7-register-and-verify">Step 7: Register and verify</h3>
+<pre><code class="language-csharp">engine.Catalog.Register(table);
+Console.WriteLine($&quot;{table.RowCount} rows in {table.Batches.Count} batches&quot;);
+// Output: 7 rows in 2 batches
+</code></pre>
+<h3 id="step-8-read-back-utf-8-row-0-from-batch-0">Step 8: Read back UTF-8 row 0 from batch 0</h3>
+<pre><code class="language-csharp">var batch = table.Batches[0];
+var region = (Utf8ColumnChunk)batch.Columns[0];
+var start = region.Offsets.Span[0];
+var end = region.Offsets.Span[1];
+var text = Encoding.UTF8.GetString(region.Values.Span.Slice(start, end - start));
+// &quot;US-East&quot;
+</code></pre>
+<h3 id="step-9-read-back-float64-row-2">Step 9: Read back Float64 row 2</h3>
+<pre><code class="language-csharp">var totals = (FixedWidthColumnChunk)batch.Columns[2];
+var amount = BinaryPrimitives.ReadDoubleLittleEndian(
+    totals.Values.Span.Slice(2 * sizeof(double), sizeof(double)));
+// 4500.0
+</code></pre>
+<hr />
+<h2 id="multi-column-schema-evolution-considerations">3.20 Multi-column schema evolution considerations</h2>
+<p>Phase 1 does not support in-place <code>ALTER TABLE</code>, but <code>BumpSchemaVersion</code> prepares for:</p>
+<ol>
+<li>New columns appended to schema with default null chunks for old batches</li>
+<li>Or rewriting batches on migration</li>
+</ol>
+<p>When designing ingest pipelines, <strong>freeze schema</strong> per table version and bump version on breaking changes.</p>
+<hr />
+<h2 id="icolumnartablesource-contract">3.21 IColumnarTableSource contract</h2>
+<pre><code class="language-csharp">// src/RainDB.Abstractions/Catalog/IColumnarTableSource.cs (conceptual)
+public interface IColumnarTableSource : ITableSource
+{
+    TableSchema Schema { get; }
+    IReadOnlyList&lt;IColumnarBatch&gt; Batches { get; }
+}
+</code></pre>
+<p>Executors require <code>IColumnarTableSource</code>, not bare <code>ITableSource</code>. Custom sources (ephemeral join results) implement the same interface:</p>
+<pre><code class="language-csharp">var ephemeral = new EphemeralColumnarTableSource(
+tableId, name, outputSchema, colResult.Batches);
+</code></pre>
+<hr />
+<h2 id="building-the-storage-layer-from-scratch">3.22 Building the storage layer from scratch</h2>
+<h3 id="milestone-1-types-only">Milestone 1: Types only</h3>
+<p>Implement <code>RainDbType</code>, <code>ColumnDef</code>, <code>TableSchema</code>, <code>ColumnTypeSizes</code>.</p>
+<h3 id="milestone-2-chunks">Milestone 2: Chunks</h3>
+<p>Implement <code>FixedWidthColumnChunk</code> with full constructor validation.</p>
+<h3 id="milestone-3-batches">Milestone 3: Batches</h3>
+<p>Implement <code>ColumnarBatch</code> with row-count loop.</p>
+<h3 id="milestone-4-tables">Milestone 4: Tables</h3>
+<p>Implement <code>MemoryTable.AppendBatch</code> with <code>MatchesBatch</code>.</p>
+<h3 id="milestone-5-policy">Milestone 5: Policy</h3>
+<p>Add <code>VectorChunkLimits</code> and <code>MemoryTableOptions</code>.</p>
+<h3 id="milestone-6-utf-8">Milestone 6: UTF-8</h3>
+<p>Add <code>Utf8ColumnChunk</code> (Chapter 4).</p>
+<h3 id="milestone-7-tests">Milestone 7: Tests</h3>
+<p>Port <code>ColumnarAndCatalogTests</code> — alignment, strict mode, schema mismatch.</p>
+<p>Each milestone should compile and pass tests before proceeding.</p>
+<hr />
+<h2 id="pitfalls">3.23 Pitfalls</h2>
+<h3 id="pitfall-1-wrong-column-order">Pitfall 1: Wrong column order</h3>
+<p><code>MatchesBatch</code> checks types at indices, not names. Swapping <code>Int32</code> and <code>Float64</code> columns without swapping schema order passes validation with wrong semantics.</p>
+<h3 id="pitfall-2-forgetting-little-endian-writes">Pitfall 2: Forgetting little-endian writes</h3>
+<p>Use <code>BinaryPrimitives</code> — never <code>BitConverter</code> without confirming endianness on your target.</p>
+<h3 id="pitfall-3-null-bitmap-too-short">Pitfall 3: Null bitmap too short</h3>
+<p><code>FixedWidthColumnChunk</code> throws if <code>hasNulls &amp;&amp; nullBitmap.Length &lt; NullBitmapBytes(rowCount)</code>.</p>
+<h3 id="pitfall-4-empty-batch-with-non-empty-columns">Pitfall 4: Empty batch with non-empty columns</h3>
+<p><code>ColumnarBatch(0, columns)</code> requires every column <code>RowCount == 0</code>. Values buffers may be empty.</p>
+<h3 id="pitfall-5-appending-same-batch-instance-twice">Pitfall 5: Appending same batch instance twice</h3>
+<p>Allowed — batches are immutable snapshots. Two list entries point to same object (shared memory). Mutating underlying arrays after append breaks immutability — <strong>never mutate</strong> <code>byte[]</code> after wrapping in chunks.</p>
+<h3 id="pitfall-6-strict-mode-with-demo-sized-data">Pitfall 6: Strict mode with demo-sized data</h3>
+<p>Enable strict mode only when ingest produces 64K+ row batches.</p>
+<h3 id="pitfall-7-utf8-in-fixedwidthcolumnchunk">Pitfall 7: Utf8 in FixedWidthColumnChunk</h3>
+<p>Constructor throws — use <code>Utf8ColumnChunk</code>.</p>
+<hr />
+<h2 id="exercises-implementation">3.24 Exercises (implementation)</h2>
+<h3 id="exercise-3.7">Exercise 3.7</h3>
+<p>Compute <code>NullBitmapBytes</code> for row counts 1, 8, 9, 65536 by hand. Verify with a one-line C# snippet.</p>
+<h3 id="exercise-3.8">Exercise 3.8</h3>
+<p>Build a batch with schema <code>[id: Int32, active: Boolean]</code> and 3 rows. Serialize boolean column as bytes <code>[1, 0, 1]</code>.</p>
+<h3 id="exercise-3.9">Exercise 3.9</h3>
+<p>Write a method <code>bool ValidateBatchShape(IColumnarBatch b)</code> mirroring <code>ColumnarBatch</code> constructor rules without throwing.</p>
+<h3 id="exercise-3.10">Exercise 3.10</h3>
+<p>Create a table with strict mode and a single batch of exactly <code>VectorChunkLimits.MaxRows</code> rows. What is the <code>Int32</code> values buffer size in bytes?</p>
+<h3 id="exercise-3.11">Exercise 3.11</h3>
+<p>Implement <code>MatchesBatch</code> failure diagnostics — return a string reason instead of <code>false</code>.</p>
+<h3 id="exercise-3.12">Exercise 3.12</h3>
+<p>Build a nullable <code>Float64</code> column with 5 rows where rows 0 and 4 are null. Print the hex bytes of the null bitmap.</p>
+<hr />
+<h2 id="chapter-summary">3.25 Chapter summary</h2>
+<table class="table">
+<thead>
+<tr>
+<th>Component</th>
+<th>Responsibility</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>RainDbType</code></td>
+<td>Physical storage class enum</td>
+</tr>
+<tr>
+<td><code>ColumnTypeSizes</code></td>
+<td>Widths and null bitmap sizing</td>
+</tr>
+<tr>
+<td><code>TableSchema</code></td>
+<td>Named columns + <code>MatchesBatch</code></td>
+</tr>
+<tr>
+<td><code>ColumnarBatch</code></td>
+<td>Horizontal slice invariant</td>
+</tr>
+<tr>
+<td><code>VectorChunkLimits</code></td>
+<td>Optional 64K–1M row policy</td>
+</tr>
+<tr>
+<td><code>MemoryTable</code></td>
+<td>Append-only batch list + persistence</td>
+</tr>
+<tr>
+<td>Null bitmap</td>
+<td>1 bit per row, 1 = null</td>
+</tr>
+</tbody>
+</table>
+<p>Chapter 4 examines chunk implementations in detail — constructors, UTF-8 layouts, pooled chunks, and <code>MemoryMarshal</code> casting for kernels.</p>
+</div>
+          <footer class="doc-footer">
+            <p>Generated by <strong>hoihky</strong> with <strong>MDWeb</strong> and with assistance from <strong>AI</strong></p>
+
+          </footer>
+        </article>
+
+        
+                <aside class="toc" aria-label="On this page">
+                  <p class="toc-title">On this page</p>
+                  <ul>
+                    
+                        <li class="toc-h1">
+                          <a href="#chapter-3-columnar-storage-model">Chapter 3: Columnar Storage Model</a>
+                        </li>
+                        
+                        <li class="toc-h1">
+                          <a href="#part-i-concepts-and-theory">Part I: Concepts and Theory</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#31-columnar-versus-row-oriented-tradeoffs">3.1 Columnar versus row-oriented tradeoffs</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#read-amplification">Read amplification</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#write-amplification">Write amplification</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#compression-ratio">Compression ratio</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#quantitative-summary">Quantitative summary</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#32-zone-maps-and-minmax-metadata">3.2 Zone maps and min/max metadata</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#structure">Structure</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#predicate-evaluation">Predicate evaluation</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#effectiveness-conditions">Effectiveness conditions</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#beyond-minmax">Beyond min/max</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#33-batch-sizing-and-the-cache-hierarchy">3.3 Batch sizing and the cache hierarchy</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#cache-levels">Cache levels</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#working-set-calculation">Working set calculation</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#batch-size-tradeoffs">Batch size tradeoffs</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#the-64k1m-range">The 64K–1M range</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#multi-column-queries">Multi-column queries</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#34-append-only-analytics-storage">3.4 Append-only analytics storage</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#append-only-model">Append-only model</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#advantages">Advantages</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#disadvantages">Disadvantages</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#lsm-tree-connection">LSM-tree connection</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#35-schema-evolution-in-analytical-systems">3.5 Schema evolution in analytical systems</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#challenges">Challenges</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#evolution-strategies">Evolution strategies</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#default-values-and-null">Default values and NULL</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#raindbs-hook">RainDB's hook</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#36-null-semantics-in-the-sql-standard">3.6 NULL semantics in the SQL standard</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#three-valued-logic">Three-valued logic</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#where-clause-behavior">WHERE clause behavior</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#aggregate-behavior">Aggregate behavior</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#null-storage-representation">NULL storage representation</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#null-and-vectorization">NULL and vectorization</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#37-column-homogeneity-and-type-systems">3.7 Column homogeneity and type systems</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#physical-versus-logical-types">Physical versus logical types</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#type-width-and-alignment">Type width and alignment</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#38-immutability-in-columnar-pipelines">3.8 Immutability in columnar pipelines</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#why-immutable-batches">Why immutable batches?</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#copy-on-write-for-operators">Copy-on-write for operators</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#raindbs-contract">RainDB's contract</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#39-storage-invariants-general">3.9 Storage invariants (general)</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#310-exercises-theory">3.10 Exercises (theory)</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#exercise-31-read-amplification">Exercise 3.1 — Read amplification</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#exercise-32-zone-map-skip">Exercise 3.2 — Zone map skip</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#exercise-33-cache-fit">Exercise 3.3 — Cache fit</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#exercise-34-null-logic">Exercise 3.4 — NULL logic</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#exercise-35-schema-evolution">Exercise 3.5 — Schema evolution</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#exercise-36-append-only-delete">Exercise 3.6 — Append-only delete</a>
+                        </li>
+                        
+                        <li class="toc-h1">
+                          <a href="#part-ii-raindb-implementation">Part II: RainDB Implementation</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#311-design-principles">3.11 Design principles</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#312-raindbtype-the-physical-type-system">3.12 RainDbType — the physical type system</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#semantic-mapping">Semantic mapping</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#why-a-small-enum">Why a small enum?</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#columndef-named-schema-columns">ColumnDef — named schema columns</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#313-columntypesizes-width-and-null-bitmap-math">3.13 ColumnTypeSizes — width and null bitmap math</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#fixedwidthbytes">FixedWidthBytes</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#isfixedwidth">IsFixedWidth</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#nullbitmapbytes-the-formula">NullBitmapBytes — the formula</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#314-tableschema-and-matchesbatch">3.14 TableSchema and MatchesBatch</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#constructor-guarantees">Constructor guarantees</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#matchesbatch-algorithm-step-by-step">MatchesBatch algorithm step-by-step</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#what-matchesbatch-does-not-check">What MatchesBatch does NOT check</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#worked-example-matching-batch">Worked example — matching batch</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#315-columnarbatch-batch-level-validation">3.15 ColumnarBatch — batch-level validation</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#differences-from-matchesbatch">Differences from MatchesBatch</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#building-from-scratch-minimal-batch">Building from scratch — minimal batch</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#316-vectorchunklimits-ingest-policy">3.16 VectorChunkLimits — ingest policy</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#integration-with-memorytable">Integration with MemoryTable</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#memorytableoptions">MemoryTableOptions</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#strict-mode-tests">Strict mode tests</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#why-separate-from-columnarbatch">Why separate from ColumnarBatch?</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#317-memorytable-append-only-batch-list">3.17 MemoryTable — append-only batch list</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#append-pipeline">Append pipeline</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#persistence-hook">Persistence hook</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#schema-versioning">Schema versioning</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#318-null-bitmap-bit-math-with-examples">3.18 Null bitmap — bit math with examples</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#setting-and-reading-bits">Setting and reading bits</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#worked-example-10-rows-rows-2-and-7-null">Worked example — 10 rows, rows 2 and 7 null</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#hasnulls-optimization">HasNulls optimization</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#nullable-int32-values-with-null-at-row-1">Nullable Int32 values with null at row 1</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#319-complete-batch-builder-tutorial">3.19 Complete batch builder tutorial</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#step-1-define-schema">Step 1: Define schema</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#step-2-helper-utf-8-column-from-strings">Step 2: Helper — UTF-8 column from strings</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#step-3-helper-int32-column">Step 3: Helper — Int32 column</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#step-4-helper-float64-column">Step 4: Helper — Float64 column</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#step-5-assemble-batch-1-4-rows">Step 5: Assemble batch 1 (4 rows)</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#step-6-assemble-batch-2-3-rows">Step 6: Assemble batch 2 (3 rows)</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#step-7-register-and-verify">Step 7: Register and verify</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#step-8-read-back-utf-8-row-0-from-batch-0">Step 8: Read back UTF-8 row 0 from batch 0</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#step-9-read-back-float64-row-2">Step 9: Read back Float64 row 2</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#320-multi-column-schema-evolution-considerations">3.20 Multi-column schema evolution considerations</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#321-icolumnartablesource-contract">3.21 IColumnarTableSource contract</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#322-building-the-storage-layer-from-scratch">3.22 Building the storage layer from scratch</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#milestone-1-types-only">Milestone 1: Types only</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#milestone-2-chunks">Milestone 2: Chunks</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#milestone-3-batches">Milestone 3: Batches</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#milestone-4-tables">Milestone 4: Tables</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#milestone-5-policy">Milestone 5: Policy</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#milestone-6-utf-8">Milestone 6: UTF-8</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#milestone-7-tests">Milestone 7: Tests</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#323-pitfalls">3.23 Pitfalls</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#pitfall-1-wrong-column-order">Pitfall 1: Wrong column order</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#pitfall-2-forgetting-little-endian-writes">Pitfall 2: Forgetting little-endian writes</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#pitfall-3-null-bitmap-too-short">Pitfall 3: Null bitmap too short</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#pitfall-4-empty-batch-with-non-empty-columns">Pitfall 4: Empty batch with non-empty columns</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#pitfall-5-appending-same-batch-instance-twice">Pitfall 5: Appending same batch instance twice</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#pitfall-6-strict-mode-with-demo-sized-data">Pitfall 6: Strict mode with demo-sized data</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#pitfall-7-utf8-in-fixedwidthcolumnchunk">Pitfall 7: Utf8 in FixedWidthColumnChunk</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#324-exercises-implementation">3.24 Exercises (implementation)</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#exercise-37">Exercise 3.7</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#exercise-38">Exercise 3.8</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#exercise-39">Exercise 3.9</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#exercise-310">Exercise 3.10</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#exercise-311">Exercise 3.11</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#exercise-312">Exercise 3.12</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#325-chapter-summary">3.25 Chapter summary</a>
+                        </li>
+                        
+                  </ul>
+                </aside>
+                
+      </main>
+    </div>
+  </div>
+  <script src="assets/vendor/mermaid.min.js"></script>
+  <script src="assets/vendor/highlight.min.js"></script>
+  <script src="assets/js/site.js"></script>
+</body>
+</html>

@@ -1,0 +1,385 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Building an OLAP Database Engine from Scratch · Building an OLAP Database Engine from Scratch with RainDB</title>
+  <meta name="description" content="Generated documentation site">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="assets/css/site.css">
+  <link rel="stylesheet" href="assets/vendor/atom-one-dark.min.css">
+</head>
+<body>
+  <div class="site">
+    <header class="topbar">
+      <button class="sidebar-toggle" id="sidebar-toggle" aria-label="Toggle navigation">☰</button>
+      <a href="index.html" class="brand">Building an OLAP Database Engine from Scratch with RainDB</a>
+      <div class="search-wrap">
+        <input type="search" id="search" placeholder="Search docs…" autocomplete="off">
+      </div>
+    </header>
+
+    <div class="layout">
+      <aside class="sidebar" id="sidebar">
+        <nav class="nav" aria-label="Documentation">
+          <ul class="nav-list">
+            
+                        <li class="nav-item depth-0 is-active">
+                          
+                            <a href="index.html" class="nav-link">Building an OLAP Database Engine from Scratch</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="01-olap-fundamentals.html" class="nav-link">Chapter 1: OLAP Fundamentals</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="02-architecture-and-modules.html" class="nav-link">Chapter 2: Architecture and Modules</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="03-columnar-storage-model.html" class="nav-link">Chapter 3: Columnar Storage Model</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="04-chunk-data-structures.html" class="nav-link">Chapter 4: Chunk Data Structures</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="05-catalog-and-tables.html" class="nav-link">Chapter 5: Catalog and Tables</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="06-buffer-management.html" class="nav-link">Chapter 6: Buffer Management</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="07-execution-pipeline.html" class="nav-link">Chapter 7: Execution Pipeline</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="08-vectorized-scan-filter-project.html" class="nav-link">Chapter 8: Vectorized Scan, Filter, and Project</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="09-global-aggregates.html" class="nav-link">Chapter 9: Global Aggregates</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="10-hash-aggregation.html" class="nav-link">Chapter 10: Hash Aggregation</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="11-joins.html" class="nav-link">Chapter 11: Joins</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="12-sort-and-limit.html" class="nav-link">Chapter 12: Sort and Limit</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="13-sql-compilation.html" class="nav-link">Chapter 13: SQL Compilation</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="14-persistence.html" class="nav-link">Chapter 14: Persistence</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="15-future-extensions.html" class="nav-link">Chapter 15: Future Extensions</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="16-mmap-io.html" class="nav-link">Chapter 16: mmap I/O</a>
+                            
+                        </li>
+                        
+          </ul>
+        </nav>
+      </aside>
+
+      <main class="content">
+        <article class="doc">
+          <header class="doc-header">
+            <h1>Building an OLAP Database Engine from Scratch</h1>
+          </header>
+          <div class="doc-body"><h1 id="building-an-olap-database-engine-from-scratch">Building an OLAP Database Engine from Scratch</h1>
+<p><strong>Using RainDB as a working example</strong></p>
+<p>This book teaches you how to design and implement an embedded columnar OLAP database engine step by step. RainDB is an experimental .NET engine that stores data in columnar batches, executes queries with vectorized operators, and compiles a strict SQL subset into physical plans. Every chapter walks through one layer of the stack.</p>
+<h2 id="theory-first-structure">Theory-first structure</h2>
+<p>Each chapter follows the same two-part layout:</p>
+<table class="table">
+<thead>
+<tr>
+<th>Part</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Part I — Concepts and Theory</strong></td>
+<td>General database-engine ideas — relational algebra, storage layouts, compiler stages, OS I/O, and patterns from production OLAP systems — without tying the explanation to RainDB source code</td>
+</tr>
+<tr>
+<td><strong>Part II — RainDB Implementation</strong></td>
+<td>RainDB's concrete realization of those ideas: types, file paths, on-disk layouts, and annotated walkthroughs of the current codebase</td>
+</tr>
+</tbody>
+</table>
+<p>Start with Part I to learn the problem and the usual industry answers; continue to Part II to see how RainDB applies them. Part I stays language-neutral (pseudocode and diagrams where helpful). Part II cites real C# with repository-relative paths such as <code>src/RainDB.Core/Columnar/ColumnarBatch.cs</code>.</p>
+<h2 id="who-this-book-is-for">Who this book is for</h2>
+<p>You should be comfortable reading C# and basic data-structure code. Prior exposure to relational databases helps, but you do not need to have built a query engine before. By the end, you should understand:</p>
+<ul>
+<li>Why OLAP engines use columnar storage and batch-oriented execution</li>
+<li>How modules in RainDB depend on each other</li>
+<li>How batches, chunks, null bitmaps, and catalogs fit together</li>
+<li>How scan, filter, project, aggregate, join, and sort operators work internally</li>
+<li>How SQL text becomes a physical plan and runs on the engine</li>
+<li>How directory-backed persistence and mmap column files relate to in-memory storage</li>
+<li>What production OLAP engines add beyond an embedded prototype (cost-based optimization, spill, WAL, observability)</li>
+</ul>
+<h2 id="how-raindb-is-organized">How RainDB is organized</h2>
+<p>RainDB splits responsibilities across six projects:</p>
+<table class="table">
+<thead>
+<tr>
+<th>Project</th>
+<th>Role</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>RainDB.Abstractions</strong></td>
+<td>Contracts: catalog, columnar model, execution interfaces, logical IR</td>
+</tr>
+<tr>
+<td><strong>RainDB.Core</strong></td>
+<td>Storage: <code>MemoryTable</code>, column chunks, buffer pools, file persistence, mmap I/O</td>
+</tr>
+<tr>
+<td><strong>RainDB.Query</strong></td>
+<td>Execution: physical plans, vectorized engines, query results</td>
+</tr>
+<tr>
+<td><strong>RainDB.Sql</strong></td>
+<td>SQL lexer, parser, binders, compiler</td>
+</tr>
+<tr>
+<td><strong>RainDB.Linq</strong></td>
+<td>Expression-tree compiler (stub today; same physical IR target)</td>
+</tr>
+<tr>
+<td><strong>RainDB</strong> (Driver)</td>
+<td><code>RainDbEngine</code> composition root</td>
+</tr>
+</tbody>
+</table>
+<p>The dependency rule is simple: outer layers depend on inner abstractions, never the reverse.</p>
+<h2 id="chapter-map">Chapter map</h2>
+<p>Each chapter corresponds to one implementation step you would take when building RainDB from an empty repository.</p>
+<table class="table">
+<thead>
+<tr>
+<th>Chapter</th>
+<th>Topic</th>
+<th>Part I focus</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><a href="01-olap-fundamentals.html">1. OLAP Fundamentals</a></td>
+<td>Column vs row storage, batches, vectorization</td>
+<td>Star schema, ETL, Amdahl, volcano vs vectorized, column-store history</td>
+</tr>
+<tr>
+<td><a href="02-architecture-and-modules.html">2. Architecture and Modules</a></td>
+<td>Solution layout, <code>RainDbEngine</code>, extension points</td>
+<td>DBMS layering, logical vs physical plans, Cascades, composition root</td>
+</tr>
+<tr>
+<td><a href="03-columnar-storage-model.html">3. Columnar Storage Model</a></td>
+<td>Schemas, types, batch invariants</td>
+<td>Zone maps, cache hierarchy, append-only storage, NULL semantics</td>
+</tr>
+<tr>
+<td><a href="04-chunk-data-structures.html">4. Chunk Data Structures</a></td>
+<td>Fixed-width and UTF-8 chunks, null bitmaps</td>
+<td>Encodings (plain/dictionary/RLE), Arrow layout, immutability</td>
+</tr>
+<tr>
+<td><a href="05-catalog-and-tables.html">5. Catalog and Tables</a></td>
+<td><code>TableId</code>, <code>MemoryTable</code>, append validation</td>
+<td>System catalog, table identity, schema as contract, append-only vs MVCC</td>
+</tr>
+<tr>
+<td><a href="06-buffer-management.html">6. Buffer Management</a></td>
+<td><code>HybridBufferPool</code>, aligned allocation</td>
+<td>Memory hierarchy, pools, SIMD alignment, LOH, bandwidth</td>
+</tr>
+<tr>
+<td><a href="07-execution-pipeline.html">7. Execution Pipeline</a></td>
+<td>Physical plans, <code>DefaultQueryExecutor</code></td>
+<td>Volcano/vectorized models, pull vs push, pipelining vs materialization</td>
+</tr>
+<tr>
+<td><a href="08-vectorized-scan-filter-project.html">8. Vectorized Scan, Filter, Project</a></td>
+<td>Selection vectors, morsel parallelism</td>
+<td>Relational σ and π, selectivity, predicate pushdown, gather/scatter</td>
+</tr>
+<tr>
+<td><a href="09-global-aggregates.html">9. Global Aggregates</a></td>
+<td>Partial aggregation, SIMD sum</td>
+<td>γ operator, associative aggregates, map-reduce, empty-set semantics</td>
+</tr>
+<tr>
+<td><a href="10-hash-aggregation.html">10. Hash Aggregation</a></td>
+<td>Group keys, hash maps, merge</td>
+<td>Hash vs sort grouping, spill concept, composite keys</td>
+</tr>
+<tr>
+<td><a href="11-joins.html">11. Join Execution</a></td>
+<td>Hash join, sort-merge join</td>
+<td>Join algebra, NLJ/HJ/SMJ, build vs probe, join ordering</td>
+</tr>
+<tr>
+<td><a href="12-sort-and-limit.html">12. Sort and Limit</a></td>
+<td>Top-N, ORDER BY</td>
+<td>External sort, Top-K heaps, stable sort semantics</td>
+</tr>
+<tr>
+<td><a href="13-sql-compilation.html">13. SQL Compilation</a></td>
+<td>Lexer, parser, binders</td>
+<td>Compiler phases, CFG, AST vs IR, prepared statements</td>
+</tr>
+<tr>
+<td><a href="14-persistence.html">14. Persistence</a></td>
+<td>Catalog JSON, batch codec</td>
+<td>WAL, checkpointing, crash recovery, columnar file formats</td>
+</tr>
+<tr>
+<td><a href="15-future-extensions.html">15. Future Extensions</a></td>
+<td>Roadmap and stubs</td>
+<td>Production OLAP requirements, CBO, statistics, observability</td>
+</tr>
+<tr>
+<td><a href="16-mmap-io.html">16. mmap I/O</a></td>
+<td><code>RNBFCOL1</code> column files</td>
+<td>Virtual memory, page cache, zero-copy, mmap vs read</td>
+</tr>
+</tbody>
+</table>
+<h2 id="how-to-read-this-book">How to read this book</h2>
+<p>Read chapters in order for the full build narrative. Later chapters assume earlier concepts.</p>
+<ul>
+<li><strong>Part I in every chapter</strong> explains the general theory you need before reading RainDB code.</li>
+<li><strong>Part II in every chapter</strong> walks through RainDB's current implementation with source references.</li>
+<li><strong>Chapter 15</strong> is best read after 13–16 when you want the full roadmap map, not just today's code.</li>
+</ul>
+<p>RainDB is actively developed. Sections marked <strong>(planned)</strong> describe interfaces or stubs that exist today but are not fully implemented. Chapter 15 collects extension points; Chapter 16 documents mmap code that is implemented but not yet wired into default persistence hydration.</p>
+<h2 id="a-minimal-end-to-end-example">A minimal end-to-end example</h2>
+<p>Before diving into internals, here is the public surface the engine exposes after all layers are wired:</p>
+<pre><code class="language-csharp">using RainDB;
+using RainDB.Core.Columnar;
+using RainDB.Core.Tables;
+using RainDB.Schema;
+
+var engine = RainDbEngine.CreateDefault();
+
+var schema = new TableSchema([
+    new ColumnDef("region", RainDbType.Utf8),
+    new ColumnDef("amount", RainDbType.Float64),
+]);
+var table = new MemoryTable("sales", schema);
+// ... append columnar batches ...
+engine.Catalog.Register(table);
+
+await using var rows = await engine.ExecuteSqlAsync(
+    "SELECT region, amount FROM sales WHERE amount &gt; 0.5");
+</code></pre>
+<p>For durable storage, replace <code>CreateDefault()</code> with <code>RainDbEngine.OpenPersistent("./my-data")</code> — see Chapter 14.</p>
+<p>Everything that happens between <code>ExecuteSqlAsync</code> and the returned rows is what this book explains.</p>
+</div>
+          <footer class="doc-footer">
+            <p>Generated by <strong>hoihky</strong> with <strong>MDWeb</strong> and with assistance from <strong>AI</strong></p>
+
+          </footer>
+        </article>
+
+        
+                <aside class="toc" aria-label="On this page">
+                  <p class="toc-title">On this page</p>
+                  <ul>
+                    
+                        <li class="toc-h1">
+                          <a href="#building-an-olap-database-engine-from-scratch">Building an OLAP Database Engine from Scratch</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#theory-first-structure">Theory-first structure</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#who-this-book-is-for">Who this book is for</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#how-raindb-is-organized">How RainDB is organized</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#chapter-map">Chapter map</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#how-to-read-this-book">How to read this book</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#a-minimal-end-to-end-example">A minimal end-to-end example</a>
+                        </li>
+                        
+                  </ul>
+                </aside>
+                
+      </main>
+    </div>
+  </div>
+  <script src="assets/vendor/mermaid.min.js"></script>
+  <script src="assets/vendor/highlight.min.js"></script>
+  <script src="assets/js/site.js"></script>
+</body>
+</html>

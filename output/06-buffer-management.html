@@ -1,0 +1,1248 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Chapter 6: Buffer Management · Building an OLAP Database Engine from Scratch with RainDB</title>
+  <meta name="description" content="Generated documentation site">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="assets/css/site.css">
+  <link rel="stylesheet" href="assets/vendor/atom-one-dark.min.css">
+</head>
+<body>
+  <div class="site">
+    <header class="topbar">
+      <button class="sidebar-toggle" id="sidebar-toggle" aria-label="Toggle navigation">☰</button>
+      <a href="index.html" class="brand">Building an OLAP Database Engine from Scratch with RainDB</a>
+      <div class="search-wrap">
+        <input type="search" id="search" placeholder="Search docs…" autocomplete="off">
+      </div>
+    </header>
+
+    <div class="layout">
+      <aside class="sidebar" id="sidebar">
+        <nav class="nav" aria-label="Documentation">
+          <ul class="nav-list">
+            
+                        <li class="nav-item depth-0">
+                          
+                            <a href="index.html" class="nav-link">Building an OLAP Database Engine from Scratch</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="01-olap-fundamentals.html" class="nav-link">Chapter 1: OLAP Fundamentals</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="02-architecture-and-modules.html" class="nav-link">Chapter 2: Architecture and Modules</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="03-columnar-storage-model.html" class="nav-link">Chapter 3: Columnar Storage Model</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="04-chunk-data-structures.html" class="nav-link">Chapter 4: Chunk Data Structures</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="05-catalog-and-tables.html" class="nav-link">Chapter 5: Catalog and Tables</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0 is-active">
+                          
+                            <a href="06-buffer-management.html" class="nav-link">Chapter 6: Buffer Management</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="07-execution-pipeline.html" class="nav-link">Chapter 7: Execution Pipeline</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="08-vectorized-scan-filter-project.html" class="nav-link">Chapter 8: Vectorized Scan, Filter, and Project</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="09-global-aggregates.html" class="nav-link">Chapter 9: Global Aggregates</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="10-hash-aggregation.html" class="nav-link">Chapter 10: Hash Aggregation</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="11-joins.html" class="nav-link">Chapter 11: Joins</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="12-sort-and-limit.html" class="nav-link">Chapter 12: Sort and Limit</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="13-sql-compilation.html" class="nav-link">Chapter 13: SQL Compilation</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="14-persistence.html" class="nav-link">Chapter 14: Persistence</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="15-future-extensions.html" class="nav-link">Chapter 15: Future Extensions</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="16-mmap-io.html" class="nav-link">Chapter 16: mmap I/O</a>
+                            
+                        </li>
+                        
+          </ul>
+        </nav>
+      </aside>
+
+      <main class="content">
+        <article class="doc">
+          <header class="doc-header">
+            <h1>Chapter 6: Buffer Management</h1>
+          </header>
+          <div class="doc-body"><h1 id="chapter-6-buffer-management">Chapter 6: Buffer Management</h1>
+<p>Vectorized engines chew through <strong>short-lived allocations</strong> at a furious rate: selection index arrays, projected column buffers, hash buckets, sort runs. Calling <code>new byte[n]</code> inside every inner loop shifts the bottleneck from computation to the garbage collector. Buffer management — deliberate policies for acquiring, aligning, reusing, and releasing memory — is therefore a first-class design problem in OLAP, not a polish pass at the end.</p>
+<p><strong>Part I</strong> walks the memory hierarchy, allocator families, SIMD alignment rules, .NET Large Object Heap behavior, and why bandwidth — not CPU — often caps scan throughput. <strong>Part II</strong> connects those ideas to RainDB's <code>HybridBufferPool</code>, <code>PooledAlignedMemoryOwner</code>, and the dual-pool pattern in <code>ProjectGather</code> and <code>VectorizedScanEngine</code>.</p>
+<hr />
+<h1 id="part-i-concepts-and-theory">Part I: Concepts and Theory</h1>
+<h2 id="the-memory-hierarchy">6.1 The memory hierarchy</h2>
+<p>Hardware presents storage as a <strong>pyramid</strong>: each tier is bigger and slower than the one above. Engines that treat all memory as equally fast leave performance on the table.</p>
+<pre><code>         ┌─────────────┐
+│  Registers  │  ~1 cycle, tens of values
+├─────────────┤
+│ L1 cache    │  ~4 cycles, 32–64 KiB per core
+├─────────────┤
+│ L2 cache    │  ~12 cycles, 256 KiB–1 MiB per core
+├─────────────┤
+│ L3 cache    │  ~40 cycles, shared 8–64 MiB
+├─────────────┤
+│ DRAM        │  ~100–300 cycles, GB–TB
+├─────────────┤
+│ SSD / NVMe  │  ~10–100 µs, TB
+├─────────────┤
+│ HDD         │  ~5–10 ms, TB
+└─────────────┘
+</code></pre>
+<h3 id="registers-and-simd-lanes">Registers and SIMD lanes</h3>
+<p><strong>Registers</strong> hold the operands of individual instructions. SIMD widens them so one instruction touches many elements at once:</p>
+<table class="table">
+<thead>
+<tr>
+<th>ISA extension</th>
+<th>Typical register width</th>
+<th>Elements (32-bit int)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>SSE / Vector128</td>
+<td>128 bits</td>
+<td>4</td>
+</tr>
+<tr>
+<td>AVX2 / Vector256</td>
+<td>256 bits</td>
+<td>8</td>
+</tr>
+<tr>
+<td>AVX-512</td>
+<td>512 bits</td>
+<td>16</td>
+</tr>
+</tbody>
+</table>
+<p>Columnar kernels load contiguous values into SIMD registers, compare or add across lanes, and write results. <strong>Register pressure</strong> caps how many columns you can process in one loop — a key reason engines batch rows into fixed-width <strong>vectors</strong> (often 1024–65536 rows).</p>
+<h3 id="cache-lines">Cache lines</h3>
+<p>Caches fetch <strong>cache lines</strong> — typically <strong>64 bytes</strong> at a time. A <code>Float64</code> load that straddles a line boundary may pull two lines. Columnar layout helps: scanning 8-byte values sequentially tends to use each line once with high utilization.</p>
+<p><strong>False sharing</strong> happens when two cores write different fields that share a line; each write evicts the line for the other core. Padding hot counters to 128 bytes (two lines) isolates them — RainDB exposes <code>SimdAlignment.CacheLine128</code> for that pattern.</p>
+<h3 id="dram">DRAM</h3>
+<p>DRAM is the working set for in-memory OLAP. When data exceeds RAM, operators <strong>spill</strong> to disk (hash partitions, sort runs). RainDB's <code>ISpillWriter</code> port anticipates future hash-aggregate spill paths.</p>
+<h3 id="disk">Disk</h3>
+<p>Even on NVMe, random I/O is orders of magnitude slower than sequential DRAM bandwidth. Column pruning and batch sizing exist partly to keep hot columns in RAM and reads sequential on disk.</p>
+<hr />
+<h2 id="why-allocation-matters-in-tight-loops">6.2 Why allocation matters in tight loops</h2>
+<p>Filter and project one batch of 65,536 rows across three <code>Float64</code> columns at 50% selectivity:</p>
+<pre><code>Per batch (naive allocation):
+selection int[65536]           ≈ 256 KiB
+3 × projected Float64 columns  ≈ 3 × 50% × 65536 × 8 ≈ 768 KiB
+Total ≈ 1 MiB allocated and discarded
+</code></pre>
+<p>Across 200 batches that is <strong>~200 MiB</strong> of garbage per query, mostly Gen0/Gen1 churn. The CPU spends cycles on:</p>
+<ol>
+<li>Zeroing fresh arrays</li>
+<li>Tracing references during GC</li>
+<li>Promoting survivors across generations</li>
+<li>Allocator metadata traffic that evicts useful cache lines</li>
+</ol>
+<h3 id="allocation-inside-inner-loops">Allocation inside inner loops</h3>
+<p>An <strong>inner loop</strong> that runs per row, per column, or per batch should avoid the general allocator unless there is no alternative:</p>
+<pre><code>// BAD: allocates every iteration
+for each batch:
+    for each column:
+        output = new byte[rowCount * width]
+
+// GOOD: rent once per batch/column, return after use
+for each batch:
+    buf = pool.rent(rowCount * width)
+    try:
+        ... compute ...
+    finally:
+        pool.return(buf)
+</code></pre>
+<p>The goal is <strong>amortization</strong>: pay allocation cost once per batch (or query), then reuse through a pool.</p>
+<h3 id="throughput-versus-latency">Throughput versus latency</h3>
+<p>OLAP workloads optimize <strong>throughput</strong> (rows per second). Millisecond GC pauses may be tolerable for batch jobs but ruin interactive tail latency. Pooling cuts collection frequency and makes pauses more predictable.</p>
+<hr />
+<h2 id="arena-and-bump-allocators">6.3 Arena and bump allocators</h2>
+<p>An <strong>arena</strong> (region allocator, bump allocator) hands out memory from a pre-reserved block by advancing an offset:</p>
+<pre><code>Arena block: [████████████████████████████████]
+              ^offset
+              bump by N bytes → fast pointer add
+
+reset(): offset = 0  →  entire arena reclaimed at once
+</code></pre>
+<h3 id="characteristics">Characteristics</h3>
+<table class="table">
+<thead>
+<tr>
+<th>Property</th>
+<th>Arena behavior</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Individual free</td>
+<td>Not supported (or rarely)</td>
+</tr>
+<tr>
+<td>Deallocation</td>
+<td>Reset entire arena or drop arena object</td>
+</tr>
+<tr>
+<td>Speed</td>
+<td>Near-constant time per allocation</td>
+</tr>
+<tr>
+<td>Fragmentation</td>
+<td>None within arena lifetime</td>
+</tr>
+<tr>
+<td>Thread safety</td>
+<td>Usually one arena per thread</td>
+</tr>
+</tbody>
+</table>
+<h3 id="use-cases-in-query-engines">Use cases in query engines</h3>
+<ul>
+<li><strong>Expression evaluation</strong> — scratch strings and structs for one query</li>
+<li><strong>Parser / planner</strong> — AST nodes for one compile</li>
+<li><strong>Per-query scratch</strong> — reset when the query finishes</li>
+</ul>
+<h3 id="pseudocode">Pseudocode</h3>
+<pre><code>class Arena {
+    block: byte[]
+    offset: int = 0
+
+    allocate(n: int) -&gt; Span&lt;byte&gt; {
+        if offset + n &gt; block.length: grow()
+        result = block[offset .. offset+n]
+        offset += n
+        return result
+    }
+
+    reset() { offset = 0 }
+}
+</code></pre>
+<p>Arenas pair naturally with <strong>compile-once, run-many</strong> and <strong>one query, one arena</strong> lifetimes. RainDB Phase 1 leans on <strong><code>ArrayPool</code></strong> instead of a custom arena — simpler integration with <code>IMemoryOwner&lt;byte&gt;</code> and chunk disposal — but arena-like semantics appear in nested <code>PooledBufferOwner</code> lifetimes tied to chunk <code>Dispose</code>.</p>
+<hr />
+<h2 id="object-pools-versus-array-pools">6.4 Object pools versus array pools</h2>
+<p>Managed runtimes offer two dominant pooling styles:</p>
+<h3 id="object-pool">Object pool</h3>
+<p>Reuses <strong>heap objects</strong> (class instances):</p>
+<pre><code>pool.acquire() → Widget instance (possibly reused)
+pool.release(widget) → reset state, return to pool
+</code></pre>
+<p>Best for expensive-to-build objects: <code>StringBuilder</code>, connection wrappers, protocol buffers with headers.</p>
+<p><strong>Cost:</strong> Object headers, reference-type GC tracking, and reset logic to clear sensitive state.</p>
+<h3 id="array-pool">Array pool</h3>
+<p>Reuses <strong>primitive arrays</strong> (<code>byte[]</code>, <code>int[]</code>) without allocating a wrapper per rent:</p>
+<pre><code>buf = ArrayPool&lt;byte&gt;.Shared.Rent(minimumLength)
+// ... use buf ...
+ArrayPool&lt;byte&gt;.Shared.Return(buf, clearArray: false)
+</code></pre>
+<p>.NET's <code>System.Buffers.ArrayPool&lt;T&gt;</code> targets high-throughput server code. Rented arrays may be <strong>longer</strong> than requested — track logical length separately.</p>
+<table class="table">
+<thead>
+<tr>
+<th>Aspect</th>
+<th>Object pool</th>
+<th>Array pool</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Unit</td>
+<td>Class instance</td>
+<td><code>T[]</code></td>
+</tr>
+<tr>
+<td>GC pressure</td>
+<td>Lower than alloc-per-use</td>
+<td>Minimal</td>
+</tr>
+<tr>
+<td>Type safety</td>
+<td>Strong</td>
+<td>Raw arrays</td>
+</tr>
+<tr>
+<td>Typical OLAP use</td>
+<td>Result wrappers</td>
+<td>Column bytes, selection indices</td>
+</tr>
+</tbody>
+</table>
+<p>RainDB routes column bytes through <strong><code>ArrayPool&lt;byte&gt;</code></strong> via <code>HybridBufferPool</code> and selection indices through <strong><code>ArrayPool&lt;int&gt;.Shared</code></strong> in <code>VectorizedScanEngine</code> — the byte pool abstraction does not map cleanly onto typed <code>int[]</code>.</p>
+<hr />
+<h2 id="simd-alignment-requirements-3264-byte">6.5 SIMD alignment requirements (32/64 byte)</h2>
+<p><strong>Aligned SIMD loads</strong> require the address to be a multiple of the vector width:</p>
+<pre><code>Address % 32 == 0   →  aligned Vector256 load (typical AVX2)
+Address % 16 == 0   →  aligned Vector128 load
+</code></pre>
+<h3 id="misaligned-loads">Misaligned loads</h3>
+<p>x86-64 often tolerates unaligned SIMD with a latency penalty. ARM may fault or slow-path depending on the instruction. Portable engines align hot buffers defensively.</p>
+<h3 id="alignment-versus-array-object-header">Alignment versus array object header</h3>
+<p>In .NET, the <strong>first element</strong> of a <code>byte[]</code> is not guaranteed 32-byte aligned — object header and length prefix skew the address. The standard fix is sub-slicing inside a larger rent:</p>
+<pre><code>rented = pool.rent(needed + alignment - 1)
+offset = align_up(address_of(rented[0]), 32)
+aligned_slice = rented[offset .. offset+needed]
+</code></pre>
+<p>RainDB's <code>HybridBufferPool.RentAligned</code> implements exactly this pattern.</p>
+<h3 id="versus-64-byte">32 versus 64 byte</h3>
+<table class="table">
+<thead>
+<tr>
+<th>Alignment</th>
+<th>Rationale</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>32 bytes</td>
+<td><code>Vector256&lt;double&gt;</code> / AVX2</td>
+</tr>
+<tr>
+<td>64 bytes</td>
+<td>AVX-512, some cache-line isolation strategies</td>
+</tr>
+</tbody>
+</table>
+<p>RainDB defaults to <strong>32 bytes</strong> (<code>SimdAlignment.Vector256</code>). Requests below 32 are rejected — under-alignment defeats the purpose.</p>
+<hr />
+<h2 id="large-object-heap-loh-in.net-gc">6.6 Large Object Heap (LOH) in .NET GC</h2>
+<p>On 64-bit runtimes, the GC routes large arrays to a separate heap.</p>
+<h3 id="loh-threshold">LOH threshold</h3>
+<p>Objects <strong>≥ ~85,000 bytes</strong> land on the <strong>Large Object Heap</strong>:</p>
+<ul>
+<li>Collected less often than Gen0/Gen1</li>
+<li>Historically not compacted (fragmentation risk); modern .NET can compact LOH on demand</li>
+<li>Higher alloc and collection cost than small objects</li>
+</ul>
+<h3 id="implications-for-column-buffers">Implications for column buffers</h3>
+<pre><code>65536 rows × 8 bytes (Float64) = 524,288 bytes  →  LOH
+65536 rows × 4 bytes (Int32)   = 262,144 bytes  →  LOH
+8192 rows × 8 bytes            =  65,536 bytes  →  below LOH (Gen2 candidate after survival)
+</code></pre>
+<p>Strict vector sizing (<code>64K–1M rows</code>) often pushes column buffers into LOH territory. <strong>Pooling</strong> does not avoid LOH placement but <strong>reuses</strong> those arrays across queries, eliminating repeated alloc/free cycles.</p>
+<h3 id="arraypool-and-loh"><code>ArrayPool</code> and LOH</h3>
+<p><code>ArrayPool&lt;byte&gt;.Shared</code> maintains buckets including large sizes. Returned arrays stay pooled until memory pressure evicts them. RainDB's <code>HybridBufferPool</code> comment notes intent to keep <strong>typical</strong> rents under LOH when possible — null bitmaps at 8 KiB for 64K rows sit well below the threshold.</p>
+<h3 id="loh-mitigation-strategies">LOH mitigation strategies</h3>
+<ol>
+<li><strong>Smaller vector widths</strong> — trade loop overhead for Gen1-sized buffers</li>
+<li><strong>Pooling</strong> — amortize LOH allocation cost</li>
+<li><strong>Native memory / unmanaged</strong> — <code>NativeMemory.AlignedAlloc</code> bypasses GC (some engines; RainDB stays managed in Phase 1)</li>
+<li><strong>ArrayPool clear policy</strong> — <code>Return(buf, clearArray: false)</code> on hot paths avoids zeroing megabytes</li>
+</ol>
+<hr />
+<h2 id="memory-bandwidth-as-the-olap-bottleneck">6.7 Memory bandwidth as the OLAP bottleneck</h2>
+<p>Once allocation noise is under control, <strong>memory bandwidth</strong> often caps scan throughput — the <strong>memory wall</strong>.</p>
+<h3 id="roofline-intuition">Roofline intuition</h3>
+<p>Peak performance is bounded by:</p>
+<pre><code>min(peak_compute_ops, memory_bandwidth × operational_intensity)
+</code></pre>
+<p>Scan/filter/project on cold columns has <strong>low operational intensity</strong>: few arithmetic ops per byte loaded from DRAM.</p>
+<h3 id="column-pruning-effect">Column pruning effect</h3>
+<p>Reading 2 of 50 columns uses roughly 4% of the row-oriented bandwidth — columnar storage makes pruning a physical win, not just a logical one.</p>
+<h3 id="simd-helps-compute-not-bandwidth">SIMD helps compute, not bandwidth</h3>
+<p>SIMD cuts instruction count for compares and sums but still <strong>loads every value byte</strong> from memory (unless compressed encoding shrinks the payload). At saturation, cores stall waiting for cache/DRAM fills.</p>
+<h3 id="bandwidth-conscious-design-checklist">Bandwidth-conscious design checklist</h3>
+<table class="table">
+<thead>
+<tr>
+<th>Technique</th>
+<th>Bandwidth impact</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Columnar layout</td>
+<td>Read only needed columns</td>
+</tr>
+<tr>
+<td>Batch processing</td>
+<td>Sequential access, prefetch friendly</td>
+</tr>
+<tr>
+<td>Selection before project</td>
+<td>Gather fewer rows into output</td>
+</tr>
+<tr>
+<td>Compression</td>
+<td>Fewer bytes from disk/DRAM (decode cost trade-off)</td>
+</tr>
+<tr>
+<td>Pool reuse</td>
+<td>Less allocator traffic, better cache residency</td>
+</tr>
+</tbody>
+</table>
+<p>RainDB's filter-then-project pipeline (<code>SelectionEvaluator</code> → <code>ProjectGather</code>) shrinks output materialization when predicates are selective.</p>
+<hr />
+<h2 id="ownership-and-lifetime-models-theory">6.8 Ownership and lifetime models (theory)</h2>
+<p>Buffer strategies must answer <strong>who returns memory when</strong>:</p>
+<table class="table">
+<thead>
+<tr>
+<th>Model</th>
+<th>Rule</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Caller-owned</td>
+<td>Rent and return in same function</td>
+</tr>
+<tr>
+<td>Owner object</td>
+<td><code>IMemoryOwner&lt;T&gt;.Dispose()</code> returns buffer</td>
+</tr>
+<tr>
+<td>Query-scoped</td>
+<td>Dispose query result → all column chunks release</td>
+</tr>
+<tr>
+<td>Arena-scoped</td>
+<td>Reset arena at query end</td>
+</tr>
+</tbody>
+</table>
+<p>Mixing models invites use-after-free or pool leaks. RainDB ties <strong><code>PooledFixedWidthColumnChunk</code></strong> disposal to <strong><code>ColumnarMaterializedQueryResult.DisposeAsync</code></strong>.</p>
+<hr />
+<h2 id="summary-part-i-checklist">6.9 Summary: Part I checklist</h2>
+<ol>
+<li><strong>Hierarchy</strong> — registers/SIMD → cache lines → DRAM → disk; know where bottlenecks move.</li>
+<li><strong>Tight loops</strong> — no per-iteration <code>new</code>; rent/return or bump within batch scope.</li>
+<li><strong>Arenas</strong> — fast bulk reclaim; great for query-scoped scratch.</li>
+<li><strong>Array pools</strong> — preferred for column bytes and index arrays in .NET OLAP.</li>
+<li><strong>Alignment</strong> — sub-slice within padded pool rent for SIMD loads.</li>
+<li><strong>LOH</strong> — large vectors go LOH; pool to amortize.</li>
+<li><strong>Bandwidth</strong> — often limits scans after allocation is fixed; filter early, project fewer bytes.</li>
+</ol>
+<hr />
+<h1 id="transition-to-part-ii-raindb-implementation">Transition to Part II: RainDB Implementation</h1>
+<p>RainDB tackles scan-path allocation with a two-tier model: <strong><code>IBufferPool</code></strong> for general byte rents and <strong><code>IAlignedBufferPool</code></strong> for SIMD-safe slices, both implemented by <strong><code>HybridBufferPool</code></strong>. <strong><code>ProjectGather</code></strong> rents aligned value buffers and byte null bitmaps per projected column. <strong><code>VectorizedScanEngine</code></strong> pulls selection vectors from <strong><code>ArrayPool&lt;int&gt;.Shared</code></strong> separately from the byte pool. Column chunks implement <strong><code>IDisposable</code></strong> so pooled memory returns when query results are disposed.</p>
+<hr />
+<h1 id="part-ii-raindb-implementation">Part II: RainDB Implementation</h1>
+<h2 id="the-allocation-problem-on-scan-hot-paths">6.10 The allocation problem on scan hot paths</h2>
+<p>Consider <code>SELECT region, amount FROM sales WHERE amount &gt; 100</code> over a table with 200 batches of 65,536 rows each. For each batch, <code>VectorizedScanEngine.ProcessOneBatch</code>:</p>
+<ol>
+<li>Rents an <code>int[]</code> selection buffer (row indices passing the filter)</li>
+<li>Calls <code>ProjectGather.Project</code>, which for each output column may rent aligned value bytes and optional null bitmap bytes</li>
+<li>Returns the <code>int[]</code> to <code>ArrayPool&lt;int&gt;.Shared</code></li>
+<li>Returns byte buffers when <code>PooledFixedWidthColumnChunk</code> is disposed</li>
+</ol>
+<p>Without pooling, step 2 alone might allocate <code>selectedCount × columnWidth × numColumns</code> bytes per batch. For three <code>Float64</code> columns and 50% selectivity, that is roughly 24 KiB per batch × 200 batches ≈ 4.8 MB of Gen0/Gen1 garbage per query, plus alignment padding waste.</p>
+<p>RainDB's design goal: <strong>keep hot-path allocations predictable</strong> and <strong>return buffers promptly</strong> so <code>ArrayPool</code> can reuse them across queries in the same process.</p>
+<hr />
+<h2 id="ibufferpool-the-general-byte-rent-contract">6.11 IBufferPool: the general byte rent contract</h2>
+<pre><code class="language-csharp">// src/RainDB.Abstractions/Memory/IBufferPool.cs
+/// &lt;summary&gt;
+/// Low-latency byte buffers for I/O and vector materialization (DIP: mock in tests).
+/// Prefer lengths under the LOH threshold (~85KB on 64-bit CLR) when renting from ArrayPool{T}.
+/// &lt;/summary&gt;
+public interface IBufferPool
+{
+    byte[] Rent(int minimumLength);
+    void Return(byte[] buffer, bool clearArray = false);
+}
+</code></pre>
+<p><strong>Dependency inversion:</strong> Operators depend on <code>IBufferPool</code>, not <code>ArrayPool&lt;byte&gt;.Shared</code> directly. Tests can inject a counting or failing pool. <code>RainDbEngine</code> wires a single <code>HybridBufferPool</code> instance as both <code>BufferPool</code> and <code>AlignedBufferPool</code>.</p>
+<p><strong><code>clearArray</code>:</strong> Forwarded to <code>ArrayPool.Return</code>. RainDB typically passes <code>false</code> on hot paths — projected data overwrites the rented region; clearing would waste CPU and bandwidth.</p>
+<hr />
+<h2 id="arraypoolbufferpool-thin-adapter">6.12 ArrayPoolBufferPool: thin adapter</h2>
+<p>When aligned sub-allocation is not needed, the adapter adds zero indirection beyond a field store:</p>
+<pre><code class="language-csharp">// src/RainDB.Core/Memory/ArrayPoolBufferPool.cs
+public sealed class ArrayPoolBufferPool : IBufferPool
+{
+    private readonly ArrayPool&lt;byte&gt; _pool;
+
+    public ArrayPoolBufferPool(ArrayPool&lt;byte&gt;? pool = null) =&gt;
+        _pool = pool ?? ArrayPool&lt;byte&gt;.Shared;
+
+    public byte[] Rent(int minimumLength) =&gt; _pool.Rent(minimumLength);
+
+    public void Return(byte[] buffer, bool clearArray = false) =&gt;
+        _pool.Return(buffer, clearArray);
+}
+</code></pre>
+<p><code>HybridBufferPool</code> implements <code>IBufferPool</code> with identical rent/return logic. The engine uses <code>HybridBufferPool</code> exclusively so one object satisfies both interfaces.</p>
+<hr />
+<h2 id="ialignedbufferpool-and-simdalignment-constants">6.13 IAlignedBufferPool and SimdAlignment constants</h2>
+<pre><code class="language-csharp">// src/RainDB.Abstractions/Memory/IAlignedBufferPool.cs
+public interface IAlignedBufferPool
+{
+    /// &lt;param name=&quot;minimumByteLength&quot;&gt;Usable byte length (not including alignment padding).&lt;/param&gt;
+    /// &lt;param name=&quot;alignment&quot;&gt;Power of two, at least SimdAlignment.Vector256 (32) for AVX2 loads.&lt;/param&gt;
+    IMemoryOwner&lt;byte&gt; RentAligned(int minimumByteLength, int alignment = SimdAlignment.Vector256);
+}
+</code></pre>
+<pre><code class="language-csharp">// src/RainDB.Abstractions/Memory/SimdAlignment.cs
+public static class SimdAlignment
+{
+    /// &lt;summary&gt;Vector256&amp;lt;T&amp;gt; requires 32-byte alignment for aligned loads.&lt;/summary&gt;
+    public const int Vector256 = 32;
+
+    /// &lt;summary&gt;Two cache lines — useful for false-sharing avoidance on write-heavy buffers.&lt;/summary&gt;
+    public const int CacheLine128 = 128;
+}
+</code></pre>
+<p><strong>Why 32 bytes?</strong> <code>System.Runtime.Intrinsics.Vector128&lt;int&gt;</code> and future <code>Vector256</code> loads benefit from addresses divisible by the vector width. Misaligned loads work on x86-64 but can incur penalties; aligned <code>RentAligned</code> guarantees the <strong>start</strong> of the returned <code>Memory&lt;byte&gt;</code> slice is suitable for <code>Vector128.LoadUnsafe</code>.</p>
+<p><strong><code>IMemoryOwner&lt;byte&gt;</code>:</strong> Buffers are returned through <code>Dispose()</code> on the owner, not manual <code>IBufferPool.Return</code>. This ties buffer lifetime to column chunk lifetime (<code>PooledFixedWidthColumnChunk</code>).</p>
+<hr />
+<h2 id="hybridbufferpool-full-implementation">6.14 HybridBufferPool: full implementation</h2>
+<pre><code class="language-csharp">// src/RainDB.Core/Memory/HybridBufferPool.cs
+public sealed class HybridBufferPool : IBufferPool, IAlignedBufferPool
+{
+    private readonly ArrayPool&lt;byte&gt; _pool;
+
+    public HybridBufferPool(ArrayPool&lt;byte&gt;? pool = null) =&gt;
+        _pool = pool ?? ArrayPool&lt;byte&gt;.Shared;
+
+    public byte[] Rent(int minimumLength) =&gt; _pool.Rent(minimumLength);
+
+    public void Return(byte[] buffer, bool clearArray = false) =&gt;
+        _pool.Return(buffer, clearArray);
+
+    /// &lt;summary&gt;
+    /// Rents a sub-slice of a pooled array aligned to alignment (default 32 for SimdAlignment.Vector256).
+    /// Uses ArrayPool{T} so buffers stay under LOH for typical OLAP vector sizes (&amp;lt;85KB).
+    /// &lt;/summary&gt;
+    public IMemoryOwner&lt;byte&gt; RentAligned(int minimumByteLength, int alignment = SimdAlignment.Vector256)
+    {
+        if (minimumByteLength &lt; 0)
+            throw new ArgumentOutOfRangeException(nameof(minimumByteLength));
+        if (alignment &lt; SimdAlignment.Vector256 || (alignment &amp; (alignment - 1)) != 0)
+            throw new ArgumentException(
+                $&quot;Alignment must be a power of two &gt;= {SimdAlignment.Vector256}.&quot;, nameof(alignment));
+
+        var pad = alignment - 1;
+        var rented = _pool.Rent(checked(minimumByteLength + pad));
+        ref var r0 = ref rented[0];
+        unsafe
+        {
+            var addr = (nuint)Unsafe.AsPointer(ref r0);
+            var mis = addr % (nuint)alignment;
+            var off = mis == 0 ? 0 : (int)((nuint)alignment - mis);
+            if (off + minimumByteLength &gt; rented.Length)
+            {
+                _pool.Return(rented);
+                throw new InvalidOperationException(
+                    &quot;Rented buffer could not satisfy alignment; increase padding.&quot;);
+            }
+
+            return new PooledAlignedMemoryOwner(rented, off, minimumByteLength, _pool);
+        }
+    }
+}
+</code></pre>
+<p>This is the complete production implementation — no hidden helpers. Understanding it requires walking through the alignment math in §6.15.</p>
+<hr />
+<h2 id="alignment-mathematics">6.15 Alignment mathematics</h2>
+<p>Given:</p>
+<ul>
+<li><code>minimumByteLength</code> — usable bytes the caller needs</li>
+<li><code>alignment</code> — power of two (default 32)</li>
+<li><code>pad = alignment - 1</code> — maximum skew before the first array element</li>
+</ul>
+<p><strong>Step 1 — rent oversized array:</strong></p>
+<pre><code>rentedLength &gt;= minimumByteLength + pad
+</code></pre>
+<p><code>ArrayPool</code> may return an array longer than requested; the extra space is essential. Example: need 40 usable bytes at 32-byte alignment. Rent <code>40 + 31 = 71</code> bytes; pool might return 128.</p>
+<p><strong>Step 2 — compute address of <code>rented[0]</code>:</strong></p>
+<pre><code class="language-csharp">var addr = (nuint)Unsafe.AsPointer(ref rented[0]);
+</code></pre>
+<p>Pinning is not required for managed arrays in modern .NET when using <code>Unsafe.AsPointer</code> on a <code>ref</code> to the first element — the GC tracks interior pointers for the duration of the unsafe block's logical use; the <code>IMemoryOwner</code> keeps the array alive.</p>
+<p><strong>Step 3 — misalignment:</strong></p>
+<pre><code class="language-csharp">var mis = addr % (nuint)alignment;
+var off = mis == 0 ? 0 : (int)((nuint)alignment - mis);
+</code></pre>
+<ul>
+<li>If <code>addr</code> is already divisible by 32, <code>off = 0</code>.</li>
+<li>Otherwise, skip forward to the next aligned boundary within the array.</li>
+</ul>
+<p><strong>Worked example:</strong> Suppose <code>addr % 32 == 8</code>. Then <code>mis = 8</code>, <code>off = 32 - 8 = 24</code>. The aligned slice starts at <code>rented[24]</code>.</p>
+<p><strong>Step 4 — feasibility check:</strong></p>
+<pre><code class="language-csharp">if (off + minimumByteLength &gt; rented.Length)
+</code></pre>
+<p>If the pool returned exactly <code>minimumByteLength + pad</code> and <code>off</code> is large, the slice might not fit. The implementation returns the oversized array to the pool and throws — this should be rare because <code>ArrayPool</code> typically over-allocates to power-of-two bucket sizes.</p>
+<p><strong>Step 5 — expose slice:</strong></p>
+<p><code>PooledAlignedMemoryOwner</code> stores <code>(rented, off, minimumByteLength)</code> and exposes <code>new Memory&lt;byte&gt;(rented, off, minimumByteLength)</code>.</p>
+<p><strong>Validation:</strong> Tests pin the span and assert <code>addr % 32 == 0</code>:</p>
+<pre><code class="language-csharp">// tests/RainDB.Tests/ColumnarAndCatalogTests.cs
+using var owner = pool.RentAligned(40);
+unsafe {
+    fixed (byte* p = owner.Memory.Span) {
+        Assert.Equal(0u, (nuint)p % 32);
+    }
+}
+</code></pre>
+<p>Alignments below 32 are rejected (<code>RentAligned(8, 16)</code> throws).</p>
+<hr />
+<h2 id="pooledalignedmemoryowner-full-implementation">6.16 PooledAlignedMemoryOwner: full implementation</h2>
+<pre><code class="language-csharp">// src/RainDB.Core/Memory/PooledAlignedMemoryOwner.cs
+internal sealed class PooledAlignedMemoryOwner : IMemoryOwner&lt;byte&gt;
+{
+    private byte[]? _rented;
+    private readonly int _start;
+    private readonly int _length;
+    private readonly ArrayPool&lt;byte&gt; _pool;
+
+    public PooledAlignedMemoryOwner(byte[] rented, int start, int length, ArrayPool&lt;byte&gt; pool)
+    {
+        _rented = rented;
+        _start = start;
+        _length = length;
+        _pool = pool;
+    }
+
+    public Memory&lt;byte&gt; Memory
+    {
+        get
+        {
+            var r = _rented;
+            if (r is null)
+                throw new ObjectDisposedException(nameof(PooledAlignedMemoryOwner));
+            return new Memory&lt;byte&gt;(r, _start, _length);
+        }
+    }
+
+    public void Dispose()
+    {
+        var r = Interlocked.Exchange(ref _rented, null);
+        if (r is not null)
+            _pool.Return(r);
+    }
+}
+</code></pre>
+<p><strong>Lifetime rules:</strong></p>
+<ul>
+<li>Only the <strong>owner</strong> returns the backing array — callers must not retain the <code>byte[]</code> after dispose.</li>
+<li><code>Interlocked.Exchange</code> makes double-dispose safe (second dispose is a no-op).</li>
+<li>The <strong>entire</strong> rented array returns to the pool, including alignment prefix bytes — those bytes are &quot;wasted&quot; within the pooled object but reused on the next rent.</li>
+</ul>
+<p><strong>Disposal chain:</strong> <code>ColumnarMaterializedQueryResult.DisposeAsync</code> disposes <code>IDisposable</code> columns. <code>PooledFixedWidthColumnChunk.Dispose</code> disposes value and null <code>IMemoryOwner&lt;byte&gt;</code> instances. Until the query result is disposed, buffers stay rented — important for callers iterating <code>IColumnarQueryResult.Batches</code>.</p>
+<hr />
+<h2 id="large-object-heap-loh-considerations-in-raindb">6.17 Large Object Heap (LOH) considerations in RainDB</h2>
+<p>On 64-bit .NET, the LOH threshold is approximately <strong>85,000 bytes</strong>. Objects larger than this are:</p>
+<ul>
+<li>Allocated on the LOH, which is collected less frequently</li>
+<li>Not compacted by default (though .NET 5+ can compact on demand)</li>
+<li>Expensive to allocate and release under memory pressure</li>
+</ul>
+<p>RainDB's comment in <code>HybridBufferPool.RentAligned</code> explicitly targets <strong>sub-LOH</strong> vector sizes where practical. Typical batch projections:</p>
+<table class="table">
+<thead>
+<tr>
+<th>Scenario</th>
+<th>Rows</th>
+<th>Type</th>
+<th>Value bytes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Half batch</td>
+<td>32K</td>
+<td>Int32</td>
+<td>128 KiB</td>
+</tr>
+<tr>
+<td>Full strict min</td>
+<td>64K</td>
+<td>Float64</td>
+<td>512 KiB</td>
+</tr>
+<tr>
+<td>Small test batch</td>
+<td>1K</td>
+<td>Int32</td>
+<td>4 KiB</td>
+</tr>
+</tbody>
+</table>
+<p>A 64K-row <code>Float64</code> column projection is <strong>512 KiB</strong> — above LOH. RainDB still uses <code>ArrayPool</code> for these; pooled large arrays may still land on LOH buckets in practice, but <strong>reuse</strong> across queries amortizes allocation cost versus <code>new byte[n]</code> every time.</p>
+<p><strong>Mitigation strategies in the codebase:</strong></p>
+<ol>
+<li><strong>Batch sizing policy</strong> (<code>VectorChunkLimits</code>) keeps production vectors in a predictable range</li>
+<li><strong>Pooling</strong> avoids allocation churn even when individual rents are large</li>
+<li><strong>Aligned rent padding</strong> adds at most <code>alignment - 1</code> extra bytes — negligible relative to column data</li>
+</ol>
+<p>For null bitmaps, size is <code>ceil(rowCount / 8)</code> — 8 KiB for 64K rows, well under LOH.</p>
+<hr />
+<h2 id="wiring-pools-through-iexecutioncontext">6.18 Wiring pools through IExecutionContext</h2>
+<pre><code class="language-csharp">// src/RainDB.Abstractions/Execution/IExecutionContext.cs
+public interface IExecutionContext
+{
+    ICatalog Catalog { get; }
+    IBufferPool BufferPool { get; }
+    IAlignedBufferPool AlignedBufferPool { get; }
+    ISpillWriter SpillWriter { get; }
+    CancellationToken CancellationToken { get; }
+}
+</code></pre>
+<pre><code class="language-csharp">// src/RainDB.Query/Runtime/RainDbExecutionContext.cs
+public sealed class RainDbExecutionContext : IExecutionContext
+{
+    public RainDbExecutionContext(
+        ICatalog catalog,
+        IBufferPool bufferPool,
+        IAlignedBufferPool alignedBufferPool,
+        ISpillWriter spillWriter,
+        CancellationToken cancellationToken = default)
+    { ... }
+}
+</code></pre>
+<pre><code class="language-csharp">// src/RainDB.Driver/RainDbEngine.cs
+var buffers = new HybridBufferPool();
+return new RainDbEngine(catalog, buffers, buffers, executor, ...);
+</code></pre>
+<p>The same <code>HybridBufferPool</code> instance serves both interfaces — one pool, two views. <code>DefaultQueryExecutor</code> validates <code>context.AlignedBufferPool</code> is non-null before dispatch.</p>
+<hr />
+<h2 id="projectgather-dual-pool-usage">6.19 ProjectGather: dual-pool usage</h2>
+<p><code>ProjectGather</code> is the primary consumer of aligned buffers in the scan pipeline:</p>
+<pre><code class="language-csharp">// src/RainDB.Query/Vectorized/ProjectGather.cs
+internal static ColumnarBatch Project(
+    IColumnarBatch batch,
+    ReadOnlySpan&lt;int&gt; outputColumnIndices,
+    bool useRowSelection,
+    ReadOnlySpan&lt;int&gt; selectedRows,
+    int selectedCount,
+    IBufferPool bufferPool,
+    IAlignedBufferPool alignedBufferPool)
+{
+    var cols = new IColumnChunk[outputColumnIndices.Length];
+    for (var c = 0; c &lt; outputColumnIndices.Length; c++)
+    {
+        cols[c] = GatherColumn(
+            batch.Columns[outputColumnIndices[c]],
+            useRowSelection, selectedRows, selectedCount,
+            bufferPool, alignedBufferPool);
+    }
+    return new ColumnarBatch(selectedCount, cols);
+}
+</code></pre>
+<h3 id="fixed-width-gather-with-selection">Fixed-width gather with selection</h3>
+<pre><code class="language-csharp">var valueBytes = checked(selectedCount * w);
+var valuesOwner = alignedBufferPool.RentAligned(valueBytes);
+var outValues = valuesOwner.Memory.Span[..valueBytes];
+
+if (source.HasNulls)
+{
+    var nbBytes = ColumnTypeSizes.NullBitmapBytes(selectedCount);
+    var nullOwner = CreateNullOwner(bufferPool, bufferPool.Rent(nbBytes), nbBytes);
+    // ... copy non-null values, set null bits ...
+    return new PooledFixedWidthColumnChunk(
+        type, selectedCount, valuesOwner, valueBytes, nullOwner, nbBytes, anyNull);
+}
+
+// dense copy loop
+for (var o = 0; o &lt; selectedCount; o++)
+{
+    var r = RowAt(useRowSelection, selectedRows, o);
+    srcValues.Slice(r * w, w).CopyTo(outValues.Slice(o * w, w));
+}
+return new PooledFixedWidthColumnChunk(
+    type, selectedCount, valuesOwner, valueBytes,
+    nullBitmapOwner: null, nullBitmapBytes: 0, hasNulls: false);
+</code></pre>
+<p><strong>Pool split rationale:</strong></p>
+<table class="table">
+<thead>
+<tr>
+<th>Buffer</th>
+<th>Pool</th>
+<th>Why</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Value column</td>
+<td><code>IAlignedBufferPool</code></td>
+<td>SIMD-friendly; may feed vectorized kernels</td>
+</tr>
+<tr>
+<td>Null bitmap</td>
+<td><code>IBufferPool</code></td>
+<td>Byte-level bit ops; alignment unnecessary</td>
+</tr>
+</tbody>
+</table>
+<h3 id="full-column-copy-fast-path">Full-column copy fast path</h3>
+<p>When the filter passes all rows (<code>!useRowSelection &amp;&amp; selectedCount == source.RowCount</code>):</p>
+<pre><code class="language-csharp">private static IColumnChunk CopyEntireFixedWidthColumn(...)
+{
+    var valueBytes = checked(rowCount * w);
+    var valuesOwner = alignedBufferPool.RentAligned(valueBytes);
+    srcValues.CopyTo(valuesOwner.Memory.Span[..valueBytes]);
+    // null bitmap via bufferPool.Rent if needed
+}
+</code></pre>
+<p>This avoids per-row index indirection when <code>WHERE</code> is absent or tautological.</p>
+<h3 id="utf-8-gather-paths">UTF-8 gather paths</h3>
+<p>UTF-8 columns <strong>do not</strong> use the aligned pool today:</p>
+<pre><code class="language-csharp">if (source.PhysicalType == RainDbType.Utf8)
+{
+    if (source is Utf8ColumnChunk utf8)
+        return GatherUtf8Arrow(utf8, ...);
+    if (source is Utf8LengthPrefixedColumnChunk lp)
+        return GatherUtf8LengthPrefixed(lp, ...);
+}
+</code></pre>
+<p><code>GatherUtf8Arrow</code> builds <code>int[]</code> offsets and <code>List&lt;byte&gt;</code> blob — heap allocations acceptable for variable-length data where SIMD gather is not yet implemented. Null bitmaps use <code>new byte[nbBytes]</code> for small outputs.</p>
+<hr />
+<h2 id="pooledfixedwidthcolumnchunk-ownership-bridge">6.20 PooledFixedWidthColumnChunk: ownership bridge</h2>
+<pre><code class="language-csharp">// src/RainDB.Query/Vectorized/PooledFixedWidthColumnChunk.cs
+internal sealed class PooledFixedWidthColumnChunk : IColumnChunk, IDisposable
+{
+    private IMemoryOwner&lt;byte&gt;? _valuesOwner;
+    private IMemoryOwner&lt;byte&gt;? _nullBitmapOwner;
+
+    public void Dispose()
+    {
+        _valuesOwner?.Dispose();
+        _valuesOwner = null;
+        _nullBitmapOwner?.Dispose();
+        _nullBitmapOwner = null;
+    }
+}
+</code></pre>
+<p><code>Values</code> and <code>NullBitmap</code> throw <code>ObjectDisposedException</code> after dispose — tested in <code>RobustnessAndEdgeCaseTests.Pooled_column_chunk_throws_after_dispose</code>.</p>
+<p><strong>Invariant:</strong> <code>valueBytes == rowCount * FixedWidthBytes(type)</code> enforced at construction.</p>
+<hr />
+<h2 id="arraypool-in-vectorizedscanengine">6.21 ArrayPool<int> in VectorizedScanEngine</h2>
+<p>Selection indices are <code>int</code>, not <code>byte</code>. The scan engine uses <strong><code>ArrayPool&lt;int&gt;.Shared</code></strong> directly — not <code>IBufferPool</code>:</p>
+<pre><code class="language-csharp">// src/RainDB.Query/Execution/VectorizedScanEngine.cs
+private static IColumnarBatch ProcessOneBatch(...)
+{
+    var rent = ArrayPool&lt;int&gt;.Shared.Rent(batch.RowCount);
+    try
+    {
+        var span = rent.AsSpan(0, batch.RowCount);
+        int selected;
+        var hasFilters = plan.Filters is { Length: &gt; 0 };
+        if (hasFilters)
+            selected = SelectionEvaluator.FillSelectedRowsConjunctive(
+                batch, plan.Filters!, span);
+        else
+            selected = batch.RowCount;
+
+        return ProjectGather.Project(
+            batch, plan.OutputColumnIndices.AsSpan(),
+            useRowSelection: hasFilters,
+            selectedRows: hasFilters ? span[..selected] : ReadOnlySpan&lt;int&gt;.Empty,
+            selectedCount: selected,
+            context.BufferPool, context.AlignedBufferPool);
+    }
+    finally
+    {
+        ArrayPool&lt;int&gt;.Shared.Return(rent);
+    }
+}
+</code></pre>
+<p><strong>Why a separate pool?</strong></p>
+<ul>
+<li><code>IBufferPool</code> is byte-oriented — casting <code>int[]</code> through <code>MemoryMarshal</code> would be awkward and error-prone</li>
+<li><code>ArrayPool&lt;int&gt;.Shared</code> is optimized for exactly this pattern</li>
+<li>Selection buffers are <strong>ephemeral per batch</strong> — returned before <code>ProjectGather</code> completes, while projected columns outlive the batch processing</li>
+</ul>
+<p><strong>Rent sizing:</strong> <code>Rent(batch.RowCount)</code> may return an array longer than <code>batch.RowCount</code>; only <code>span[..batch.RowCount]</code> is used for filling. After filter, <code>span[..selected]</code> is passed to <code>ProjectGather</code>.</p>
+<p>The same <code>ArrayPool&lt;int&gt;</code> pattern appears in <code>AccumulateAggregateBatch</code> and <code>AccumulateFilteredRowCount</code> for filtered aggregates.</p>
+<p><strong>LOH note:</strong> A 64K-row <code>int[]</code> is 256 KiB — above LOH. Pooling still helps; the array is returned immediately after each batch.</p>
+<hr />
+<h2 id="projectgathers-nested-pooledbufferowner">6.22 ProjectGather's nested PooledBufferOwner</h2>
+<p>Null bitmaps use a small nested owner wrapping <code>IBufferPool</code>:</p>
+<pre><code class="language-csharp">private sealed class PooledBufferOwner : IMemoryOwner&lt;byte&gt;
+{
+    private readonly IBufferPool _pool;
+    private byte[]? _buffer;
+
+    public void Dispose()
+    {
+        var b = Interlocked.Exchange(ref _buffer, null);
+        if (b is not null)
+            _pool.Return(b);
+    }
+}
+</code></pre>
+<p>This mirrors <code>PooledAlignedMemoryOwner</code> but without alignment offset — same dispose idiom, different pool interface method.</p>
+<hr />
+<h2 id="parallel-batch-processing-and-pool-thread-safety">6.23 Parallel batch processing and pool thread safety</h2>
+<p><code>VectorizedScanEngine</code> processes batches in parallel via <code>Parallel.For</code> or channel workers. <code>ArrayPool&lt;byte&gt;.Shared</code> and <code>ArrayPool&lt;int&gt;.Shared</code> are thread-safe. Each parallel task:</p>
+<ol>
+<li>Rents its own <code>int[]</code> selection buffer</li>
+<li>Rents its own aligned value owners via <code>ProjectGather</code></li>
+<li>Returns <code>int[]</code> before the task completes</li>
+<li>Leaves <code>PooledFixedWidthColumnChunk</code> owners alive until query result disposal</li>
+</ol>
+<p>No cross-thread sharing of a single rented buffer occurs — avoiding data races without locks on the pool.</p>
+<hr />
+<h2 id="mental-model">6.24 Mental model</h2>
+<pre><code>  VectorizedScanEngine.ProcessOneBatch
+│
+├─ ArrayPool&lt;int&gt;.Shared  ──► selection indices (per batch, returned immediately)
+│
+└─ ProjectGather.Project
+         │
+         ├─ IAlignedBufferPool ──► PooledAlignedMemoryOwner ──► value bytes
+         │
+         └─ IBufferPool ──► PooledBufferOwner ──► null bitmap bytes
+                   │
+                   ▼
+         PooledFixedWidthColumnChunk (disposed with query result)
+</code></pre>
+<p>Buffer management is not an optimization bolt-on — it is how RainDB keeps the Phase 1 scan/project path viable for multi-batch analytical queries without allocating fresh column backing stores for every operator invocation.</p>
+<hr />
+<h2 id="quick-reference">6.25 Quick reference</h2>
+<table class="table">
+<thead>
+<tr>
+<th>Component</th>
+<th>Path</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>IBufferPool</code></td>
+<td><code>src/RainDB.Abstractions/Memory/IBufferPool.cs</code></td>
+</tr>
+<tr>
+<td><code>IAlignedBufferPool</code></td>
+<td><code>src/RainDB.Abstractions/Memory/IAlignedBufferPool.cs</code></td>
+</tr>
+<tr>
+<td><code>SimdAlignment</code></td>
+<td><code>src/RainDB.Abstractions/Memory/SimdAlignment.cs</code></td>
+</tr>
+<tr>
+<td><code>HybridBufferPool</code></td>
+<td><code>src/RainDB.Core/Memory/HybridBufferPool.cs</code></td>
+</tr>
+<tr>
+<td><code>PooledAlignedMemoryOwner</code></td>
+<td><code>src/RainDB.Core/Memory/PooledAlignedMemoryOwner.cs</code></td>
+</tr>
+<tr>
+<td><code>ArrayPoolBufferPool</code></td>
+<td><code>src/RainDB.Core/Memory/ArrayPoolBufferPool.cs</code></td>
+</tr>
+<tr>
+<td><code>ProjectGather</code></td>
+<td><code>src/RainDB.Query/Vectorized/ProjectGather.cs</code></td>
+</tr>
+<tr>
+<td><code>PooledFixedWidthColumnChunk</code></td>
+<td><code>src/RainDB.Query/Vectorized/PooledFixedWidthColumnChunk.cs</code></td>
+</tr>
+<tr>
+<td>Scan <code>ArrayPool&lt;int&gt;</code> usage</td>
+<td><code>src/RainDB.Query/Execution/VectorizedScanEngine.cs</code></td>
+</tr>
+</tbody>
+</table>
+<p>Chapter 8 details how selection indices feed <code>ProjectGather</code>; Chapter 7 shows how execution context delivers pools to every engine.</p>
+</div>
+          <footer class="doc-footer">
+            <p>Generated by <strong>hoihky</strong> with <strong>MDWeb</strong> and with assistance from <strong>AI</strong></p>
+
+          </footer>
+        </article>
+
+        
+                <aside class="toc" aria-label="On this page">
+                  <p class="toc-title">On this page</p>
+                  <ul>
+                    
+                        <li class="toc-h1">
+                          <a href="#chapter-6-buffer-management">Chapter 6: Buffer Management</a>
+                        </li>
+                        
+                        <li class="toc-h1">
+                          <a href="#part-i-concepts-and-theory">Part I: Concepts and Theory</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#61-the-memory-hierarchy">6.1 The memory hierarchy</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#registers-and-simd-lanes">Registers and SIMD lanes</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#cache-lines">Cache lines</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#dram">DRAM</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#disk">Disk</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#62-why-allocation-matters-in-tight-loops">6.2 Why allocation matters in tight loops</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#allocation-inside-inner-loops">Allocation inside inner loops</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#throughput-versus-latency">Throughput versus latency</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#63-arena-and-bump-allocators">6.3 Arena and bump allocators</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#characteristics">Characteristics</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#use-cases-in-query-engines">Use cases in query engines</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#pseudocode">Pseudocode</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#64-object-pools-versus-array-pools">6.4 Object pools versus array pools</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#object-pool">Object pool</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#array-pool">Array pool</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#65-simd-alignment-requirements-3264-byte">6.5 SIMD alignment requirements (32/64 byte)</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#misaligned-loads">Misaligned loads</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#alignment-versus-array-object-header">Alignment versus array object header</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#32-versus-64-byte">32 versus 64 byte</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#66-large-object-heap-loh-in-net-gc">6.6 Large Object Heap (LOH) in .NET GC</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#loh-threshold">LOH threshold</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#implications-for-column-buffers">Implications for column buffers</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#and-loh"> and LOH</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#loh-mitigation-strategies">LOH mitigation strategies</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#67-memory-bandwidth-as-the-olap-bottleneck">6.7 Memory bandwidth as the OLAP bottleneck</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#roofline-intuition">Roofline intuition</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#column-pruning-effect">Column pruning effect</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#simd-helps-compute-not-bandwidth">SIMD helps compute, not bandwidth</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#bandwidth-conscious-design-checklist">Bandwidth-conscious design checklist</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#68-ownership-and-lifetime-models-theory">6.8 Ownership and lifetime models (theory)</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#69-summary-part-i-checklist">6.9 Summary: Part I checklist</a>
+                        </li>
+                        
+                        <li class="toc-h1">
+                          <a href="#transition-to-part-ii-raindb-implementation">Transition to Part II: RainDB Implementation</a>
+                        </li>
+                        
+                        <li class="toc-h1">
+                          <a href="#part-ii-raindb-implementation">Part II: RainDB Implementation</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#610-the-allocation-problem-on-scan-hot-paths">6.10 The allocation problem on scan hot paths</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#611-ibufferpool-the-general-byte-rent-contract">6.11 IBufferPool: the general byte rent contract</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#612-arraypoolbufferpool-thin-adapter">6.12 ArrayPoolBufferPool: thin adapter</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#613-ialignedbufferpool-and-simdalignment-constants">6.13 IAlignedBufferPool and SimdAlignment constants</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#614-hybridbufferpool-full-implementation">6.14 HybridBufferPool: full implementation</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#615-alignment-mathematics">6.15 Alignment mathematics</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#616-pooledalignedmemoryowner-full-implementation">6.16 PooledAlignedMemoryOwner: full implementation</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#617-large-object-heap-loh-considerations-in-raindb">6.17 Large Object Heap (LOH) considerations in RainDB</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#618-wiring-pools-through-iexecutioncontext">6.18 Wiring pools through IExecutionContext</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#619-projectgather-dual-pool-usage">6.19 ProjectGather: dual-pool usage</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#fixed-width-gather-with-selection">Fixed-width gather with selection</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#full-column-copy-fast-path">Full-column copy fast path</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#utf-8-gather-paths">UTF-8 gather paths</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#620-pooledfixedwidthcolumnchunk-ownership-bridge">6.20 PooledFixedWidthColumnChunk: ownership bridge</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#621-arraypool-in-vectorizedscanengine">6.21 ArrayPool in VectorizedScanEngine</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#622-projectgathers-nested-pooledbufferowner">6.22 ProjectGather's nested PooledBufferOwner</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#623-parallel-batch-processing-and-pool-thread-safety">6.23 Parallel batch processing and pool thread safety</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#624-mental-model">6.24 Mental model</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#625-quick-reference">6.25 Quick reference</a>
+                        </li>
+                        
+                  </ul>
+                </aside>
+                
+      </main>
+    </div>
+  </div>
+  <script src="assets/vendor/mermaid.min.js"></script>
+  <script src="assets/vendor/highlight.min.js"></script>
+  <script src="assets/js/site.js"></script>
+</body>
+</html>

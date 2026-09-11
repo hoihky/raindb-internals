@@ -1,0 +1,1806 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Chapter 4: Chunk Data Structures · Building an OLAP Database Engine from Scratch with RainDB</title>
+  <meta name="description" content="Generated documentation site">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="assets/css/site.css">
+  <link rel="stylesheet" href="assets/vendor/atom-one-dark.min.css">
+</head>
+<body>
+  <div class="site">
+    <header class="topbar">
+      <button class="sidebar-toggle" id="sidebar-toggle" aria-label="Toggle navigation">☰</button>
+      <a href="index.html" class="brand">Building an OLAP Database Engine from Scratch with RainDB</a>
+      <div class="search-wrap">
+        <input type="search" id="search" placeholder="Search docs…" autocomplete="off">
+      </div>
+    </header>
+
+    <div class="layout">
+      <aside class="sidebar" id="sidebar">
+        <nav class="nav" aria-label="Documentation">
+          <ul class="nav-list">
+            
+                        <li class="nav-item depth-0">
+                          
+                            <a href="index.html" class="nav-link">Building an OLAP Database Engine from Scratch</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="01-olap-fundamentals.html" class="nav-link">Chapter 1: OLAP Fundamentals</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="02-architecture-and-modules.html" class="nav-link">Chapter 2: Architecture and Modules</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="03-columnar-storage-model.html" class="nav-link">Chapter 3: Columnar Storage Model</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0 is-active">
+                          
+                            <a href="04-chunk-data-structures.html" class="nav-link">Chapter 4: Chunk Data Structures</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="05-catalog-and-tables.html" class="nav-link">Chapter 5: Catalog and Tables</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="06-buffer-management.html" class="nav-link">Chapter 6: Buffer Management</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="07-execution-pipeline.html" class="nav-link">Chapter 7: Execution Pipeline</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="08-vectorized-scan-filter-project.html" class="nav-link">Chapter 8: Vectorized Scan, Filter, and Project</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="09-global-aggregates.html" class="nav-link">Chapter 9: Global Aggregates</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="10-hash-aggregation.html" class="nav-link">Chapter 10: Hash Aggregation</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="11-joins.html" class="nav-link">Chapter 11: Joins</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="12-sort-and-limit.html" class="nav-link">Chapter 12: Sort and Limit</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="13-sql-compilation.html" class="nav-link">Chapter 13: SQL Compilation</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="14-persistence.html" class="nav-link">Chapter 14: Persistence</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="15-future-extensions.html" class="nav-link">Chapter 15: Future Extensions</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="16-mmap-io.html" class="nav-link">Chapter 16: mmap I/O</a>
+                            
+                        </li>
+                        
+          </ul>
+        </nav>
+      </aside>
+
+      <main class="content">
+        <article class="doc">
+          <header class="doc-header">
+            <h1>Chapter 4: Chunk Data Structures</h1>
+          </header>
+          <div class="doc-body"><h1 id="chapter-4-chunk-data-structures">Chapter 4: Chunk Data Structures</h1>
+<p>A column chunk is the atomic unit of columnar storage in RainDB. This chapter begins with encoding theory, Arrow layout conventions, null bitmap design, and portability concerns — the general computer science behind chunk representations — before dissecting every RainDB chunk implementation in detail.</p>
+<h1 id="part-i-concepts-and-theory">Part I: Concepts and Theory</h1>
+<h2 id="columnar-encoding-theory">4.1 Columnar encoding theory</h2>
+<p>Production analytical systems rarely store raw column bytes as-is. <strong>Encoding</strong> reshapes a column into a more compact or faster-to-scan representation while preserving logical semantics.</p>
+<h3 id="plain-encoding">Plain encoding</h3>
+<p><strong>Plain encoding</strong> (raw, uncompressed) stores values in native binary form with no transformation:</p>
+<pre><code class="language-text">Int32 column [10, 20, 30, 40]:
+bytes: [0A 00 00 00][14 00 00 00][1E 00 00 00][28 00 00 00]
+</code></pre>
+<table class="table">
+<thead>
+<tr>
+<th>Property</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Compression ratio</td>
+<td>1× (none)</td>
+</tr>
+<tr>
+<td>Decode cost</td>
+<td>Zero — direct memory access</td>
+</tr>
+<tr>
+<td>Random access</td>
+<td>O(1) per row</td>
+</tr>
+<tr>
+<td>SIMD compatibility</td>
+<td>Excellent</td>
+</tr>
+</tbody>
+</table>
+<p>Plain encoding is the baseline. RainDB Phase 1 uses plain encoding exclusively — the layout is <strong>compression-ready</strong> because each column is homogeneous.</p>
+<h3 id="dictionary-encoding">Dictionary encoding</h3>
+<p><strong>Dictionary encoding</strong> maps distinct values to integer codes:</p>
+<pre><code class="language-text">Original strings: [&quot;US-East&quot;, &quot;EU&quot;, &quot;US-East&quot;, &quot;US-West&quot;, &quot;EU&quot;]
+Dictionary:       [0: &quot;US-East&quot;, 1: &quot;EU&quot;, 2: &quot;US-West&quot;]
+Encoded Int32:    [0, 1, 0, 2, 1]
+</code></pre>
+<table class="table">
+<thead>
+<tr>
+<th>Property</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Compression ratio</td>
+<td>High for low-cardinality columns (10–100×)</td>
+</tr>
+<tr>
+<td>Decode cost</td>
+<td>Dictionary lookup per row</td>
+</tr>
+<tr>
+<td>Random access</td>
+<td>O(1) via index into dictionary</td>
+</tr>
+<tr>
+<td>Best for</td>
+<td>Categorical columns, country codes, status enums</td>
+</tr>
+</tbody>
+</table>
+<p>Dictionary encoding shines when <strong>cardinality &lt;&lt; row count</strong>. A <code>country</code> column with 200 distinct values across 100 million rows compresses dramatically.</p>
+<h3 id="run-length-encoding-rle">Run-length encoding (RLE)</h3>
+<p><strong>Run-length encoding</strong> stores repeated values as <code>(value, count)</code> pairs:</p>
+<pre><code class="language-text">Original: [5, 5, 5, 5, 7, 7, 3]
+RLE:      [(5, 4), (7, 2), (3, 1)]
+</code></pre>
+<table class="table">
+<thead>
+<tr>
+<th>Property</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Compression ratio</td>
+<td>High for sorted or clustered data</td>
+</tr>
+<tr>
+<td>Decode cost</td>
+<td>Sequential scan with run expansion</td>
+</tr>
+<tr>
+<td>Random access</td>
+<td>O(runs) — requires index into runs</td>
+</tr>
+<tr>
+<td>Best for</td>
+<td>Sorted columns, boolean flags, timestamps with gaps</td>
+</tr>
+</tbody>
+</table>
+<p>RLE pairs naturally with <strong>sorted data</strong>. A column sorted by <code>date</code> may have thousands of consecutive identical <code>region</code> values.</p>
+<h3 id="delta-encoding">Delta encoding</h3>
+<p><strong>Delta encoding</strong> stores differences between consecutive values:</p>
+<pre><code class="language-text">Original Int64: [1000, 1005, 1010, 1015]
+Delta:          [1000, 5, 5, 5]
+</code></pre>
+<p>Often combined with RLE on the delta stream. Effective for monotonically increasing sequences (timestamps, auto-increment IDs).</p>
+<h3 id="encoding-selection-matrix">Encoding selection matrix</h3>
+<table class="table">
+<thead>
+<tr>
+<th>Column profile</th>
+<th>Recommended encoding</th>
+<th>Expected ratio</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Random floats</td>
+<td>Plain or Gorilla</td>
+<td>1–2×</td>
+</tr>
+<tr>
+<td>Low-cardinality strings</td>
+<td>Dictionary</td>
+<td>10–50×</td>
+</tr>
+<tr>
+<td>Sorted integers</td>
+<td>Delta + RLE</td>
+<td>5–20×</td>
+</tr>
+<tr>
+<td>Boolean (sparse)</td>
+<td>RLE or bit-packed</td>
+<td>8–64×</td>
+</tr>
+<tr>
+<td>High-cardinality strings</td>
+<td>Plain UTF-8 or FSST</td>
+<td>1–3×</td>
+</tr>
+</tbody>
+</table>
+<h3 id="encoding-and-execution">Encoding and execution</h3>
+<p>Encoded columns need <strong>decode steps</strong> before SIMD kernels can operate:</p>
+<pre><code class="language-text">Plain:      load → SIMD sum
+Dictionary: load index → lookup dictionary → SIMD sum on decoded buffer
+RLE:        expand runs → SIMD sum on expanded buffer
+</code></pre>
+<p>Some engines implement <strong>encoded execution</strong> — operating directly on dictionary indices without full decode (e.g., comparing two dictionary-encoded columns by comparing indices).</p>
+<p>RainDB Phase 1 stores plain bytes. Future phases may add dictionary and RLE encodings per column without changing the batch abstraction.</p>
+<hr />
+<h2 id="apache-arrow-string-layout-rationale">4.2 Apache Arrow string layout rationale</h2>
+<p><strong>Apache Arrow</strong> defines an in-memory columnar format for zero-copy interchange between systems (Spark, Pandas, DuckDB, Polars). RainDB's <code>Utf8ColumnChunk</code> follows Arrow's string layout philosophy.</p>
+<h3 id="arrow-string-representation">Arrow string representation</h3>
+<p>An Arrow UTF-8 string column consists of:</p>
+<ol>
+<li><strong>Offsets buffer</strong> — <code>int32</code> or <code>int64</code> array of length <code>N+1</code></li>
+<li><strong>Data buffer</strong> — contiguous UTF-8 bytes</li>
+<li><strong>Validity buffer</strong> — optional null bitmap</li>
+</ol>
+<pre><code class="language-text">strings:  &quot;hello&quot;  &quot;world&quot;  &quot;&quot;  &quot;hi&quot;
+
+offsets:  [0, 5, 10, 10, 12]
+data:     h e l l o w o r l d h i
+          ^-------^ ^-------^ ^ ^-^
+          row 0     row 1     2  3
+</code></pre>
+<h3 id="why-offsets-instead-of-length-prefixes">Why offsets instead of length prefixes?</h3>
+<table class="table">
+<thead>
+<tr>
+<th>Approach</th>
+<th>Random access</th>
+<th>Append</th>
+<th>Cache behavior</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Offset table</td>
+<td>O(1): <code>data[offsets[i]..offsets[i+1]]</code></td>
+<td>O(1) append to data + update last offset</td>
+<td>Sequential data scan</td>
+</tr>
+<tr>
+<td>Length prefix per row</td>
+<td>O(n) to reach row i without index</td>
+<td>O(1) append</td>
+<td>Scattered length reads</td>
+</tr>
+<tr>
+<td>Fixed-width slots</td>
+<td>O(1)</td>
+<td>Wastes space for short strings</td>
+<td>Poor for variable width</td>
+</tr>
+</tbody>
+</table>
+<p>The offset table gives <strong>O(1) random access</strong> to any row while keeping string data in one contiguous blob — ideal for cache-friendly sequential scans and SIMD on fixed-width derived columns.</p>
+<h3 id="offset-invariants">Offset invariants</h3>
+<ol>
+<li><code>offsets[0] == 0</code></li>
+<li><code>offsets[N] == data.length</code> (where N = row count)</li>
+<li><code>offsets[i] &lt;= offsets[i+1]</code> (non-decreasing)</li>
+<li><code>offsets[i+1] - offsets[i]</code> = byte length of row i</li>
+</ol>
+<p>Empty strings have <code>offsets[i] == offsets[i+1]</code>.</p>
+<h3 id="arrow-versus-length-prefixed">Arrow versus length-prefixed</h3>
+<p>RainDB also implements <code>Utf8LengthPrefixedColumnChunk</code> for on-disk serialization:</p>
+<pre><code class="language-text">Arrow (in-memory):     [offsets array] + [data blob]
+Length-prefixed (disk): [len][data][len][data][len][data]...
+</code></pre>
+<p>Length-prefixed layout is <strong>self-describing</strong> — no separate offsets array needed on disk. Arrow layout is <strong>index-friendly</strong> — offsets enable O(1) access after loading both buffers.</p>
+<h3 id="interoperability">Interoperability</h3>
+<p>Following Arrow conventions means:</p>
+<ul>
+<li>Future RainDB export to Arrow/Parquet requires minimal transformation</li>
+<li>String columns can be shared across process boundaries via shared memory</li>
+<li>Tools like <code>arrow-rs</code> or <code>Apache.Arrow</code> can read RainDB UTF-8 chunks directly</li>
+</ul>
+<hr />
+<h2 id="bit-packed-null-bitmaps-in-analytics-engines">4.3 Bit-packed null bitmaps in analytics engines</h2>
+<p>NULL representation cuts across every columnar system. Analytics engines almost universally use <strong>bit-packed validity bitmaps</strong> rather than per-row sentinel values or parallel boolean arrays.</p>
+<h3 id="why-bitmaps">Why bitmaps?</h3>
+<table class="table">
+<thead>
+<tr>
+<th>Approach</th>
+<th>Space (N rows)</th>
+<th>Cache efficiency</th>
+<th>SIMD impact</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Parallel <code>bool[]</code></td>
+<td>N bytes</td>
+<td>Poor (1 byte per row)</td>
+<td>Cannot vectorize</td>
+</tr>
+<tr>
+<td>Sentinel in values</td>
+<td>0 extra bytes</td>
+<td>Good</td>
+<td>Ambiguous with valid sentinel</td>
+</tr>
+<tr>
+<td>Bit-packed bitmap</td>
+<td>N/8 bytes</td>
+<td>Excellent</td>
+<td>Branch once on <code>hasNulls</code></td>
+</tr>
+<tr>
+<td>Separate null array</td>
+<td>N bytes or N bits</td>
+<td>Moderate</td>
+<td>Extra indirection</td>
+</tr>
+</tbody>
+</table>
+<p>A bit-packed bitmap uses <strong>8× less space</strong> than a byte-wide boolean array and fits in cache alongside the values column.</p>
+<h3 id="bitmap-conventions">Bitmap conventions</h3>
+<p>Two conventions exist in the ecosystem:</p>
+<table class="table">
+<thead>
+<tr>
+<th>System</th>
+<th>Bit = 1 means</th>
+<th>Bit = 0 means</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Apache Arrow</td>
+<td>Valid (non-null)</td>
+<td>Null</td>
+</tr>
+<tr>
+<td>RainDB</td>
+<td><strong>Null</strong></td>
+<td><strong>Non-null</strong></td>
+</tr>
+<tr>
+<td>Parquet</td>
+<td>Valid (non-null)</td>
+<td>Null</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Always check the convention</strong> when interoperating. RainDB documents: <strong>1 = null, 0 = non-null</strong>.</p>
+<h3 id="bit-addressing">Bit addressing</h3>
+<p>Row <code>i</code> maps to:</p>
+<pre><code class="language-text">byte_index = i &gt;&gt; 3        // i / 8
+bit_mask   = 1 &lt;&lt; (i &amp; 7)  // i % 8
+is_null    = (bitmap[byte_index] &amp; bit_mask) != 0
+</code></pre>
+<p>This bit-addressing scheme is universal across Arrow, Parquet, DuckDB, and RainDB.</p>
+<h3 id="hasnulls-optimization">HasNulls optimization</h3>
+<p>When a column has no nulls, the bitmap can be omitted entirely:</p>
+<pre><code class="language-text">if not column.has_nulls:
+    skip all bitmap checks    // fast path
+else:
+    check bitmap per row      // scalar path
+</code></pre>
+<p>Engines branch on <code>HasNulls</code> <strong>once per column</strong>, not per row. Most analytical columns in practice are non-null.</p>
+<h3 id="bitmap-and-simd-interaction">Bitmap and SIMD interaction</h3>
+<p>SIMD kernels assume dense, valid data. Common patterns:</p>
+<ol>
+<li><strong>Filter first</strong> — build a selection vector excluding null rows, then SIMD on dense subset</li>
+<li><strong>Bitmask SIMD</strong> — use AVX2 to check 32 null bits at once, compress valid indices</li>
+<li><strong>Skip SIMD</strong> — scalar loop with per-row null check (RainDB Phase 1 default for nullable columns)</li>
+</ol>
+<hr />
+<h2 id="immutability-in-vectorized-pipelines">4.4 Immutability in vectorized pipelines</h2>
+<p>Vectorized query execution depends on <strong>immutable input batches</strong> and <strong>new output batches</strong> for each operator. This is not a style preference — it enables parallelism and simplifies correctness.</p>
+<h3 id="the-immutability-contract">The immutability contract</h3>
+<pre><code class="language-text">Input batch (immutable, shared across threads)
+│
+├─ Filter operator → NEW batch (subset of rows, copied values)
+├─ Project operator → NEW batch (subset of columns)
+├─ Aggregate operator → scalar/tuple result (no batch)
+└─ Join operator → NEW batch (combined columns from probe + build)
+</code></pre>
+<p>No operator modifies input chunk bytes. Output is always a new allocation (or a pooled buffer written once, then treated as immutable).</p>
+<h3 id="benefits-for-parallel-execution">Benefits for parallel execution</h3>
+<pre><code class="language-text">Thread 1: scan batch[0]  ─┐
+Thread 2: scan batch[1]  ─┤  All read same immutable batches
+Thread 3: scan batch[2]  ─┘  No locks, no races
+</code></pre>
+<p>If batches were mutable, parallel scan would need synchronization on every row — defeating morsel parallelism.</p>
+<h3 id="structural-sharing">Structural sharing</h3>
+<p>Immutability enables <strong>structural sharing</strong> — unchanged columns can be referenced, not copied:</p>
+<pre><code class="language-text">Project(batch, columns=[0, 2])
+→ new batch with 2 columns
+→ column 0 and column 2 are SAME chunk objects (shared reference)
+→ column 1 is not copied (not in output)
+</code></pre>
+<p>RainDB's <code>ProjectGather</code> copies only the projected columns into new output chunks (materialization for query results), but the principle of not mutating inputs holds.</p>
+<h3 id="copy-on-write-for-ingest">Copy-on-write for ingest</h3>
+<p>During ingest, builders write into mutable buffers. Once wrapped in <code>FixedWidthColumnChunk</code> or <code>Utf8ColumnChunk</code> and placed in a <code>ColumnarBatch</code>, the bytes become read-only via <code>ReadOnlyMemory&lt;byte&gt;</code>. The transition from mutable (build) to immutable (store) is the boundary between ETL and query paths.</p>
+<h3 id="functional-programming-connection">Functional programming connection</h3>
+<p>Immutable data structures are a cornerstone of functional programming. Columnar pipelines are effectively <strong>dataflow graphs</strong> where each node produces new data from old — the same paradigm as <code>map</code>/<code>filter</code> in functional languages, but over column vectors instead of lists.</p>
+<hr />
+<h2 id="endianness-and-portability">4.5 Endianness and portability</h2>
+<p><strong>Endianness</strong> determines the byte order of multi-byte values in memory. It matters whenever binary column data crosses platforms or gets persisted to disk.</p>
+<h3 id="little-endian-versus-big-endian">Little-endian versus big-endian</h3>
+<table class="table">
+<thead>
+<tr>
+<th>Value</th>
+<th>Little-endian bytes</th>
+<th>Big-endian bytes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>Int32(1)</code></td>
+<td><code>01 00 00 00</code></td>
+<td><code>00 00 00 01</code></td>
+</tr>
+<tr>
+<td><code>Int32(256)</code></td>
+<td><code>00 01 00 00</code></td>
+<td><code>00 00 01 00</code></td>
+</tr>
+<tr>
+<td><code>Float64(1.0)</code></td>
+<td><code>00 00 00 00 00 00 F0 3F</code></td>
+<td><code>3F F0 00 00 00 00 00 00</code></td>
+</tr>
+</tbody>
+</table>
+<ul>
+<li><strong>Little-endian</strong>: least significant byte first (x86, x64, ARM64 in practice, .NET default)</li>
+<li><strong>Big-endian</strong>: most significant byte first (network byte order, some legacy systems)</li>
+</ul>
+<h3 id="why-it-matters-for-column-stores">Why it matters for column stores</h3>
+<p>Fixed-width columns store native binary values contiguously. If a <code>Float64</code> column is written on a little-endian machine and read on a big-endian machine without conversion, every value is corrupted.</p>
+<h3 id="industry-conventions">Industry conventions</h3>
+<table class="table">
+<thead>
+<tr>
+<th>System</th>
+<th>Endianness policy</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Apache Parquet</td>
+<td>Little-endian (explicit in spec)</td>
+</tr>
+<tr>
+<td>Apache Arrow</td>
+<td>Native endian (usually little-endian)</td>
+</tr>
+<tr>
+<td>RainDB</td>
+<td><strong>Little-endian only</strong></td>
+</tr>
+<tr>
+<td>.NET</td>
+<td>Little-endian on all supported platforms</td>
+</tr>
+</tbody>
+</table>
+<h3 id="raindbs-approach">RainDB's approach</h3>
+<p>RainDB uses <code>BinaryPrimitives.WriteInt32LittleEndian</code> and <code>ReadDoubleLittleEndian</code> for all fixed-width I/O. <code>Utf8LengthPrefixedColumnChunk</code> uses <code>BitConverter.ToInt32</code> for length prefixes — platform endian. RainDB targets little-endian only; cross-endian is unsupported.</p>
+<h3 id="portability-guidelines">Portability guidelines</h3>
+<ol>
+<li><strong>Always use explicit endian APIs</strong> — never assume native byte order in persisted formats</li>
+<li><strong>Document endianness</strong> in file format specifications</li>
+<li><strong>Test on both endianness</strong> if cross-platform support is required (rare today)</li>
+<li><strong>UTF-8 is endian-neutral</strong> — string data has no endian concern</li>
+</ol>
+<h3 id="alignment-and-portability">Alignment and portability</h3>
+<p>Beyond endianness, <strong>memory alignment</strong> affects SIMD:</p>
+<table class="table">
+<thead>
+<tr>
+<th>Type</th>
+<th>Natural alignment</th>
+<th>AVX2 requirement</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>Int32</code></td>
+<td>4 bytes</td>
+<td>Works unaligned (slower)</td>
+</tr>
+<tr>
+<td><code>Float64</code></td>
+<td>8 bytes</td>
+<td>32-byte alignment optimal for <code>LoadVector256</code></td>
+</tr>
+</tbody>
+</table>
+<p>RainDB's <code>HybridBufferPool.RentAligned</code> guarantees 32-byte alignment for SIMD buffers. Ingest buffers from <code>new byte[]</code> may be unaligned — scalar paths handle this; AVX2 paths use aligned pool buffers.</p>
+<hr />
+<h2 id="chunk-as-the-unit-of-vectorized-execution">4.6 Chunk as the unit of vectorized execution</h2>
+<p>In vectorized engines, the <strong>chunk</strong> (column vector) is the granularity at which operators consume and produce data. RainDB's minimal <code>IColumnChunk</code> interface follows from that design.</p>
+<h3 id="chunk-properties">Chunk properties</h3>
+<p>Every chunk carries:</p>
+<table class="table">
+<thead>
+<tr>
+<th>Property</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Physical type</td>
+<td>Dispatch to correct kernel</td>
+</tr>
+<tr>
+<td>Row count</td>
+<td>Loop bound</td>
+</tr>
+<tr>
+<td>Values buffer</td>
+<td>Contiguous data bytes</td>
+</tr>
+<tr>
+<td>Null bitmap</td>
+<td>Optional validity information</td>
+</tr>
+<tr>
+<td>Encoding metadata</td>
+<td>Future: dictionary, RLE</td>
+</tr>
+</tbody>
+</table>
+<h3 id="operator-inputoutput">Operator input/output</h3>
+<pre><code class="language-text">Scan(table) → chunk per column per batch
+Filter(chunk, predicate) → selection indices + original chunks
+Project(chunks, indices) → new chunks (gathered rows)
+Aggregate(chunk) → scalar
+</code></pre>
+<p>Operators never see &quot;rows&quot; as objects — they see chunks and row indices within chunks.</p>
+<h3 id="chunk-lifecycle">Chunk lifecycle</h3>
+<pre><code class="language-text">1. BUILD (ingest):    mutable buffer → FixedWidthColumnChunk (immutable)
+2. STORE (table):     chunk in ColumnarBatch in MemoryTable._batches
+3. SCAN (query):      read-only access, parallel across batches
+4. MATERIALIZE (output): PooledFixedWidthColumnChunk (rented, written, returned on dispose)
+</code></pre>
+<hr />
+<h2 id="comparison-of-string-storage-layouts">4.7 Comparison of string storage layouts</h2>
+<table class="table">
+<thead>
+<tr>
+<th>Layout</th>
+<th>Structure</th>
+<th>Best for</th>
+<th>Random access</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Arrow offsets</td>
+<td><code>int[N+1]</code> + <code>byte[]</code></td>
+<td>In-memory, zero-copy</td>
+<td>O(1)</td>
+</tr>
+<tr>
+<td>Length-prefixed</td>
+<td><code>[int32 len][utf8]...</code></td>
+<td>On-disk, streaming</td>
+<td>O(n) without index</td>
+</tr>
+<tr>
+<td>Fixed-width char(N)</td>
+<td><code>N bytes per row</code></td>
+<td>Legacy SQL <code>CHAR</code></td>
+<td>O(1), wastes space</td>
+</tr>
+<tr>
+<td>Dictionary + indices</td>
+<td><code>dict[]</code> + <code>int[N]</code></td>
+<td>Low cardinality</td>
+<td>O(1) via index</td>
+</tr>
+</tbody>
+</table>
+<p>RainDB implements the first two. The choice between them is a build-time / persistence-time decision, not a query-time decision.</p>
+<hr />
+<h2 id="exercises-theory">4.8 Exercises (theory)</h2>
+<h3 id="exercise-4.1-encoding-selection">Exercise 4.1 — Encoding selection</h3>
+<p>For each column, choose plain, dictionary, or RLE encoding and justify:</p>
+<ol>
+<li><code>user_id</code> (UUID string, 100M rows, all unique)</li>
+<li><code>country_code</code> (ISO 2-letter, 100M rows, 195 distinct)</li>
+<li><code>is_active</code> (boolean, sorted by user_id, long runs of true)</li>
+<li><code>timestamp_ms</code> (monotonically increasing Int64)</li>
+</ol>
+<h3 id="exercise-4.2-arrow-offsets">Exercise 4.2 — Arrow offsets</h3>
+<p>Build the offsets array and data buffer for strings <code>[&quot;a&quot;, &quot;bb&quot;, &quot;&quot;, &quot;ccc&quot;]</code>. Verify all four invariants.</p>
+<h3 id="exercise-4.3-null-bitmap">Exercise 4.3 — Null bitmap</h3>
+<p>For 12 rows with nulls at positions 0, 3, 7, 11, compute the 2-byte bitmap using RainDB convention (1 = null).</p>
+<h3 id="exercise-4.4-endianness">Exercise 4.4 — Endianness</h3>
+<p>Write the little-endian bytes for <code>Int32(0x12345678)</code>. What does a big-endian reader produce if it interprets them as native?</p>
+<h3 id="exercise-4.5-immutability">Exercise 4.5 — Immutability</h3>
+<p>Explain why allowing in-place filter (compacting rows within a chunk) would break morsel parallelism.</p>
+<h3 id="exercise-4.6-compression-estimate">Exercise 4.6 — Compression estimate</h3>
+<p>A <code>Utf8</code> column has 1M rows, 50 distinct city names averaging 10 bytes each. Estimate compressed size with dictionary encoding versus plain UTF-8.</p>
+<hr />
+<h1 id="part-ii-raindb-implementation">Part II: RainDB Implementation</h1>
+<hr />
+<h2 id="icolumnchunk-the-contract">4.9 IColumnChunk — the contract</h2>
+<pre><code class="language-csharp">// src/RainDB.Abstractions/Columnar/IColumnChunk.cs
+public interface IColumnChunk
+{
+    RainDbType PhysicalType { get; }
+    int RowCount { get; }
+    /// &lt;summary&gt;When false, all rows are non-null and NullBitmap may be empty.&lt;/summary&gt;
+    bool HasNulls { get; }
+    /// &lt;summary&gt;Packed bits: 1 = null, row i uses bit (i &gt;&gt; 3) mask 1 &lt;&lt; (i &amp; 7).&lt;/summary&gt;
+    ReadOnlyMemory&lt;byte&gt; NullBitmap { get; }
+    /// &lt;summary&gt;Fixed-width packed values, or UTF-8 payload for Utf8 (see chunk implementation).&lt;/summary&gt;
+    ReadOnlyMemory&lt;byte&gt; Values { get; }
+}
+</code></pre>
+<p>Implementations are <strong>sealed classes</strong> in Core (storage) or internal pooled variants in Query (execution output). The interface stays minimal so kernels depend only on bytes + metadata.</p>
+<h3 id="utf8-and-the-values-property">Utf8 and the Values property</h3>
+<p>For <code>Utf8ColumnChunk</code>, <code>Values</code> is the concatenated UTF-8 blob — <strong>not</strong> length-prefixed per row. Row boundaries come from <code>Offsets</code> (exposed on the concrete type, not the interface). Kernels that only see <code>IColumnChunk</code> must type-test or use helper APIs for string operations.</p>
+<hr />
+<h2 id="fixedwidthcolumnchunk-full-constructor-walkthrough">4.10 FixedWidthColumnChunk — full constructor walkthrough</h2>
+<pre><code class="language-csharp">// src/RainDB.Core/Columnar/FixedWidthColumnChunk.cs
+public sealed class FixedWidthColumnChunk : IColumnChunk
+{
+    public FixedWidthColumnChunk(
+        RainDbType type,
+        int rowCount,
+        ReadOnlyMemory&lt;byte&gt; values,
+        ReadOnlyMemory&lt;byte&gt; nullBitmap,
+        bool hasNulls)
+    {
+        if (!ColumnTypeSizes.IsFixedWidth(type))
+            throw new ArgumentException(&quot;Use Utf8ColumnChunk for Utf8.&quot;, nameof(type));
+        if (rowCount &lt; 0)
+            throw new ArgumentOutOfRangeException(nameof(rowCount));
+        var w = ColumnTypeSizes.FixedWidthBytes(type);
+        if (values.Length != rowCount * w)
+            throw new ArgumentException(
+                $&quot;Values length {values.Length} != rowCount({rowCount}) * width({w}).&quot;, nameof(values));
+        var nb = ColumnTypeSizes.NullBitmapBytes(rowCount);
+        if (hasNulls &amp;&amp; nullBitmap.Length &lt; nb)
+            throw new ArgumentException(&quot;Null bitmap too short for row count.&quot;, nameof(nullBitmap));
+        PhysicalType = type;
+        RowCount = rowCount;
+        Values = values;
+        NullBitmap = hasNulls ? nullBitmap[..nb] : ReadOnlyMemory&lt;byte&gt;.Empty;
+        HasNulls = hasNulls;
+    }
+
+    public RainDbType PhysicalType { get; }
+    public int RowCount { get; }
+    public bool HasNulls { get; }
+    public ReadOnlyMemory&lt;byte&gt; NullBitmap { get; }
+    public ReadOnlyMemory&lt;byte&gt; Values { get; }
+}
+</code></pre>
+<h3 id="validation-steps-in-order">Validation steps (in order)</h3>
+<table class="table">
+<thead>
+<tr>
+<th>Step</th>
+<th>Check</th>
+<th>Failure</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td><code>IsFixedWidth(type)</code></td>
+<td><code>ArgumentException</code> for Utf8</td>
+</tr>
+<tr>
+<td>2</td>
+<td><code>rowCount &gt;= 0</code></td>
+<td><code>ArgumentOutOfRangeException</code></td>
+</tr>
+<tr>
+<td>3</td>
+<td><code>values.Length == rowCount * FixedWidthBytes(type)</code></td>
+<td><code>ArgumentException</code></td>
+</tr>
+<tr>
+<td>4</td>
+<td>If <code>hasNulls</code>: <code>nullBitmap.Length &gt;= NullBitmapBytes(rowCount)</code></td>
+<td><code>ArgumentException</code></td>
+</tr>
+<tr>
+<td>5</td>
+<td>Trim null bitmap to exact <code>nb</code> bytes</td>
+<td>Slices <code>[..nb]</code></td>
+</tr>
+</tbody>
+</table>
+<h3 id="worked-example-int32-4-rows">Worked example — Int32, 4 rows</h3>
+<p>Values: <code>[10, 20, 30, 40]</code></p>
+<pre><code class="language-csharp">var rowCount = 4;
+var values = new byte[16];
+for (var i = 0; i &lt; 4; i++)
+    BinaryPrimitives.WriteInt32LittleEndian(values.AsSpan(i * 4), (i + 1) * 10);
+
+var chunk = new FixedWidthColumnChunk(
+    RainDbType.Int32, rowCount, values,
+    ReadOnlyMemory&lt;byte&gt;.Empty, hasNulls: false);
+
+Assert.Equal(16, chunk.Values.Length);
+Assert.Equal(RainDbType.Int32, chunk.PhysicalType);
+</code></pre>
+<h3 id="worked-example-wrong-buffer-size">Worked example — wrong buffer size</h3>
+<pre><code class="language-csharp">// 3 rows × 4 bytes = 12 required; passing 8 bytes throws
+Assert.Throws&lt;ArgumentException&gt;(() =&gt;
+    new FixedWidthColumnChunk(RainDbType.Int32, 3, new byte[8], ReadOnlyMemory&lt;byte&gt;.Empty, false));
+</code></pre>
+<h3 id="boolean-width-note">Boolean width note</h3>
+<p><code>RainDbType.Boolean</code> uses <strong>1 byte per row</strong> (<code>sizeof(byte)</code>), not one bit. Values <code>0</code> = false, non-zero = true (convention in kernels).</p>
+<hr />
+<h2 id="reading-and-writing-fixed-width-bytes">4.11 Reading and writing fixed-width bytes</h2>
+<h3 id="int32">Int32</h3>
+<pre><code class="language-csharp">// Write row i
+void WriteInt32(Span&lt;byte&gt; values, int row, int value) =&gt;
+    BinaryPrimitives.WriteInt32LittleEndian(values.Slice(row * 4, 4), value);
+
+// Read row i
+int ReadInt32(ReadOnlySpan&lt;byte&gt; values, int row) =&gt;
+    BinaryPrimitives.ReadInt32LittleEndian(values.Slice(row * 4, 4));
+</code></pre>
+<h3 id="int64">Int64</h3>
+<pre><code class="language-csharp">BinaryPrimitives.WriteInt64LittleEndian(values.AsSpan(row * 8, 8), value);
+BinaryPrimitives.ReadInt64LittleEndian(values.Slice(row * 8, 8));
+</code></pre>
+<h3 id="float64">Float64</h3>
+<pre><code class="language-csharp">BinaryPrimitives.WriteDoubleLittleEndian(values.AsSpan(row * 8, 8), value);
+BinaryPrimitives.ReadDoubleLittleEndian(values.Slice(row * 8, 8));
+</code></pre>
+<h3 id="memorymarshal.cast-zero-copy-typed-view">MemoryMarshal.Cast — zero-copy typed view</h3>
+<pre><code class="language-csharp">using System.Runtime.InteropServices;
+
+ReadOnlySpan&lt;byte&gt; bytes = chunk.Values.Span;
+ReadOnlySpan&lt;int&gt; ints = MemoryMarshal.Cast&lt;byte, int&gt;(bytes);
+// ints.Length == rowCount for Int32 column
+int row2 = ints[2];
+</code></pre>
+<p><strong>Requirements for Cast:</strong></p>
+<ul>
+<li><code>bytes.Length</code> must be divisible by <code>sizeof(int)</code></li>
+<li>On little-endian platforms, <code>ints[i]</code> matches <code>ReadInt32</code> at row <code>i</code></li>
+<li>Do not use Cast if bytes are not aligned for unaligned access rules on your CPU (RainDB test data uses byte arrays — generally safe for Int32/Int64 on x64/ARM64)</li>
+</ul>
+<p><code>AggregateIntrinsics</code> uses Cast for summation:</p>
+<pre><code class="language-csharp">// src/RainDB.Core/Columnar/AggregateIntrinsics.cs
+var doubles = MemoryMarshal.Cast&lt;byte, double&gt;(valuesLittleEndian);
+</code></pre>
+<p><code>FixedWidthSelectionKernels</code> uses Cast for filters:</p>
+<pre><code class="language-csharp">// src/RainDB.Query/Vectorized/FixedWidthSelectionKernels.cs
+var ints = MemoryMarshal.Cast&lt;byte, int&gt;(values);
+</code></pre>
+<hr />
+<h2 id="utf8columnchunk-arrow-style-offsets">4.12 Utf8ColumnChunk — Arrow-style offsets</h2>
+<pre><code class="language-csharp">// src/RainDB.Core/Columnar/Utf8ColumnChunk.cs
+public sealed class Utf8ColumnChunk : IColumnChunk
+{
+    public Utf8ColumnChunk(
+        int rowCount,
+        ReadOnlyMemory&lt;int&gt; offsets,
+        ReadOnlyMemory&lt;byte&gt; values,
+        ReadOnlyMemory&lt;byte&gt; nullBitmap,
+        bool hasNulls)
+    {
+        if (rowCount &lt; 0)
+            throw new ArgumentOutOfRangeException(nameof(rowCount));
+        if (offsets.Length != rowCount + 1)
+            throw new ArgumentException(&quot;Offsets must have length rowCount + 1.&quot;, nameof(offsets));
+        if (offsets.Length &gt; 0 &amp;&amp; offsets.Span[0] != 0)
+            throw new ArgumentException(&quot;Offsets[0] must be 0.&quot;, nameof(offsets));
+        var last = offsets.Length &gt; 0 ? offsets.Span[^1] : 0;
+        if (last != values.Length)
+            throw new ArgumentException(&quot;Last offset must equal Values.Length.&quot;, nameof(offsets));
+        for (var i = 1; i &lt; offsets.Length; i++)
+        {
+            if (offsets.Span[i] &lt; offsets.Span[i - 1])
+                throw new ArgumentException(&quot;Offsets must be non-decreasing.&quot;, nameof(offsets));
+        }
+
+        var nb = ColumnTypeSizes.NullBitmapBytes(rowCount);
+        if (hasNulls &amp;&amp; nullBitmap.Length &lt; nb)
+            throw new ArgumentException(&quot;Null bitmap too short for row count.&quot;, nameof(nullBitmap));
+        RowCount = rowCount;
+        Offsets = offsets;
+        Values = values;
+        NullBitmap = hasNulls ? nullBitmap[..nb] : ReadOnlyMemory&lt;byte&gt;.Empty;
+        HasNulls = hasNulls;
+    }
+
+    public RainDbType PhysicalType =&gt; RainDbType.Utf8;
+    public int RowCount { get; }
+    public bool HasNulls { get; }
+    public ReadOnlyMemory&lt;byte&gt; NullBitmap { get; }
+    public ReadOnlyMemory&lt;int&gt; Offsets { get; }
+    public ReadOnlyMemory&lt;byte&gt; Values { get; }
+}
+</code></pre>
+<h3 id="memory-layout-diagram">Memory layout diagram</h3>
+<pre><code>rows:     &quot;hi&quot;   &quot;world&quot;   &quot;&quot;     (3 rows)
+
+Offsets:  [0, 2, 7, 7]
+           |  |  |  |
+           v  v  v  v
+Values:   h i w o r l d
+          ^^^^^ ^^^^^^^^^
+          row0  row1      row2 empty (offsets[2]==offsets[3])
+</code></pre>
+<h3 id="offset-validation-rules">Offset validation rules</h3>
+<ol>
+<li><code>offsets.Length == rowCount + 1</code></li>
+<li><code>offsets[0] == 0</code></li>
+<li><code>offsets[rowCount] == values.Length</code></li>
+<li>Non-decreasing: <code>offsets[i] &gt;= offsets[i-1]</code></li>
+</ol>
+<p>Empty string row has <code>offsets[i] == offsets[i+1]</code>.</p>
+<h3 id="reading-row-i">Reading row i</h3>
+<pre><code class="language-csharp">static string GetUtf8Row(Utf8ColumnChunk chunk, int row)
+{
+    var start = chunk.Offsets.Span[row];
+    var end = chunk.Offsets.Span[row + 1];
+    return Encoding.UTF8.GetString(chunk.Values.Span.Slice(start, end - start));
+}
+</code></pre>
+<h3 id="writing-from-string-array-building-offsets">Writing from string array — building offsets</h3>
+<pre><code class="language-csharp">static Utf8ColumnChunk FromStrings(string[] rows, bool[]? nulls = null)
+{
+    var n = rows.Length;
+    var offsets = new int[n + 1];
+    var blob = new List&lt;byte&gt;();
+    for (var i = 0; i &lt; n; i++)
+    {
+        offsets[i] = blob.Count;
+        if (rows[i] is not null)
+            blob.AddRange(Encoding.UTF8.GetBytes(rows[i]));
+    }
+    offsets[n] = blob.Count;
+
+    ReadOnlyMemory&lt;byte&gt; nb = ReadOnlyMemory&lt;byte&gt;.Empty;
+    var hasNulls = false;
+    if (nulls is not null)
+    {
+        hasNulls = nulls.Any(x =&gt; x);
+        if (hasNulls)
+        {
+            var bmp = new byte[ColumnTypeSizes.NullBitmapBytes(n)];
+            for (var i = 0; i &lt; n; i++)
+                if (nulls[i]) SetNullBit(bmp, i);
+            nb = bmp;
+        }
+    }
+
+    return new Utf8ColumnChunk(n, offsets, blob.ToArray(), nb, hasNulls);
+}
+
+static void SetNullBit(Span&lt;byte&gt; bmp, int row)
+{
+    bmp[row &gt;&gt; 3] |= (byte)(1 &lt;&lt; (row &amp; 7));
+}
+</code></pre>
+<h3 id="filter-semantics-for-utf-8">Filter semantics for UTF-8</h3>
+<p><code>ColumnCompareFilter</code> supports only <code>Eq</code> and <code>Ne</code> for UTF-8 literals (<code>Utf8LiteralBytes</code>). Range comparisons on strings use sort engines, not scan filters.</p>
+<hr />
+<h2 id="utf8lengthprefixedcolumnchunk-serialized-layout">4.13 Utf8LengthPrefixedColumnChunk — serialized layout</h2>
+<p>Used when payload is stored as repeated <code>[int32 length][utf8 bytes]</code> records (persistence codec path).</p>
+<pre><code class="language-csharp">// src/RainDB.Core/Columnar/Utf8LengthPrefixedColumnChunk.cs
+public sealed class Utf8LengthPrefixedColumnChunk : IColumnChunk
+{
+    private readonly int[] _rowStarts;
+
+    public Utf8LengthPrefixedColumnChunk(
+        int rowCount,
+        ReadOnlyMemory&lt;byte&gt; values,
+        ReadOnlyMemory&lt;byte&gt; nullBitmap,
+        bool hasNulls)
+    {
+        // ... null bitmap validation ...
+        _rowStarts = new int[rowCount + 1];
+        var span = values.Span;
+        var pos = 0;
+        for (var r = 0; r &lt; rowCount; r++)
+        {
+            _rowStarts[r] = pos;
+            if (pos + 4 &gt; span.Length)
+                throw new ArgumentException(&quot;Truncated length prefix in UTF-8 payload.&quot;, nameof(values));
+            var len = BitConverter.ToInt32(span.Slice(pos, 4));
+            if (len &lt; 0)
+                throw new ArgumentOutOfRangeException(nameof(values), &quot;Negative UTF-8 length.&quot;);
+            pos += 4;
+            if (pos + len &gt; span.Length)
+                throw new ArgumentException(&quot;UTF-8 payload extends past buffer.&quot;, nameof(values));
+            pos += len;
+        }
+        _rowStarts[rowCount] = pos;
+        if (pos != span.Length)
+            throw new ArgumentException(&quot;Payload has trailing bytes after last row.&quot;, nameof(values));
+        // ...
+    }
+
+    public int GetPayloadStart(int row) =&gt; _rowStarts[row] + 4;
+    public int GetPayloadLength(int row) =&gt; _rowStarts[row + 1] - _rowStarts[row] - 4;
+    public ReadOnlySpan&lt;byte&gt; GetPayloadSpan(int row) =&gt;
+        Values.Span.Slice(GetPayloadStart(row), GetPayloadLength(row));
+}
+</code></pre>
+<h3 id="byte-layout-for-two-rows">Byte layout for two rows</h3>
+<p>Test from <code>ColumnarAndCatalogTests</code>:</p>
+<pre><code class="language-csharp">// row0: len=1 &quot;a&quot;, row1: len=2 &quot;bc&quot;
+var blob = new byte[4 + 1 + 4 + 2];
+BitConverter.GetBytes(1).CopyTo(blob, 0);
+blob[4] = (byte)'a';
+BitConverter.GetBytes(2).CopyTo(blob, 5);
+blob[9] = (byte)'b';
+blob[10] = (byte)'c';
+
+var chunk = new Utf8LengthPrefixedColumnChunk(2, blob, ReadOnlyMemory&lt;byte&gt;.Empty, hasNulls: false);
+Assert.Equal(&quot;a&quot;, Encoding.UTF8.GetString(chunk.GetPayloadSpan(0)));
+Assert.Equal(&quot;bc&quot;, Encoding.UTF8.GetString(chunk.GetPayloadSpan(1)));
+</code></pre>
+<h3 id="diagram">Diagram</h3>
+<pre><code>Row 0:  [01 00 00 00] [61]           &quot;a&quot;
+Row 1:  [02 00 00 00] [62 63]         &quot;bc&quot;
+        ^-- int32 LE --^ ^- utf8 -^
+</code></pre>
+<h3 id="utf8columnchunk-vs-utf8lengthprefixedcolumnchunk">Utf8ColumnChunk vs Utf8LengthPrefixedColumnChunk</h3>
+<table class="table">
+<thead>
+<tr>
+<th>Aspect</th>
+<th>Utf8ColumnChunk</th>
+<th>Utf8LengthPrefixedColumnChunk</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Index structure</td>
+<td>External <code>int[]</code> offsets</td>
+<td>Built at construct from length prefixes</td>
+</tr>
+<tr>
+<td>Random access</td>
+<td>O(1) via offsets</td>
+<td>O(1) after O(n) prefix scan at construct</td>
+</tr>
+<tr>
+<td>On-disk friendly</td>
+<td>Separate offset + values sections</td>
+<td>Single concatenated blob</td>
+</tr>
+<tr>
+<td>Validation</td>
+<td>Offset monotonicity</td>
+<td>Exact parse consumes entire buffer</td>
+</tr>
+</tbody>
+</table>
+<p>In-memory ingest typically uses <code>Utf8ColumnChunk</code>. Binary codec may emit length-prefixed form.</p>
+<hr />
+<h2 id="null-bitmap-construction-recipes">4.14 Null bitmap — construction recipes</h2>
+<h3 id="recipe-a-all-non-null">Recipe A: All non-null</h3>
+<pre><code class="language-csharp">ReadOnlyMemory&lt;byte&gt;.Empty, hasNulls: false
+</code></pre>
+<p>Do not allocate a bitmap. Kernels fast-path.</p>
+<h3 id="recipe-b-build-from-bool-array">Recipe B: Build from bool array</h3>
+<pre><code class="language-csharp">static (byte[] bmp, bool hasNulls) BuildNullBitmap(bool[] nullFlags)
+{
+    var hasNulls = nullFlags.Any(x =&gt; x);
+    if (!hasNulls) return (Array.Empty&lt;byte&gt;(), false);
+    var bmp = new byte[ColumnTypeSizes.NullBitmapBytes(nullFlags.Length)];
+    for (var i = 0; i &lt; nullFlags.Length; i++)
+        if (nullFlags[i])
+            bmp[i &gt;&gt; 3] |= (byte)(1 &lt;&lt; (i &amp; 7));
+    return (bmp, true);
+}
+</code></pre>
+<h3 id="recipe-c-single-null-row">Recipe C: Single null row</h3>
+<p>10 rows, only row 5 null:</p>
+<pre><code>byte index = 5 &gt;&gt; 3 = 0
+bit = 1 &lt;&lt; (5 &amp; 7) = 1 &lt;&lt; 5 = 0x20
+bitmap[0] = 0x20
+</code></pre>
+<h3 id="recipe-d-verify-before-chunk-construction">Recipe D: Verify before chunk construction</h3>
+<pre><code class="language-csharp">var nb = ColumnTypeSizes.NullBitmapBytes(rowCount);
+if (hasNulls &amp;&amp; bitmap.Length &lt; nb)
+    throw new InvalidOperationException($&quot;Need {nb} bytes, got {bitmap.Length}&quot;);
+</code></pre>
+<h3 id="interaction-with-hasnulls-flag">Interaction with HasNulls flag</h3>
+<p>If <code>hasNulls: true</code> but all bits are 0, behavior is correct but suboptimal — kernels still branch on <code>hasNulls</code>. Prefer <code>hasNulls: false</code> when no nulls exist.</p>
+<p>If <code>hasNulls: false</code> but values contain garbage and a predicate checks nulls — <strong>bug</strong>. The flag must be authoritative.</p>
+<hr />
+<h2 id="pooledfixedwidthcolumnchunk-lifecycle">4.15 PooledFixedWidthColumnChunk — lifecycle</h2>
+<p>Query execution materializes output batches into pooled buffers to reduce GC pressure.</p>
+<pre><code class="language-csharp">// src/RainDB.Query/Vectorized/PooledFixedWidthColumnChunk.cs
+internal sealed class PooledFixedWidthColumnChunk : IColumnChunk, IDisposable
+{
+    private IMemoryOwner&lt;byte&gt;? _valuesOwner;
+    private IMemoryOwner&lt;byte&gt;? _nullBitmapOwner;
+    private int _valueBytes;
+    private int _nullBitmapBytes;
+
+    public PooledFixedWidthColumnChunk(
+        RainDbType type,
+        int rowCount,
+        IMemoryOwner&lt;byte&gt; valuesOwner,
+        int valueBytes,
+        IMemoryOwner&lt;byte&gt;? nullBitmapOwner,
+        int nullBitmapBytes,
+        bool hasNulls)
+    {
+        if (!ColumnTypeSizes.IsFixedWidth(type))
+            throw new ArgumentException(&quot;Use Utf8ColumnChunk for Utf8.&quot;, nameof(type));
+        // ... same size checks as FixedWidthColumnChunk ...
+        PhysicalType = type;
+        RowCount = rowCount;
+        HasNulls = hasNulls;
+        _valuesOwner = valuesOwner;
+        _valueBytes = valueBytes;
+        _nullBitmapOwner = nullBitmapOwner;
+        _nullBitmapBytes = hasNulls ? nb : 0;
+    }
+
+    public ReadOnlyMemory&lt;byte&gt; Values
+    {
+        get
+        {
+            if (_valuesOwner is null)
+                throw new ObjectDisposedException(nameof(PooledFixedWidthColumnChunk));
+            return _valuesOwner.Memory[.._valueBytes];
+        }
+    }
+
+    public void Dispose()
+    {
+        _valuesOwner?.Dispose();
+        _valuesOwner = null;
+        _nullBitmapOwner?.Dispose();
+        _nullBitmapOwner = null;
+    }
+}
+</code></pre>
+<h3 id="lifecycle-diagram">Lifecycle diagram</h3>
+<pre class="mermaid">sequenceDiagram
+    participant Engine as VectorizedScanEngine
+    participant Pool as IBufferPool
+    participant Chunk as PooledFixedWidthColumnChunk
+    participant Batch as ColumnarBatch
+
+    Engine->>Pool: Rent(valueBytes)
+    Pool-->>Engine: IMemoryOwner byte
+    Engine->>Chunk: new PooledFixedWidthColumnChunk(...)
+    Engine->>Engine: Write filtered values into span
+    Engine->>Batch: new ColumnarBatch(columns incl. chunk)
+    Note over Engine,Batch: Result held by IColumnarQueryResult
+    Engine->>Chunk: Dispose when result disposed
+    Chunk->>Pool: Return buffers via Dispose
+</pre>
+<h3 id="differences-from-fixedwidthcolumnchunk">Differences from FixedWidthColumnChunk</h3>
+<table class="table">
+<thead>
+<tr>
+<th></th>
+<th>FixedWidthColumnChunk</th>
+<th>PooledFixedWidthColumnChunk</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Memory ownership</td>
+<td>Caller owns <code>byte[]</code></td>
+<td><code>IMemoryOwner&lt;byte&gt;</code> from pool</td>
+</tr>
+<tr>
+<td>Disposal</td>
+<td>Not disposable</td>
+<td><code>IDisposable</code> returns rent</td>
+</tr>
+<tr>
+<td>Visibility</td>
+<td>public</td>
+<td>internal</td>
+</tr>
+<tr>
+<td>Use case</td>
+<td>Ingest, tests</td>
+<td>Query output materialization</td>
+</tr>
+</tbody>
+</table>
+<h3 id="renting-pattern-conceptual">Renting pattern (conceptual)</h3>
+<pre><code class="language-csharp">var owner = context.BufferPool.Rent(rowCount * sizeof(int));
+var span = owner.Memory.Span[..rowCount * sizeof(int)];
+// ... fill span ...
+var chunk = new PooledFixedWidthColumnChunk(
+    RainDbType.Int32, rowCount, owner, rowCount * sizeof(int),
+    nullOwner: null, nullBitmapBytes: 0, hasNulls: false);
+</code></pre>
+<p>When the query result is disposed, dispose each pooled chunk to return memory.</p>
+<h3 id="pitfall-use-after-dispose">Pitfall: use after dispose</h3>
+<p>Accessing <code>Values</code> after <code>Dispose()</code> throws <code>ObjectDisposedException</code>.</p>
+<hr />
+<h2 id="memorymarshal-patterns-in-execution">4.16 MemoryMarshal patterns in execution</h2>
+<h3 id="cast-byte-span-to-primitives">Cast byte span to primitives</h3>
+<pre><code class="language-csharp">ReadOnlySpan&lt;double&gt; doubles = MemoryMarshal.Cast&lt;byte, double&gt;(column.Values.Span);
+</code></pre>
+<p>Used in: <code>AggregateIntrinsics</code>, <code>FixedWidthSelectionKernels</code>, join key comparisons.</p>
+<h3 id="getreference-for-unsafe-style-loops">GetReference for unsafe-style loops</h3>
+<pre><code class="language-csharp">// src/RainDB.Query/Vectorized/FixedWidthSelectionKernels.cs
+ref var start = ref MemoryMarshal.GetReference(values);
+</code></pre>
+<p>Enables pointer arithmetic in vectorized loops when combined with <code>unsafe</code> blocks and SIMD loads.</p>
+<h3 id="int64bitstodouble-for-filter-immediates">Int64BitsToDouble for filter immediates</h3>
+<pre><code class="language-csharp">// ColumnCompareFilter stores Float64 immediate as long bits
+BitConverter.Int64BitsToDouble(filter.ImmediateBits)
+</code></pre>
+<p>Physical plans avoid boxing <code>double</code> in filter structs — immediate is bit-cast compatible.</p>
+<h3 id="avx2-sum-requirements">AVX2 sum requirements</h3>
+<pre><code class="language-csharp">if (allowAvx2 &amp;&amp; Avx2.IsSupported &amp;&amp; doubles.Length &gt;= Vector256&lt;double&gt;.Count)
+return SumDoubleAvx2(doubles);
+</code></pre>
+<ul>
+<li><code>HybridBufferPool.RentAligned</code> provides 32-byte alignment for <code>LoadVector256</code></li>
+<li>Scalar tail loop handles <code>length % 4 != 0</code></li>
+</ul>
+<hr />
+<h2 id="building-chunks-from-scratch-complete-workshop">4.17 Building chunks from scratch — complete workshop</h2>
+<h3 id="exercise-sales-dimension">Exercise: sales dimension</h3>
+<p>Build chunks for:</p>
+<table class="table">
+<thead>
+<tr>
+<th>product_id (Int32)</th>
+<th>price (Float64)</th>
+<th>name (Utf8)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>9.99</td>
+<td>&quot;Apple&quot;</td>
+</tr>
+<tr>
+<td>2</td>
+<td>19.50</td>
+<td>&quot;Banana&quot;</td>
+</tr>
+<tr>
+<td>3</td>
+<td>4.00</td>
+<td>&quot;Cherry&quot;</td>
+</tr>
+</tbody>
+</table>
+<pre><code class="language-csharp">// Int32 column
+var ids = new[] { 1, 2, 3 };
+var idBytes = new byte[12];
+for (var i = 0; i &lt; 3; i++)
+    BinaryPrimitives.WriteInt32LittleEndian(idBytes.AsSpan(i * 4), ids[i]);
+var idChunk = new FixedWidthColumnChunk(RainDbType.Int32, 3, idBytes, ReadOnlyMemory&lt;byte&gt;.Empty, false);
+
+// Float64 column
+var prices = new[] { 9.99, 19.50, 4.00 };
+var priceBytes = new byte[24];
+for (var i = 0; i &lt; 3; i++)
+    BinaryPrimitives.WriteDoubleLittleEndian(priceBytes.AsSpan(i * 8), prices[i]);
+var priceChunk = new FixedWidthColumnChunk(RainDbType.Float64, 3, priceBytes, ReadOnlyMemory&lt;byte&gt;.Empty, false);
+
+// Utf8 column
+var nameChunk = Utf8ColumnChunkFromStrings([&quot;Apple&quot;, &quot;Banana&quot;, &quot;Cherry&quot;]);
+
+var batch = new ColumnarBatch(3, new IColumnChunk[] { idChunk, priceChunk, nameChunk });
+</code></pre>
+<h3 id="verify-with-memorymarshal">Verify with MemoryMarshal</h3>
+<pre><code class="language-csharp">var readIds = MemoryMarshal.Cast&lt;byte, int&gt;(idChunk.Values.Span);
+Assert.Equal(2, readIds[1]);
+
+var readPrices = MemoryMarshal.Cast&lt;byte, double&gt;(priceChunk.Values.Span);
+Assert.Equal(19.50, readPrices[1]);
+</code></pre>
+<hr />
+<h2 id="chunk-selection-guide">4.18 Chunk selection guide</h2>
+<pre><code>Is the type Utf8?
+├─ Yes → In-memory ingest?
+│         ├─ Yes → Utf8ColumnChunk (offsets + blob)
+│         └─ No / wire format → Utf8LengthPrefixedColumnChunk
+└─ No → Fixed width?
+          ├─ Ingest / durable → FixedWidthColumnChunk
+          └─ Query output → PooledFixedWidthColumnChunk
+</code></pre>
+<hr />
+<h2 id="interoperability-and-endianness">4.19 Interoperability and endianness</h2>
+<p>RainDB assumes <strong>little-endian</strong> for all fixed-width binary I/O (<code>BinaryPrimitives.Write*LittleEndian</code>). .NET on supported platforms is little-endian.</p>
+<p><code>Utf8LengthPrefixedColumnChunk</code> uses <code>BitConverter.ToInt32</code> for length prefixes — platform endian. RainDB targets little-endian only; cross-endian is unsupported.</p>
+<p>When building test data or integrating with external systems, always use explicit little-endian APIs:</p>
+<pre><code class="language-csharp">// Correct
+BinaryPrimitives.WriteInt32LittleEndian(buffer.AsSpan(offset), value);
+
+// Risky for cross-platform persistence
+BitConverter.GetBytes(value).CopyTo(buffer, offset);
+</code></pre>
+<hr />
+<h2 id="pitfalls">4.20 Pitfalls</h2>
+<h3 id="pitfall-1-offsets-not-monotonic">Pitfall 1: Offsets not monotonic</h3>
+<p><code>Utf8ColumnChunk</code> constructor throws — common bug when building offsets in parallel without sorting.</p>
+<h3 id="pitfall-2-last-offset-mismatch">Pitfall 2: Last offset mismatch</h3>
+<p>Forgetting <code>offsets[n] = blob.Count</code> causes <code>&quot;Last offset must equal Values.Length&quot;</code>.</p>
+<h3 id="pitfall-3-cast-on-odd-length-byte-buffer">Pitfall 3: Cast on odd-length byte buffer</h3>
+<p><code>MemoryMarshal.Cast&lt;byte, double&gt;</code> requires <code>values.Length % 8 == 0</code>.</p>
+<h3 id="pitfall-4-confusing-length-prefixed-with-offset-style">Pitfall 4: Confusing length-prefixed with offset style</h3>
+<p>Mixing layouts when reading persistence files produces parse exceptions or garbage strings.</p>
+<h3 id="pitfall-5-not-disposing-pooled-chunks">Pitfall 5: Not disposing pooled chunks</h3>
+<p>Leaks pool capacity — always dispose <code>IColumnarQueryResult</code> / pooled owners.</p>
+<h3 id="pitfall-6-null-utf-8-row">Pitfall 6: Null UTF-8 row</h3>
+<p>Null string rows should set null bitmap bit; offset slice may be empty (<code>start == end</code>).</p>
+<h3 id="pitfall-7-boolean-as-bit-packed-in-values">Pitfall 7: Boolean as bit-packed in Values</h3>
+<p>RainDB uses byte-wide booleans in <code>Values</code> — do not pack bits into values array.</p>
+<h3 id="pitfall-8-arrow-validity-convention-mismatch">Pitfall 8: Arrow validity convention mismatch</h3>
+<p>Arrow uses 1 = valid; RainDB uses 1 = null. Do not memcpy Arrow validity buffers without inverting.</p>
+<hr />
+<h2 id="exercises-implementation">4.21 Exercises (implementation)</h2>
+<h3 id="exercise-4.7">Exercise 4.7</h3>
+<p>Manually encode <code>Utf8LengthPrefixedColumnChunk</code> bytes for rows <code>[&quot;go&quot;, &quot;&quot;]</code>. Write hex dump.</p>
+<h3 id="exercise-4.8">Exercise 4.8</h3>
+<p>Construct <code>Utf8ColumnChunk</code> for 1000 rows of empty strings. What are <code>offsets[500]</code> and <code>values.Length</code>?</p>
+<h3 id="exercise-4.9">Exercise 4.9</h3>
+<p>Use <code>MemoryMarshal.Cast</code> to sum an <code>Int32</code> column without a per-row <code>ReadInt32</code> call.</p>
+<h3 id="exercise-4.10">Exercise 4.10</h3>
+<p>Implement <code>ConvertLengthPrefixedToOffsets(Utf8LengthPrefixedColumnChunk src) → Utf8ColumnChunk</code>.</p>
+<h3 id="exercise-4.11">Exercise 4.11</h3>
+<p>Create <code>FixedWidthColumnChunk</code> with <code>hasNulls: true</code> and intentionally short bitmap — capture exception message.</p>
+<h3 id="exercise-4.12">Exercise 4.12</h3>
+<p>Trace <code>PooledFixedWidthColumnChunk.Dispose</code> — what happens to <code>IMemoryOwner</code>?</p>
+<hr />
+<h2 id="chapter-summary">4.22 Chapter summary</h2>
+<table class="table">
+<thead>
+<tr>
+<th>Type</th>
+<th>Role</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>FixedWidthColumnChunk</code></td>
+<td>Validated immutable storage for numeric/bool columns</td>
+</tr>
+<tr>
+<td><code>Utf8ColumnChunk</code></td>
+<td>Offset-indexed UTF-8 blob (Arrow-style)</td>
+</tr>
+<tr>
+<td><code>Utf8LengthPrefixedColumnChunk</code></td>
+<td>Parse-on-construct length-prefixed serialization</td>
+</tr>
+<tr>
+<td><code>PooledFixedWidthColumnChunk</code></td>
+<td>Rented buffers for query output; must dispose</td>
+</tr>
+<tr>
+<td><code>MemoryMarshal.Cast</code></td>
+<td>Zero-copy typed spans for kernels</td>
+</tr>
+</tbody>
+</table>
+<p>You can now construct batches from raw bytes, validate chunk invariants, and understand how execution reuses pooled chunks. Chapter 5 covers catalog registration and table lifecycle in the broader engine context.</p>
+</div>
+          <footer class="doc-footer">
+            <p>Generated by <strong>hoihky</strong> with <strong>MDWeb</strong> and with assistance from <strong>AI</strong></p>
+
+          </footer>
+        </article>
+
+        
+                <aside class="toc" aria-label="On this page">
+                  <p class="toc-title">On this page</p>
+                  <ul>
+                    
+                        <li class="toc-h1">
+                          <a href="#chapter-4-chunk-data-structures">Chapter 4: Chunk Data Structures</a>
+                        </li>
+                        
+                        <li class="toc-h1">
+                          <a href="#part-i-concepts-and-theory">Part I: Concepts and Theory</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#41-columnar-encoding-theory">4.1 Columnar encoding theory</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#plain-encoding">Plain encoding</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#dictionary-encoding">Dictionary encoding</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#run-length-encoding-rle">Run-length encoding (RLE)</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#delta-encoding">Delta encoding</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#encoding-selection-matrix">Encoding selection matrix</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#encoding-and-execution">Encoding and execution</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#42-apache-arrow-string-layout-rationale">4.2 Apache Arrow string layout rationale</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#arrow-string-representation">Arrow string representation</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#why-offsets-instead-of-length-prefixes">Why offsets instead of length prefixes?</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#offset-invariants">Offset invariants</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#arrow-versus-length-prefixed">Arrow versus length-prefixed</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#interoperability">Interoperability</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#43-bit-packed-null-bitmaps-in-analytics-engines">4.3 Bit-packed null bitmaps in analytics engines</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#why-bitmaps">Why bitmaps?</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#bitmap-conventions">Bitmap conventions</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#bit-addressing">Bit addressing</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#hasnulls-optimization">HasNulls optimization</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#bitmap-and-simd-interaction">Bitmap and SIMD interaction</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#44-immutability-in-vectorized-pipelines">4.4 Immutability in vectorized pipelines</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#the-immutability-contract">The immutability contract</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#benefits-for-parallel-execution">Benefits for parallel execution</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#structural-sharing">Structural sharing</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#copy-on-write-for-ingest">Copy-on-write for ingest</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#functional-programming-connection">Functional programming connection</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#45-endianness-and-portability">4.5 Endianness and portability</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#little-endian-versus-big-endian">Little-endian versus big-endian</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#why-it-matters-for-column-stores">Why it matters for column stores</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#industry-conventions">Industry conventions</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#raindbs-approach">RainDB's approach</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#portability-guidelines">Portability guidelines</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#alignment-and-portability">Alignment and portability</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#46-chunk-as-the-unit-of-vectorized-execution">4.6 Chunk as the unit of vectorized execution</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#chunk-properties">Chunk properties</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#operator-inputoutput">Operator input/output</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#chunk-lifecycle">Chunk lifecycle</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#47-comparison-of-string-storage-layouts">4.7 Comparison of string storage layouts</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#48-exercises-theory">4.8 Exercises (theory)</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#exercise-41-encoding-selection">Exercise 4.1 — Encoding selection</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#exercise-42-arrow-offsets">Exercise 4.2 — Arrow offsets</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#exercise-43-null-bitmap">Exercise 4.3 — Null bitmap</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#exercise-44-endianness">Exercise 4.4 — Endianness</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#exercise-45-immutability">Exercise 4.5 — Immutability</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#exercise-46-compression-estimate">Exercise 4.6 — Compression estimate</a>
+                        </li>
+                        
+                        <li class="toc-h1">
+                          <a href="#part-ii-raindb-implementation">Part II: RainDB Implementation</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#49-icolumnchunk-the-contract">4.9 IColumnChunk — the contract</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#utf8-and-the-values-property">Utf8 and the Values property</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#410-fixedwidthcolumnchunk-full-constructor-walkthrough">4.10 FixedWidthColumnChunk — full constructor walkthrough</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#validation-steps-in-order">Validation steps (in order)</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#worked-example-int32-4-rows">Worked example — Int32, 4 rows</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#worked-example-wrong-buffer-size">Worked example — wrong buffer size</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#boolean-width-note">Boolean width note</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#411-reading-and-writing-fixed-width-bytes">4.11 Reading and writing fixed-width bytes</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#int32">Int32</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#int64">Int64</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#float64">Float64</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#memorymarshalcast-zero-copy-typed-view">MemoryMarshal.Cast — zero-copy typed view</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#412-utf8columnchunk-arrow-style-offsets">4.12 Utf8ColumnChunk — Arrow-style offsets</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#memory-layout-diagram">Memory layout diagram</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#offset-validation-rules">Offset validation rules</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#reading-row-i">Reading row i</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#writing-from-string-array-building-offsets">Writing from string array — building offsets</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#filter-semantics-for-utf-8">Filter semantics for UTF-8</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#413-utf8lengthprefixedcolumnchunk-serialized-layout">4.13 Utf8LengthPrefixedColumnChunk — serialized layout</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#byte-layout-for-two-rows">Byte layout for two rows</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#diagram">Diagram</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#utf8columnchunk-vs-utf8lengthprefixedcolumnchunk">Utf8ColumnChunk vs Utf8LengthPrefixedColumnChunk</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#414-null-bitmap-construction-recipes">4.14 Null bitmap — construction recipes</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#recipe-a-all-non-null">Recipe A: All non-null</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#recipe-b-build-from-bool-array">Recipe B: Build from bool array</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#recipe-c-single-null-row">Recipe C: Single null row</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#recipe-d-verify-before-chunk-construction">Recipe D: Verify before chunk construction</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#interaction-with-hasnulls-flag">Interaction with HasNulls flag</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#415-pooledfixedwidthcolumnchunk-lifecycle">4.15 PooledFixedWidthColumnChunk — lifecycle</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#lifecycle-diagram">Lifecycle diagram</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#differences-from-fixedwidthcolumnchunk">Differences from FixedWidthColumnChunk</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#renting-pattern-conceptual">Renting pattern (conceptual)</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#pitfall-use-after-dispose">Pitfall: use after dispose</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#416-memorymarshal-patterns-in-execution">4.16 MemoryMarshal patterns in execution</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#cast-byte-span-to-primitives">Cast byte span to primitives</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#getreference-for-unsafe-style-loops">GetReference for unsafe-style loops</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#int64bitstodouble-for-filter-immediates">Int64BitsToDouble for filter immediates</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#avx2-sum-requirements">AVX2 sum requirements</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#417-building-chunks-from-scratch-complete-workshop">4.17 Building chunks from scratch — complete workshop</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#exercise-sales-dimension">Exercise: sales dimension</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#verify-with-memorymarshal">Verify with MemoryMarshal</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#418-chunk-selection-guide">4.18 Chunk selection guide</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#419-interoperability-and-endianness">4.19 Interoperability and endianness</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#420-pitfalls">4.20 Pitfalls</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#pitfall-1-offsets-not-monotonic">Pitfall 1: Offsets not monotonic</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#pitfall-2-last-offset-mismatch">Pitfall 2: Last offset mismatch</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#pitfall-3-cast-on-odd-length-byte-buffer">Pitfall 3: Cast on odd-length byte buffer</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#pitfall-4-confusing-length-prefixed-with-offset-style">Pitfall 4: Confusing length-prefixed with offset style</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#pitfall-5-not-disposing-pooled-chunks">Pitfall 5: Not disposing pooled chunks</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#pitfall-6-null-utf-8-row">Pitfall 6: Null UTF-8 row</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#pitfall-7-boolean-as-bit-packed-in-values">Pitfall 7: Boolean as bit-packed in Values</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#pitfall-8-arrow-validity-convention-mismatch">Pitfall 8: Arrow validity convention mismatch</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#421-exercises-implementation">4.21 Exercises (implementation)</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#exercise-47">Exercise 4.7</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#exercise-48">Exercise 4.8</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#exercise-49">Exercise 4.9</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#exercise-410">Exercise 4.10</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#exercise-411">Exercise 4.11</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#exercise-412">Exercise 4.12</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#422-chapter-summary">4.22 Chapter summary</a>
+                        </li>
+                        
+                  </ul>
+                </aside>
+                
+      </main>
+    </div>
+  </div>
+  <script src="assets/vendor/mermaid.min.js"></script>
+  <script src="assets/vendor/highlight.min.js"></script>
+  <script src="assets/js/site.js"></script>
+</body>
+</html>

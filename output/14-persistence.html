@@ -1,0 +1,1246 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Chapter 14: Persistence · Building an OLAP Database Engine from Scratch with RainDB</title>
+  <meta name="description" content="Generated documentation site">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="assets/css/site.css">
+  <link rel="stylesheet" href="assets/vendor/atom-one-dark.min.css">
+</head>
+<body>
+  <div class="site">
+    <header class="topbar">
+      <button class="sidebar-toggle" id="sidebar-toggle" aria-label="Toggle navigation">☰</button>
+      <a href="index.html" class="brand">Building an OLAP Database Engine from Scratch with RainDB</a>
+      <div class="search-wrap">
+        <input type="search" id="search" placeholder="Search docs…" autocomplete="off">
+      </div>
+    </header>
+
+    <div class="layout">
+      <aside class="sidebar" id="sidebar">
+        <nav class="nav" aria-label="Documentation">
+          <ul class="nav-list">
+            
+                        <li class="nav-item depth-0">
+                          
+                            <a href="index.html" class="nav-link">Building an OLAP Database Engine from Scratch</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="01-olap-fundamentals.html" class="nav-link">Chapter 1: OLAP Fundamentals</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="02-architecture-and-modules.html" class="nav-link">Chapter 2: Architecture and Modules</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="03-columnar-storage-model.html" class="nav-link">Chapter 3: Columnar Storage Model</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="04-chunk-data-structures.html" class="nav-link">Chapter 4: Chunk Data Structures</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="05-catalog-and-tables.html" class="nav-link">Chapter 5: Catalog and Tables</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="06-buffer-management.html" class="nav-link">Chapter 6: Buffer Management</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="07-execution-pipeline.html" class="nav-link">Chapter 7: Execution Pipeline</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="08-vectorized-scan-filter-project.html" class="nav-link">Chapter 8: Vectorized Scan, Filter, and Project</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="09-global-aggregates.html" class="nav-link">Chapter 9: Global Aggregates</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="10-hash-aggregation.html" class="nav-link">Chapter 10: Hash Aggregation</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="11-joins.html" class="nav-link">Chapter 11: Joins</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="12-sort-and-limit.html" class="nav-link">Chapter 12: Sort and Limit</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="13-sql-compilation.html" class="nav-link">Chapter 13: SQL Compilation</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0 is-active">
+                          
+                            <a href="14-persistence.html" class="nav-link">Chapter 14: Persistence</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="15-future-extensions.html" class="nav-link">Chapter 15: Future Extensions</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="16-mmap-io.html" class="nav-link">Chapter 16: mmap I/O</a>
+                            
+                        </li>
+                        
+          </ul>
+        </nav>
+      </aside>
+
+      <main class="content">
+        <article class="doc">
+          <header class="doc-header">
+            <h1>Chapter 14: Persistence</h1>
+          </header>
+          <div class="doc-body"><h1 id="chapter-14-persistence">Chapter 14: Persistence</h1>
+<p>Persistence is what separates a toy in-memory analytics library from a database you can trust across process restarts. This chapter begins with storage-engine architecture, durability theory, write-ahead logging, checkpointing, and columnar file formats used in industry. Part II walks RainDB's directory-backed persistence: <code>catalog.json</code>, batch codec byte layouts, hydration, and export/import snapshots.</p>
+<hr />
+<h1 id="part-i-concepts">Part I — Concepts</h1>
+<h2 id="storage-engine-architecture">14.1 Storage engine architecture</h2>
+<p>A <strong>storage engine</strong> owns durable reads and writes — to local SSDs, spinning disks, or remote object stores — while exposing tables and columns to the query layer. Typical designs stack responsibilities vertically:</p>
+<pre><code class="language-text">Query executor
+      ↓
+Table / catalog API
+      ↓
+Buffer manager (page cache, pin/unpin)
+      ↓
+Storage manager (segments, files, LSM levels)
+      ↓
+OS / device (block I/O, mmap, direct I/O)
+</code></pre>
+<h3 id="responsibilities">Responsibilities</h3>
+<table class="table">
+<thead>
+<tr>
+<th>Component</th>
+<th>Role</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Catalog</strong></td>
+<td>Metadata: schemas, types, constraints, statistics</td>
+</tr>
+<tr>
+<td><strong>Heap / segment store</strong></td>
+<td>Row or column data on disk</td>
+</tr>
+<tr>
+<td><strong>Index structures</strong></td>
+<td>B-trees, zone maps, bloom filters (more common in OLTP)</td>
+</tr>
+<tr>
+<td><strong>Transaction log</strong></td>
+<td>Ordered change history for crash recovery</td>
+</tr>
+<tr>
+<td><strong>Checkpoint / flush</strong></td>
+<td>Persist dirty in-memory state</td>
+</tr>
+</tbody>
+</table>
+<p>Analytical engines often trim the stack: fewer secondary indexes, append-friendly writes, scan-oriented layouts. RainDB's MVP folds much of this into <code>RainDbFileDatabase</code> plus <code>MemoryTable</code> with append callbacks.</p>
+<h3 id="read-path-vs-write-path">Read path vs write path</h3>
+<p><strong>Writes</strong> usually flow: validate incoming batch → append to an in-memory structure → encode to durable files if configured → refresh catalog metadata.</p>
+<p><strong>Reads</strong> usually flow: resolve table by name → walk segment or batch files → decode or map column data → hand batches to scan operators.</p>
+<p>The perennial tradeoff is write throughput (batched sequential I/O) versus read efficiency (columnar layout, pruning metadata, caching).</p>
+<h2 id="durability-and-the-acid-d">14.2 Durability and the ACID &quot;D&quot;</h2>
+<p>Durability — the &quot;D&quot; in ACID — means <strong>committed work survives process death</strong>: power failure, kernel panic, or <code>kill -9</code>. It sits alongside, but is not the same as:</p>
+<ul>
+<li><strong>Atomicity</strong> — a transaction's effects appear all at once or not at all (WAL is the usual mechanism)</li>
+<li><strong>Consistency</strong> — invariants hold before and after each transaction</li>
+<li><strong>Isolation</strong> — concurrent sessions do not observe torn partial updates</li>
+</ul>
+<p>Embedded OLAP products span a spectrum from &quot;durable after explicit flush&quot; to full transactional logging. RainDB's MVP relies on temp-file rename without a documented fsync policy — treat durability as <strong>best-effort</strong> until Phase F (Chapter 15).</p>
+<h3 id="durability-levels-in-practice">Durability levels in practice</h3>
+<table class="table">
+<thead>
+<tr>
+<th>Level</th>
+<th>Mechanism</th>
+<th>Tradeoff</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Process memory only</strong></td>
+<td>No disk</td>
+<td>Fastest; all data lost on exit</td>
+</tr>
+<tr>
+<td><strong>Append + rename</strong></td>
+<td>Atomic file replacement</td>
+<td>Simple; small windows between related files</td>
+</tr>
+<tr>
+<td><strong>fsync per commit</strong></td>
+<td>Force media persistence</td>
+<td>Higher latency; stronger guarantees</td>
+</tr>
+<tr>
+<td><strong>WAL + checkpoint</strong></td>
+<td>Log-first, batched data flush</td>
+<td>Standard for production databases</td>
+</tr>
+</tbody>
+</table>
+<h2 id="write-ahead-logging-wal">14.3 Write-ahead logging (WAL)</h2>
+<p><strong>Write-ahead logging</strong> is the workhorse durability pattern in database systems. The invariant: <strong>the log must reach durable storage before in-place data pages count as committed</strong>.</p>
+<h3 id="wal-record-flow">WAL record flow</h3>
+<pre><code class="language-text">1. Client requests commit
+2. Engine appends WAL record(s) describing the change
+3. Log is forced to disk (fsync or group commit)
+4. In-memory pages are updated (possibly lazily)
+5. Client receives acknowledgment
+</code></pre>
+<p>After a crash, recovery <strong>replays the WAL</strong> from the latest checkpoint — redoing committed work and undoing transactions that never finished.</p>
+<h3 id="why-log-before-data">Why log before data?</h3>
+<p>If data pages land on disk first and the process dies before the log record, the engine cannot tell which updates were committed. An append-only log supplies a total order of changes.</p>
+<h3 id="wal-segment-structure">WAL segment structure</h3>
+<p>Typical log files store:</p>
+<ul>
+<li>A monotonic <strong>LSN</strong> (log sequence number) per record</li>
+<li>A record kind: insert, update, delete, catalog mutation, checkpoint marker</li>
+<li>Payload bytes: table id, encoded batch, or page-level diff</li>
+</ul>
+<p>Checkpoint records bound replay: they assert that all changes before LSN <em>X</em> are already reflected in data files.</p>
+<h3 id="raindb-status">RainDB status</h3>
+<p>RainDB ships <strong>without a WAL</strong>. Batches and the catalog are written directly to files. Phase F targets WAL plus checkpoint support (Chapter 15).</p>
+<h2 id="checkpointing">14.4 Checkpointing</h2>
+<p>A <strong>checkpoint</strong> captures a coherent on-disk image so recovery can start near current state and older log segments can be discarded.</p>
+<h3 id="types">Types</h3>
+<table class="table">
+<thead>
+<tr>
+<th>Checkpoint style</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Fuzzy</strong></td>
+<td>Data pages flush while transactions continue; WAL brackets the fuzzy interval</td>
+</tr>
+<tr>
+<td><strong>Sharp</strong></td>
+<td>Pause writers, flush everything, resume — short replay afterward</td>
+</tr>
+<tr>
+<td><strong>Incremental</strong></td>
+<td>Flush only pages dirtied since the prior checkpoint</td>
+</tr>
+</tbody>
+</table>
+<p>Append-only OLAP designs often checkpoint by <strong>sealing immutable segment files</strong> and snapshotting catalog metadata — spiritually similar to RainDB's <code>FlushCatalog</code> plus numbered <code>.batch</code> files, but without WAL replay today.</p>
+<h3 id="checkpoint-frequency-tradeoffs">Checkpoint frequency tradeoffs</h3>
+<ul>
+<li>More frequent checkpoints shorten recovery but add steady-state I/O</li>
+<li>Rare checkpoints defer checkpoint cost but lengthen WAL replay</li>
+</ul>
+<h2 id="page-oriented-vs-log-structured-storage">14.5 Page-oriented vs log-structured storage</h2>
+<p>Two organizing principles cover most on-disk engines.</p>
+<h3 id="page-oriented-slotted-pages">Page-oriented (slotted pages)</h3>
+<p>Storage is carved into fixed <strong>pages</strong> (often 4–64 KB). B-tree indexes point at pages; updates rewrite pages in place, usually under WAL protection. PostgreSQL, SQLite, and classic row stores follow this shape.</p>
+<p><strong>Strengths:</strong> fine-grained random updates, mature locking models<br />
+<strong>Weaknesses:</strong> write amplification on flash; wide column scans pay per-page overhead</p>
+<h3 id="log-structured-append-only">Log-structured (append-only)</h3>
+<p>New data appends to sequential <strong>segments</strong>; background compaction merges them. LSM-trees (LevelDB, RocksDB) are the textbook example. Many OLAP systems adopt <strong>append-only column segments</strong> without full LSM merge policies in embedded deployments.</p>
+<p><strong>Strengths:</strong> sequential write bandwidth; immutable segments ease concurrency<br />
+<strong>Weaknesses:</strong> compaction work; reads may touch many files</p>
+<h3 id="raindbs-model">RainDB's model</h3>
+<p>RainDB appends <strong>numbered batch files</strong> per table — log-structured at segment granularity, without merge compaction. Each insert produces <code>00000N.batch</code>, aligning with embedded OLAP practice (local DuckDB files, early ClickHouse MergeTree parts, conceptually).</p>
+<h2 id="columnar-file-formats-in-industry">14.6 Columnar file formats in industry</h2>
+<p>Analytical engines lay out each column (or chunk) contiguously on disk. Formats vary in metadata depth and mmap suitability.</p>
+<table class="table">
+<thead>
+<tr>
+<th>System</th>
+<th>Format idea</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Apache Parquet</strong></td>
+<td>Row groups, column chunks, rich footer statistics</td>
+<td>De facto interchange format</td>
+</tr>
+<tr>
+<td><strong>Apache Arrow IPC</strong></td>
+<td>Flat buffers tuned for alignment and zero-copy</td>
+<td>In-memory and streaming</td>
+</tr>
+<tr>
+<td><strong>DuckDB</strong></td>
+<td>Proprietary database file with block manager</td>
+<td>Tight integration with buffer pool</td>
+</tr>
+<tr>
+<td><strong>ClickHouse</strong></td>
+<td>MergeTree parts with per-column compressed <code>.bin</code> files</td>
+<td>Column files inside immutable parts</td>
+</tr>
+<tr>
+<td><strong>Snowflake</strong></td>
+<td>Cloud micro-partitions</td>
+<td>Immutable objects plus separate catalog service</td>
+</tr>
+</tbody>
+</table>
+<p>Shared design threads:</p>
+<ul>
+<li><strong>Typed column chunks</strong> with known row counts</li>
+<li><strong>Per-column compression</strong> (dictionary, RLE, bit-packing)</li>
+<li><strong>Min/max/null statistics</strong> for pruning</li>
+<li><strong>Versioned headers</strong> (magic bytes, format numbers) for evolution</li>
+</ul>
+<p>RainDB's <code>RNBATCH1</code> batches and <code>RNBFCOL1</code> column files (Chapter 16) are deliberately minimal self-describing layouts — no compression or zone maps yet.</p>
+<h2 id="catalog-metadata-on-disk">14.7 Catalog metadata on disk</h2>
+<p>The <strong>catalog</strong> is the authoritative map from logical names to physical storage: databases, schemas, tables, columns, types, and often statistics or ACLs.</p>
+<h3 id="what-catalogs-store">What catalogs store</h3>
+<ul>
+<li>Stable table identifiers (GUIDs, OIDs)</li>
+<li>Column names, types, nullability</li>
+<li>Pointers to data files or byte ranges</li>
+<li>Schema generation counters for plan-cache invalidation</li>
+</ul>
+<h3 id="serialization-choices">Serialization choices</h3>
+<table class="table">
+<thead>
+<tr>
+<th>Format</th>
+<th>Used by</th>
+<th>Tradeoff</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>JSON</strong></td>
+<td>RainDB MVP, many prototypes</td>
+<td>Easy to inspect; typically whole-file rewrite</td>
+</tr>
+<tr>
+<td><strong>SQLite catalog tables</strong></td>
+<td>DuckDB embedded mode</td>
+<td>Transactional metadata updates</td>
+</tr>
+<tr>
+<td><strong>Custom binary</strong></td>
+<td>Large server engines</td>
+<td>Compact; opaque without tooling</td>
+</tr>
+</tbody>
+</table>
+<p>Readers must never observe torn catalog state — achieve atomicity with temp-file rename or catalog records in the WAL.</p>
+<p>RainDB persists <code>catalog.json</code> at <code>formatVersion: 1</code> and rewrites the full document on each <code>FlushCatalog</code>.</p>
+<h2 id="crash-recovery-basics">14.8 Crash recovery basics</h2>
+<p>Recovery answers one question after an unexpected shutdown: <strong>what is safe to serve?</strong></p>
+<h3 id="recovery-phases-wal-based-systems">Recovery phases (WAL-based systems)</h3>
+<ol>
+<li><strong>Analysis</strong> — scan the log from the last checkpoint; list dirty pages and in-flight transactions</li>
+<li><strong>Redo</strong> — reapply committed updates missing from data files</li>
+<li><strong>Undo</strong> — reverse effects of uncommitted transactions</li>
+</ol>
+<h3 id="failure-modes-without-wal">Failure modes without WAL</h3>
+<p>RainDB's MVP can encounter:</p>
+<ul>
+<li>A catalog entry pointing at a table directory with missing or partial batches</li>
+<li>A batch file on disk that the catalog never recorded (orphan segment)</li>
+<li>A crash mid-write to a <code>.tmp</code> staging file (final rename semantics usually preserve the prior file)</li>
+</ul>
+<p><strong>Detection</strong> happens at open time: magic validation, row-count checks, cross-checking catalog paths against disk. <strong>Repair</strong> is manual — export/import or restore from backup.</p>
+<h3 id="idempotent-open">Idempotent open</h3>
+<p><code>RainDbFileDatabase.Open</code> materializes an empty database when <code>catalog.json</code> is absent; otherwise it hydrates tables and batches. Corrupt or unsupported format versions raise <code>InvalidDataException</code> or <code>NotSupportedException</code>.</p>
+<h2 id="import-export-and-snapshots">14.9 Import, export, and snapshots</h2>
+<p>A <strong>snapshot</strong> freezes database state at a point in time — for backup, migration, reproducible tests, or cloning.</p>
+<h3 id="snapshot-strategies">Snapshot strategies</h3>
+<table class="table">
+<thead>
+<tr>
+<th>Strategy</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>File copy</strong></td>
+<td>Duplicate the database directory while the engine is quiesced</td>
+</tr>
+<tr>
+<td><strong>Export API</strong></td>
+<td>Write a fresh consistent catalog plus data tree</td>
+</tr>
+<tr>
+<td><strong>Volume snapshot</strong></td>
+<td>Filesystem or cloud block snapshot (crash-consistent or coordinated)</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Import</strong> inverts export: read metadata, recreate tables, load segments. Imported tables may stay read-only or reconnect to live append hooks.</p>
+<p>RainDB exposes <code>ExportCatalog</code> and <code>ImportCatalog</code> for snapshot workflows; import does not require a running engine instance.</p>
+<hr />
+<h1 id="part-ii-raindb">Part II — RainDB</h1>
+<p>An embedded OLAP engine is only useful if data survives process restarts. RainDB's persistence MVP stores <strong>catalog metadata as JSON</strong> and <strong>columnar batches as self-describing binary files</strong>, wiring append hooks into <code>MemoryTable</code> so in-memory tables and on-disk segments stay aligned during normal operation.</p>
+<h2 id="design-goals">14.10 Design goals</h2>
+<p>RainDB persistence today optimizes for:</p>
+<ol>
+<li><strong>Simplicity.</strong> One JSON catalog plus numbered batch files per table. No custom page cache yet.</li>
+<li><strong>Round-trip fidelity.</strong> Every supported <code>IColumnChunk</code> kind encodes and decodes without loss (null bitmaps, UTF-8 layouts).</li>
+<li><strong>Transparent append.</strong> <code>MemoryTable.AppendBatch</code> triggers <code>IRainDbBatchPersistence.OnBatchAppended</code> when wired.</li>
+<li><strong>Hydration without rewrite.</strong> Loading from disk uses <code>AppendHydratedBatch</code> so reopening does not re-persist existing segments.</li>
+</ol>
+<p>Non-goals in the MVP:</p>
+<ul>
+<li>Memory-mapped segments (Chapter 16; Phase C1)</li>
+<li>Write-ahead logging (Phase F)</li>
+<li>Concurrent writers</li>
+<li>Incremental catalog updates per column (whole-catalog rewrite on <code>FlushCatalog</code>)</li>
+</ul>
+<h2 id="on-disk-directory-layout">14.11 On-disk directory layout</h2>
+<p>A RainDB database root looks like this:</p>
+<pre><code class="language-text">database-root/
+catalog.json
+tables/
+  {tableId-guid-N}/
+    000000.batch
+    000001.batch
+    000002.batch
+    ...
+</code></pre>
+<p>Constants on <code>RainDbFileDatabase</code>:</p>
+<pre><code class="language-csharp">// src/RainDB.Core/Persistence/RainDbFileDatabase.cs
+public const string CatalogFileName = &quot;catalog.json&quot;;
+public const string TablesDirectoryName = &quot;tables&quot;;
+</code></pre>
+<table class="table">
+<thead>
+<tr>
+<th>Path</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>catalog.json</code></td>
+<td>Table names, stable <code>TableId</code> GUIDs, column schemas</td>
+</tr>
+<tr>
+<td><code>tables/{id}/</code></td>
+<td>All batch segments for one table, named by zero-based append index</td>
+</tr>
+<tr>
+<td><code>*.batch</code></td>
+<td>Binary columnar batch (format v1, magic <code>RNBATCH1</code>)</td>
+</tr>
+<tr>
+<td><code>*.tmp</code></td>
+<td>Atomic write staging files (catalog and batches)</td>
+</tr>
+</tbody>
+</table>
+<p><code>TableId</code> is a 128-bit GUID stored without dashes in JSON (<code>&quot;N&quot;</code> format) and as the directory name under <code>tables/</code>.</p>
+<h2 id="opening-a-persistent-database">14.12 Opening a persistent database</h2>
+<h3 id="raindbfiledatabase.open">14.12.1 RainDbFileDatabase.Open</h3>
+<pre><code class="language-csharp">public static RainDbFileDatabase Open(string rootDirectory)
+{
+    ArgumentException.ThrowIfNullOrWhiteSpace(rootDirectory);
+    var root = Path.GetFullPath(rootDirectory);
+    Directory.CreateDirectory(root);
+    var catalog = new InMemoryCatalog();
+    var db = new RainDbFileDatabase(root, catalog);
+    db.HydrateFromDiskIfPresent();
+    return db;
+}
+</code></pre>
+<p>Steps:</p>
+<ol>
+<li>Normalize path to full path (stable regardless of working directory)</li>
+<li>Create root directory if missing (fresh database)</li>
+<li>Construct empty <code>InMemoryCatalog</code></li>
+<li>If <code>catalog.json</code> exists, deserialize and load all tables + batches</li>
+</ol>
+<h3 id="raindbengine.openpersistent">14.12.2 RainDbEngine.OpenPersistent</h3>
+<p>The driver wraps file database + default engine collaborators:</p>
+<pre><code class="language-csharp">// src/RainDB.Driver/RainDbEngine.cs
+public static RainDbEngine OpenPersistent(string directoryPath)
+{
+    var fileDb = RainDbFileDatabase.Open(directoryPath);
+    return CreateDefault(fileDb.Catalog, fileDb);
+}
+</code></pre>
+<p><code>RainDbEngine.FileDatabase</code> holds a reference to the <code>RainDbFileDatabase</code> instance so it is not collected while the engine runs. Queries use <code>fileDb.Catalog</code> — the same catalog object mutated by hydration and new table registration.</p>
+<h3 id="hydratefromdiskifpresent">14.12.3 HydrateFromDiskIfPresent</h3>
+<pre><code class="language-csharp">private void HydrateFromDiskIfPresent()
+{
+    var catalogPath = Path.Combine(RootDirectory, CatalogFileName);
+    if (!File.Exists(catalogPath))
+        return;
+    lock (_ioLock)
+    {
+        var json = File.ReadAllText(catalogPath);
+        var doc = JsonSerializer.Deserialize&lt;RainDbCatalogDocument&gt;(json, JsonOptions)
+            ?? throw new InvalidDataException(&quot;catalog.json could not be deserialized.&quot;);
+        if (doc.FormatVersion != 1)
+            throw new NotSupportedException($&quot;catalog formatVersion {doc.FormatVersion} is not supported.&quot;);
+        foreach (var t in doc.Tables ?? [])
+        {
+            var schema = ToTableSchema(t);
+            var id = TableId.From(Guid.ParseExact(t.Id, &quot;N&quot;));
+            var opts = new MemoryTableOptions(BatchPersistence: this);
+            var table = new MemoryTable(t.Name, schema, id, opts);
+            LoadBatchesIntoTable(RootDirectory, table);
+            Catalog.Register(table);
+        }
+    }
+}
+</code></pre>
+<p>Important behaviors:</p>
+<ul>
+<li><strong>Persistence hook is wired on hydrated tables.</strong> New appends after reopen will persist as <code>00000N.batch</code> where N is the next index.</li>
+<li><strong><code>TableId</code> is restored from catalog</strong>, not regenerated — batch directory paths remain stable.</li>
+<li><strong>IO lock</strong> serializes hydration with catalog flush and batch writes.</li>
+</ul>
+<h2 id="catalog.json-format">14.13 catalog.json format</h2>
+<h3 id="document-types">14.13.1 Document types</h3>
+<pre><code class="language-csharp">internal sealed class RainDbCatalogDocument
+{
+    public int FormatVersion { get; set; }
+    public List&lt;RainDbTableDocument&gt; Tables { get; set; } = new();
+}
+
+internal sealed class RainDbTableDocument
+{
+    public string Id { get; set; } = &quot;&quot;;
+    public string Name { get; set; } = &quot;&quot;;
+    public List&lt;RainDbColumnDocument&gt; Columns { get; set; } = new();
+}
+
+internal sealed class RainDbColumnDocument
+{
+    public string Name { get; set; } = &quot;&quot;;
+    public string Type { get; set; } = &quot;&quot;;
+}
+</code></pre>
+<h3 id="example-catalog.json">14.13.2 Example catalog.json</h3>
+<pre><code class="language-json">{
+  &quot;formatVersion&quot;: 1,
+  &quot;tables&quot;: [
+    {
+      &quot;id&quot;: &quot;a1b2c3d4e5f6789012345678abcdef01&quot;,
+      &quot;name&quot;: &quot;sales&quot;,
+      &quot;columns&quot;: [
+        { &quot;name&quot;: &quot;region&quot;, &quot;type&quot;: &quot;Utf8&quot; },
+        { &quot;name&quot;: &quot;amount&quot;, &quot;type&quot;: &quot;Float64&quot; }
+      ]
+    }
+  ]
+}
+</code></pre>
+<p>Serializer options:</p>
+<pre><code class="language-csharp">private static readonly JsonSerializerOptions JsonOptions = new()
+{
+    PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+    WriteIndented = true,
+    PropertyNameCaseInsensitive = true,
+    DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
+};
+</code></pre>
+<h3 id="schema-reconstruction">14.13.3 Schema reconstruction</h3>
+<pre><code class="language-csharp">private static TableSchema ToTableSchema(RainDbTableDocument t)
+{
+    var list = t.Columns ?? [];
+    if (list.Count == 0)
+        throw new InvalidDataException($&quot;Table '{t.Name}' has no columns in catalog.&quot;);
+    var cols = new ColumnDef[list.Count];
+    for (var i = 0; i &lt; list.Count; i++)
+    {
+        var c = list[i];
+        if (!Enum.TryParse&lt;RainDbType&gt;(c.Type, ignoreCase: false, out var rt))
+            throw new InvalidDataException($&quot;Unknown column type '{c.Type}' for column '{c.Name}'.&quot;);
+        cols[i] = new ColumnDef(c.Name, rt);
+    }
+    return new TableSchema(cols);
+}
+</code></pre>
+<p>Column type strings must match <code>RainDbType</code> enum names exactly (<code>Utf8</code>, <code>Int32</code>, <code>Float64</code>, …). Case-sensitive parse is intentional — corrupt catalogs fail loudly.</p>
+<h3 id="flushcatalog">14.13.4 FlushCatalog</h3>
+<pre><code class="language-csharp">public void FlushCatalog()
+{
+    lock (_ioLock)
+    {
+        var doc = BuildCatalogDocument(Catalog);
+        WriteCatalogAtomic(doc);
+    }
+}
+</code></pre>
+<p><code>BuildCatalogDocument</code> includes only <code>MemoryTable</code> entries (other <code>ITableSource</code> implementations are skipped). Tables are ordered by name (case-insensitive) for deterministic JSON.</p>
+<p>Atomic catalog write:</p>
+<pre><code class="language-csharp">private static void WriteCatalogAtomicToRoot(string root, RainDbCatalogDocument doc)
+{
+    var catalogPath = Path.Combine(root, CatalogFileName);
+    var tmp = catalogPath + &quot;.tmp&quot;;
+    var json = JsonSerializer.Serialize(doc, JsonOptions);
+    File.WriteAllText(tmp, json);
+    File.Move(tmp, catalogPath, overwrite: true);
+}
+</code></pre>
+<p>Write-temp-then-rename avoids readers seeing partial JSON. Phase C4 will formalize ordering between catalog and batch durability.</p>
+<h2 id="creating-persistent-tables">14.14 Creating persistent tables</h2>
+<pre><code class="language-csharp">public MemoryTable CreateMemoryTable(string name, TableSchema schema, TableId? id = null, bool strictVectorChunkRows = false)
+{
+    var opts = new MemoryTableOptions(strictVectorChunkRows, BatchPersistence: this);
+    var table = new MemoryTable(name, schema, id, opts);
+    Catalog.Register(table);
+    FlushCatalog();
+    return table;
+}
+</code></pre>
+<p>Flow:</p>
+<ol>
+<li>Construct <code>MemoryTable</code> with <code>BatchPersistence = this</code></li>
+<li>Register in catalog (in-memory)</li>
+<li>Write <code>catalog.json</code> immediately so the table exists on disk even before first batch</li>
+</ol>
+<p>Optional <code>TableId</code> parameter supports deterministic IDs in tests or migrations.</p>
+<h2 id="memorytable-append-hooks">14.15 MemoryTable append hooks</h2>
+<h3 id="appendcore">14.15.1 AppendCore</h3>
+<pre><code class="language-csharp">// src/RainDB.Core/Tables/MemoryTable.cs
+private void AppendCore(IColumnarBatch batch, bool notifyPersistence)
+{
+    ArgumentNullException.ThrowIfNull(batch);
+    if (!Schema.MatchesBatch(batch))
+        throw new ArgumentException(&quot;Batch does not match this table's schema.&quot;, nameof(batch));
+    VectorChunkLimits.ValidateRowCount(batch.RowCount, Options.StrictVectorChunkRows);
+    _batches.Add(batch);
+    if (notifyPersistence &amp;&amp; Options.BatchPersistence is { } persistence)
+    {
+        try
+        {
+            persistence.OnBatchAppended(Id, Name, _batches.Count - 1, batch);
+        }
+        catch
+        {
+            _batches.RemoveAt(_batches.Count - 1);
+            throw;
+        }
+    }
+}
+</code></pre>
+<p><strong>Rollback on persistence failure.</strong> If disk write throws, the in-memory batch is removed so memory and disk cannot diverge silently within the process.</p>
+<h3 id="append-vs-appendhydratedbatch">14.15.2 Append vs AppendHydratedBatch</h3>
+<table class="table">
+<thead>
+<tr>
+<th>Method</th>
+<th>Persists?</th>
+<th>Use case</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>AppendBatch</code></td>
+<td>Yes (if hook set)</td>
+<td>Normal inserts</td>
+</tr>
+<tr>
+<td><code>AppendHydratedBatch</code> (internal)</td>
+<td>No</td>
+<td>Loading from disk</td>
+</tr>
+</tbody>
+</table>
+<pre><code class="language-csharp">public void AppendBatch(IColumnarBatch batch) =&gt; AppendCore(batch, notifyPersistence: true);
+internal void AppendHydratedBatch(IColumnarBatch batch) =&gt; AppendCore(batch, notifyPersistence: false);
+</code></pre>
+<p>Hydration loads existing files without rewriting them.</p>
+<h3 id="iraindbbatchpersistence">14.15.3 IRainDbBatchPersistence</h3>
+<pre><code class="language-csharp">void IRainDbBatchPersistence.OnBatchAppended(TableId tableId, string tableName, int zeroBasedBatchIndex, IColumnarBatch batch)
+{
+    var path = GetBatchPath(tableId, zeroBasedBatchIndex);
+    lock (_ioLock)
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        WriteBatchFile(path, batch);
+    }
+}
+</code></pre>
+<p>Batch path pattern:</p>
+<pre><code class="language-csharp">private string GetBatchPath(TableId tableId, int zeroBasedBatchIndex) =&gt;
+Path.Combine(RootDirectory, TablesDirectoryName, tableId.ToString(), $&quot;{zeroBasedBatchIndex:D6}.batch&quot;);
+</code></pre>
+<p>Six-digit zero padding keeps lexical sort order aligned with append order.</p>
+<h3 id="atomic-batch-write">14.15.4 Atomic batch write</h3>
+<pre><code class="language-csharp">private static void WriteBatchFile(string path, IColumnarBatch batch)
+{
+    var tmp = path + &quot;.tmp&quot;;
+    using (var fs = File.Create(tmp))
+        RainDbBatchBinaryCodec.WriteBatch(fs, batch);
+    File.Move(tmp, path, overwrite: true);
+}
+</code></pre>
+<p>Same temp-rename pattern as catalog. A crash mid-write leaves either old batch or complete new batch, never a truncated final file (assuming atomic <code>File.Move</code> on the host FS).</p>
+<h2 id="raindbbatchbinarycodec-overview">14.16 RainDbBatchBinaryCodec overview</h2>
+<p><code>RainDbBatchBinaryCodec</code> in <code>src/RainDB.Core/Persistence/RainDbBatchBinaryCodec.cs</code> implements batch format <strong>version 1</strong>, little-endian throughout.</p>
+<p>Supported chunk kinds:</p>
+<table class="table">
+<thead>
+<tr>
+<th>Kind byte</th>
+<th>Chunk type</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>1</code></td>
+<td><code>FixedWidthColumnChunk</code></td>
+</tr>
+<tr>
+<td><code>2</code></td>
+<td><code>Utf8ColumnChunk</code> (Arrow-style offsets + blob)</td>
+</tr>
+<tr>
+<td><code>3</code></td>
+<td><code>Utf8LengthPrefixedColumnChunk</code></td>
+</tr>
+</tbody>
+</table>
+<h3 id="batch-header">14.16.1 Batch header</h3>
+<pre><code class="language-text">Offset  Size  Field
+------  ----  -----
+0       8     Magic &quot;RNBATCH1&quot;
+8       4     formatVersion (uint32 = 1)
+12      4     rowCount (int32)
+16      4     columnCount (int32)
+20      ...   column payloads (columnCount times)
+</code></pre>
+<p>Write path:</p>
+<pre><code class="language-csharp">public static void WriteBatch(Stream destination, IColumnarBatch batch)
+{
+    destination.Write(Magic);
+    WriteU32(destination, FormatVersion);
+    WriteI32(destination, batch.RowCount);
+    WriteI32(destination, batch.Columns.Count);
+    for (var i = 0; i &lt; batch.Columns.Count; i++)
+        WriteColumn(destination, batch.Columns[i], batch.RowCount);
+}
+</code></pre>
+<p>Decode validates magic, version, row/column counts, consumes all columns, and asserts no trailing bytes:</p>
+<pre><code class="language-csharp">if (o != data.Length)
+throw new InvalidDataException($&quot;Batch buffer has {data.Length - o} trailing byte(s) after column data.&quot;);
+</code></pre>
+<h3 id="column-payloads-by-kind">14.16.2 Column payloads by kind</h3>
+<p><strong>Kind 1 — fixed-width:</strong> <code>kind</code>, <code>physicalType</code>, <code>hasNulls</code>, <code>rowCount</code>, <code>valuesLength</code>, raw values (<code>rowCount * typeWidth</code>), optional null bitmap.</p>
+<p><strong>Kind 2 — UTF-8 Arrow:</strong> <code>kind</code>, <code>hasNulls</code>, <code>rowCount</code>, <code>offsetsLength</code> (must equal <code>rowCount + 1</code>), offset table, <code>blobLength</code>, UTF-8 blob, optional null bitmap.</p>
+<p><strong>Kind 3 — UTF-8 length-prefixed:</strong> <code>kind</code>, <code>hasNulls</code>, <code>rowCount</code>, <code>payloadLength</code>, concatenated <code>[int32 len][bytes]</code> payloads, optional null bitmap.</p>
+<p><code>WriteColumn</code> dispatches on chunk runtime type; <code>ReadColumn</code> validates row counts and offset lengths before constructing chunks. Null bitmaps are omitted when <code>hasNulls</code> is false; otherwise <code>ColumnTypeSizes.NullBitmapBytes(rowCount)</code> bytes are written.</p>
+<h3 id="encodebatch-helper">14.16.3 EncodeBatch helper</h3>
+<pre><code class="language-csharp">public static byte[] EncodeBatch(IColumnarBatch batch)
+{
+    using var ms = new MemoryStream();
+    WriteBatch(ms, batch);
+    return ms.ToArray();
+}
+</code></pre>
+<p>Tests and in-memory round-trips use <code>EncodeBatch</code> / <code>DecodeBatch</code> without touching the filesystem.</p>
+<h2 id="loading-batches-from-disk">14.17 Loading batches from disk</h2>
+<pre><code class="language-csharp">private static void LoadBatchesIntoTable(string root, MemoryTable table)
+{
+    var dir = Path.Combine(root, TablesDirectoryName, table.Id.ToString());
+    if (!Directory.Exists(dir))
+        return;
+    foreach (var file in Directory.GetFiles(dir, &quot;*.batch&quot;).OrderBy(f =&gt; f, StringComparer.Ordinal))
+    {
+        var bytes = File.ReadAllBytes(file);
+        var batch = RainDbBatchBinaryCodec.DecodeBatch(bytes);
+        table.AppendHydratedBatch(batch);
+    }
+}
+</code></pre>
+<p>Notes:</p>
+<ul>
+<li><strong>Full file read into RAM</strong> today (<code>File.ReadAllBytes</code>). Chapter 16 describes mmap replacement for fixed-width columns.</li>
+<li><strong>Lexical sort</strong> on file paths matches numeric batch order when names are zero-padded.</li>
+<li><strong>Missing batch directory</strong> is tolerated (empty table with schema from catalog).</li>
+</ul>
+<h2 id="export-and-import">14.18 Export and import</h2>
+<h3 id="exportcatalog">14.18.1 ExportCatalog</h3>
+<p>Creates a fresh on-disk snapshot from any <code>ICatalog</code>:</p>
+<pre><code class="language-csharp">public static void ExportCatalog(ICatalog catalog, string rootDirectory)
+{
+    var root = Path.GetFullPath(rootDirectory);
+    Directory.CreateDirectory(root);
+    var tablesRoot = Path.Combine(root, TablesDirectoryName);
+    if (Directory.Exists(tablesRoot))
+        Directory.Delete(tablesRoot, recursive: true);
+    Directory.CreateDirectory(tablesRoot);
+
+    var doc = new RainDbCatalogDocument { FormatVersion = 1 };
+    foreach (var name in catalog.TableNames.OrderBy(n =&gt; n, StringComparer.OrdinalIgnoreCase))
+    {
+        // ... build table entry, write all batches ...
+        for (var i = 0; i &lt; col.Batches.Count; i++)
+        {
+            var batchPath = Path.Combine(tableDir, $&quot;{i:D6}.batch&quot;);
+            WriteBatchFile(batchPath, col.Batches[i]);
+        }
+    }
+    WriteCatalogAtomicToRoot(root, doc);
+}
+</code></pre>
+<p>Export <strong>wipes</strong> existing <code>tables/</code> under the target root. Use for backup clones, CI fixtures, and &quot;serialize entire dataset&quot; tooling.</p>
+<h3 id="importcatalog">14.18.2 ImportCatalog</h3>
+<pre><code class="language-csharp">public static InMemoryCatalog ImportCatalog(string rootDirectory)
+{
+    // read catalog.json
+    // for each table: MemoryTable without persistence hook
+    // LoadBatchesIntoTable
+    // catalog.Register(table)
+    return catalog;
+}
+</code></pre>
+<p>Import returns an in-memory catalog <strong>without</strong> automatic persistence. Pair with <code>RainDbFileDatabase.Open</code> or manually wire <code>BatchPersistence</code> if you want continued durability.</p>
+<h2 id="end-to-end-persistence-test-pattern">14.19 End-to-end persistence test pattern</h2>
+<p>From <code>src/RainDB.Tests/RainDbPersistenceTests.cs</code>:</p>
+<pre><code class="language-csharp">[Fact]
+public async Task OpenPersistent_append_then_reopen_restores_batches()
+{
+    var root = Path.Combine(Path.GetTempPath(), &quot;raindb_persist_&quot; + Guid.NewGuid().ToString(&quot;N&quot;));
+    var engine = RainDbEngine.OpenPersistent(root);
+    var fileDb = engine.FileDatabase!;
+    var table = fileDb.CreateMemoryTable(&quot;sales&quot;, schema);
+    table.AppendBatch(new ColumnarBatch(2, chunks));
+
+    await using var r1 = await engine.ExecuteSqlAsync(&quot;SELECT COUNT(*) FROM sales&quot;);
+    // assert count == 2
+
+    var engine2 = RainDbEngine.OpenPersistent(root);
+    await using var r2 = await engine2.ExecuteSqlAsync(&quot;SELECT COUNT(*) FROM sales&quot;);
+    // assert count == 2 after reopen
+}
+</code></pre>
+<p>Codec unit test covers all three UTF-8/fixed chunk kinds independently of filesystem.</p>
+<h2 id="io-locking-model">14.20 IO locking model</h2>
+<p><code>RainDbFileDatabase</code> uses a single <code>_ioLock</code> for:</p>
+<ul>
+<li>Hydration</li>
+<li>Catalog flush</li>
+<li>Batch append writes</li>
+</ul>
+<p>Concurrent appends from multiple threads will serialize on this lock. Concurrent <strong>reads</strong> through <code>MemoryTable.Batches</code> during append are safe for RainDB's single-writer assumption but not a documented multi-writer contract.</p>
+<h2 id="memory-and-performance-characteristics">14.21 Memory and performance characteristics</h2>
+<table class="table">
+<thead>
+<tr>
+<th>Operation</th>
+<th>Cost today</th>
+<th>Future (Phase C)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Open / hydrate</td>
+<td>Read entire batch files into managed byte arrays</td>
+<td>mmap fixed-width columns</td>
+</tr>
+<tr>
+<td>Append</td>
+<td>Serialize batch to stream + rename</td>
+<td>Optional async IO queue</td>
+</tr>
+<tr>
+<td>Catalog update</td>
+<td>Rewrite full <code>catalog.json</code></td>
+<td>Incremental table metadata</td>
+</tr>
+<tr>
+<td>Query</td>
+<td>Scans in-memory chunks</td>
+<td>Scan mapped spans (zero-copy)</td>
+</tr>
+</tbody>
+</table>
+<p>For datasets larger than RAM, hydration-as-<code>ReadAllBytes</code> is the primary bottleneck. That is intentional MVP scope — mmap integration is designed but not yet wired into <code>LoadBatchesIntoTable</code>.</p>
+<h2 id="durability-semantics-mvp">14.22 Durability semantics (MVP)</h2>
+<p>What you can rely on today:</p>
+<ul>
+<li>Temp-file + rename for catalog and batches</li>
+<li>In-memory rollback if batch write fails after append</li>
+<li>Stable <code>TableId</code> and batch indices across reopen</li>
+</ul>
+<p>What is <strong>not</strong> guaranteed yet:</p>
+<ul>
+<li>Crash between batch write and catalog update (or vice versa) recovery rules</li>
+<li>fsync / flush policy documentation</li>
+<li>Detection of missing batch files referenced by catalog</li>
+</ul>
+<p>Phase C4 and Phase F address these explicitly in <code>docs/Development-Roadmap.md</code>.</p>
+<h2 id="relationship-to-column-file-format">14.23 Relationship to column file format</h2>
+<p><code>ColumnarFixedWidthFileFormat</code> (Chapter 16) is a <strong>per-column</strong> mmap-oriented layout with magic <code>RNBFCOL1</code>. Batch files (<code>RNBATCH1</code>) are <strong>whole-batch</strong> containers with multiple columns and UTF-8 encodings.</p>
+<p>Roadmap path:</p>
+<ol>
+<li>Keep batch format for mixed-type tables and UTF-8</li>
+<li>Optionally decompose fixed-width columns into sidecar <code>.col</code> files for mmap</li>
+<li>Teach hydration to construct <code>MappedFixedWidthColumnChunk</code> instead of copying bytes</li>
+</ol>
+<p>The codecs are complementary, not competing.</p>
+<h2 id="operational-recipes">14.24 Operational recipes</h2>
+<ul>
+<li><strong>Backup:</strong> <code>RainDbFileDatabase.ExportCatalog(engine.Catalog, path)</code> or copy the database root while idle</li>
+<li><strong>Clone in-memory → disk:</strong> <code>ExportCatalog</code> then <code>RainDbEngine.OpenPersistent</code></li>
+<li><strong>Inspect batch:</strong> <code>RainDbBatchBinaryCodec.DecodeBatch(File.ReadAllBytes(&quot;tables/{id}/000000.batch&quot;))</code></li>
+<li><strong>Fresh DB:</strong> <code>RainDbEngine.OpenPersistent(tempDir)</code> + <code>FileDatabase.CreateMemoryTable</code></li>
+</ul>
+<h2 id="errors-and-format-evolution">14.25 Errors and format evolution</h2>
+<table class="table">
+<thead>
+<tr>
+<th>Failure</th>
+<th>Exception</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Bad batch magic</td>
+<td><code>InvalidDataException</code></td>
+</tr>
+<tr>
+<td>Unsupported format version</td>
+<td><code>InvalidDataException</code> / <code>NotSupportedException</code></td>
+</tr>
+<tr>
+<td>Schema mismatch on append</td>
+<td><code>ArgumentException</code> from <code>MemoryTable</code></td>
+</tr>
+<tr>
+<td>Unknown column type in catalog</td>
+<td><code>InvalidDataException</code></td>
+</tr>
+<tr>
+<td>Export non-columnar table</td>
+<td><code>InvalidOperationException</code></td>
+</tr>
+</tbody>
+</table>
+<p>When changing on-disk formats: bump <code>formatVersion</code>, keep decode for prior version or ship a migration tool, add <code>RainDbPersistenceTests</code> round-trips, and assign new column kind bytes without reusing old IDs.</p>
+<h2 id="summary">14.26 Summary</h2>
+<p><strong>Part I</strong> covered storage engine layering, WAL and checkpoint theory, page vs log-structured organizations, industry columnar formats, catalog durability, crash recovery, and snapshot import/export concepts. <strong>Part II</strong> showed RainDB's directory-backed MVP: <code>catalog.json</code> describes tables; <code>tables/{TableId}/######.batch</code> stores append-ordered columnar segments; <code>RainDbFileDatabase</code> hydrates on open and wires <code>IRainDbBatchPersistence</code> into <code>MemoryTable</code> with atomic temp-rename writes. The next storage increment — mmap-backed fixed-width columns — builds on this foundation without replacing the catalog model (see Chapter 16).</p>
+</div>
+          <footer class="doc-footer">
+            <p>Generated by <strong>hoihky</strong> with <strong>MDWeb</strong> and with assistance from <strong>AI</strong></p>
+
+          </footer>
+        </article>
+
+        
+                <aside class="toc" aria-label="On this page">
+                  <p class="toc-title">On this page</p>
+                  <ul>
+                    
+                        <li class="toc-h1">
+                          <a href="#chapter-14-persistence">Chapter 14: Persistence</a>
+                        </li>
+                        
+                        <li class="toc-h1">
+                          <a href="#part-i-concepts">Part I — Concepts</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#141-storage-engine-architecture">14.1 Storage engine architecture</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#responsibilities">Responsibilities</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#read-path-vs-write-path">Read path vs write path</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#142-durability-and-the-acid-d">14.2 Durability and the ACID "D"</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#durability-levels-in-practice">Durability levels in practice</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#143-write-ahead-logging-wal">14.3 Write-ahead logging (WAL)</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#wal-record-flow">WAL record flow</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#why-log-before-data">Why log before data?</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#wal-segment-structure">WAL segment structure</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#raindb-status">RainDB status</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#144-checkpointing">14.4 Checkpointing</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#types">Types</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#checkpoint-frequency-tradeoffs">Checkpoint frequency tradeoffs</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#145-page-oriented-vs-log-structured-storage">14.5 Page-oriented vs log-structured storage</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#page-oriented-slotted-pages">Page-oriented (slotted pages)</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#log-structured-append-only">Log-structured (append-only)</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#raindbs-model">RainDB's model</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#146-columnar-file-formats-in-industry">14.6 Columnar file formats in industry</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#147-catalog-metadata-on-disk">14.7 Catalog metadata on disk</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#what-catalogs-store">What catalogs store</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#serialization-choices">Serialization choices</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#148-crash-recovery-basics">14.8 Crash recovery basics</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#recovery-phases-wal-based-systems">Recovery phases (WAL-based systems)</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#failure-modes-without-wal">Failure modes without WAL</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#idempotent-open">Idempotent open</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#149-import-export-and-snapshots">14.9 Import, export, and snapshots</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#snapshot-strategies">Snapshot strategies</a>
+                        </li>
+                        
+                        <li class="toc-h1">
+                          <a href="#part-ii-raindb">Part II — RainDB</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1410-design-goals">14.10 Design goals</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1411-on-disk-directory-layout">14.11 On-disk directory layout</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1412-opening-a-persistent-database">14.12 Opening a persistent database</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#14121-raindbfiledatabaseopen">14.12.1 RainDbFileDatabase.Open</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#14122-raindbengineopenpersistent">14.12.2 RainDbEngine.OpenPersistent</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#14123-hydratefromdiskifpresent">14.12.3 HydrateFromDiskIfPresent</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1413-catalogjson-format">14.13 catalog.json format</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#14131-document-types">14.13.1 Document types</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#14132-example-catalogjson">14.13.2 Example catalog.json</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#14133-schema-reconstruction">14.13.3 Schema reconstruction</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#14134-flushcatalog">14.13.4 FlushCatalog</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1414-creating-persistent-tables">14.14 Creating persistent tables</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1415-memorytable-append-hooks">14.15 MemoryTable append hooks</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#14151-appendcore">14.15.1 AppendCore</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#14152-append-vs-appendhydratedbatch">14.15.2 Append vs AppendHydratedBatch</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#14153-iraindbbatchpersistence">14.15.3 IRainDbBatchPersistence</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#14154-atomic-batch-write">14.15.4 Atomic batch write</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1416-raindbbatchbinarycodec-overview">14.16 RainDbBatchBinaryCodec overview</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#14161-batch-header">14.16.1 Batch header</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#14162-column-payloads-by-kind">14.16.2 Column payloads by kind</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#14163-encodebatch-helper">14.16.3 EncodeBatch helper</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1417-loading-batches-from-disk">14.17 Loading batches from disk</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1418-export-and-import">14.18 Export and import</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#14181-exportcatalog">14.18.1 ExportCatalog</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#14182-importcatalog">14.18.2 ImportCatalog</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1419-end-to-end-persistence-test-pattern">14.19 End-to-end persistence test pattern</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1420-io-locking-model">14.20 IO locking model</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1421-memory-and-performance-characteristics">14.21 Memory and performance characteristics</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1422-durability-semantics-mvp">14.22 Durability semantics (MVP)</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1423-relationship-to-column-file-format">14.23 Relationship to column file format</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1424-operational-recipes">14.24 Operational recipes</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1425-errors-and-format-evolution">14.25 Errors and format evolution</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1426-summary">14.26 Summary</a>
+                        </li>
+                        
+                  </ul>
+                </aside>
+                
+      </main>
+    </div>
+  </div>
+  <script src="assets/vendor/mermaid.min.js"></script>
+  <script src="assets/vendor/highlight.min.js"></script>
+  <script src="assets/js/site.js"></script>
+</body>
+</html>

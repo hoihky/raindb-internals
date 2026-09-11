@@ -1,0 +1,1859 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Chapter 1: OLAP Fundamentals · Building an OLAP Database Engine from Scratch with RainDB</title>
+  <meta name="description" content="Generated documentation site">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="assets/css/site.css">
+  <link rel="stylesheet" href="assets/vendor/atom-one-dark.min.css">
+</head>
+<body>
+  <div class="site">
+    <header class="topbar">
+      <button class="sidebar-toggle" id="sidebar-toggle" aria-label="Toggle navigation">☰</button>
+      <a href="index.html" class="brand">Building an OLAP Database Engine from Scratch with RainDB</a>
+      <div class="search-wrap">
+        <input type="search" id="search" placeholder="Search docs…" autocomplete="off">
+      </div>
+    </header>
+
+    <div class="layout">
+      <aside class="sidebar" id="sidebar">
+        <nav class="nav" aria-label="Documentation">
+          <ul class="nav-list">
+            
+                        <li class="nav-item depth-0">
+                          
+                            <a href="index.html" class="nav-link">Building an OLAP Database Engine from Scratch</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0 is-active">
+                          
+                            <a href="01-olap-fundamentals.html" class="nav-link">Chapter 1: OLAP Fundamentals</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="02-architecture-and-modules.html" class="nav-link">Chapter 2: Architecture and Modules</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="03-columnar-storage-model.html" class="nav-link">Chapter 3: Columnar Storage Model</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="04-chunk-data-structures.html" class="nav-link">Chapter 4: Chunk Data Structures</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="05-catalog-and-tables.html" class="nav-link">Chapter 5: Catalog and Tables</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="06-buffer-management.html" class="nav-link">Chapter 6: Buffer Management</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="07-execution-pipeline.html" class="nav-link">Chapter 7: Execution Pipeline</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="08-vectorized-scan-filter-project.html" class="nav-link">Chapter 8: Vectorized Scan, Filter, and Project</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="09-global-aggregates.html" class="nav-link">Chapter 9: Global Aggregates</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="10-hash-aggregation.html" class="nav-link">Chapter 10: Hash Aggregation</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="11-joins.html" class="nav-link">Chapter 11: Joins</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="12-sort-and-limit.html" class="nav-link">Chapter 12: Sort and Limit</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="13-sql-compilation.html" class="nav-link">Chapter 13: SQL Compilation</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="14-persistence.html" class="nav-link">Chapter 14: Persistence</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="15-future-extensions.html" class="nav-link">Chapter 15: Future Extensions</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="16-mmap-io.html" class="nav-link">Chapter 16: mmap I/O</a>
+                            
+                        </li>
+                        
+          </ul>
+        </nav>
+      </aside>
+
+      <main class="content">
+        <article class="doc">
+          <header class="doc-header">
+            <h1>Chapter 1: OLAP Fundamentals</h1>
+          </header>
+          <div class="doc-body"><h1 id="chapter-1-olap-fundamentals">Chapter 1: OLAP Fundamentals</h1>
+<p>This chapter lays the conceptual groundwork for everything that follows in RainDB. We start with workload taxonomy, dimensional modeling, and how analytical database design evolved. Once those ideas are in place, we connect them to RainDB's columnar batches, vectorized execution, and embedded engine architecture.</p>
+<h1 id="part-i-concepts-and-theory">Part I: Concepts and Theory</h1>
+<h2 id="two-families-of-database-workloads">1.1 Two families of database workloads</h2>
+<p>Talk to any DBA long enough and you'll hear the same split: some databases are built for <strong>transactions</strong>, others for <strong>analysis</strong>. The labels are OLTP and OLAP, but the real divide is access pattern — and that pattern drives every downstream decision about layout, concurrency, and execution.</p>
+<h3 id="oltp-online-transaction-processing">OLTP: Online Transaction Processing</h3>
+<p>OLTP systems live and die on <strong>short, precise operations</strong>: fetch one order, debit one account, insert one row. Latency is measured in milliseconds; consistency is non-negotiable.</p>
+<table class="table">
+<thead>
+<tr>
+<th>Characteristic</th>
+<th>Typical OLTP behavior</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Access pattern</td>
+<td>Point lookups, small range scans, inserts/updates/deletes</td>
+</tr>
+<tr>
+<td>Query shape</td>
+<td><code>SELECT * FROM orders WHERE id = ?</code></td>
+</tr>
+<tr>
+<td>Latency target</td>
+<td>Milliseconds per request</td>
+</tr>
+<tr>
+<td>Concurrency</td>
+<td>Many short concurrent transactions</td>
+</tr>
+<tr>
+<td>Storage layout</td>
+<td><strong>Row-oriented</strong> — all columns of one row live adjacent in memory or on disk</td>
+</tr>
+<tr>
+<td>Indexing</td>
+<td>B-trees, hash indexes on primary/foreign keys</td>
+</tr>
+</tbody>
+</table>
+<p>Row stores fit because a single-row read is one contiguous fetch. Updating a customer's address rewrites that row's columns together. ACID semantics and row-level locking align naturally with the layout.</p>
+<h3 id="olap-online-analytical-processing">OLAP: Online Analytical Processing</h3>
+<p>OLAP systems chew through <strong>large slices of data</strong> to produce aggregates, joins across fact and dimension tables, and windowed statistics. Throughput and scan efficiency matter more than single-row latency.</p>
+<table class="table">
+<thead>
+<tr>
+<th>Characteristic</th>
+<th>Typical OLAP behavior</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Access pattern</td>
+<td>Full or partial table scans, group-by, sort, join</td>
+</tr>
+<tr>
+<td>Query shape</td>
+<td><code>SELECT region, SUM(revenue) FROM sales GROUP BY region</code></td>
+</tr>
+<tr>
+<td>Latency target</td>
+<td>Seconds to minutes for large datasets (batch acceptable)</td>
+</tr>
+<tr>
+<td>Concurrency</td>
+<td>Fewer, heavier queries; often read-mostly</td>
+</tr>
+<tr>
+<td>Storage layout</td>
+<td><strong>Column-oriented</strong> — values of one column are stored contiguously</td>
+</tr>
+<tr>
+<td>Indexing</td>
+<td>Zone maps, min/max metadata, sort orders; less emphasis on point indexes</td>
+</tr>
+</tbody>
+</table>
+<p>Column stores win when queries need only a few columns. A revenue rollup touches <code>amount</code> and <code>region</code>; it never reads <code>customer_notes</code> or <code>ship_date</code>. Projecting only the columns you need shrinks I/O and memory bandwidth roughly in proportion to how selective the projection is.</p>
+<h3 id="the-fundamental-tension">The fundamental tension</h3>
+<p>No layout optimizes both workloads. Row stores keep per-row update cost low; column stores keep per-column scan cost low. HTAP hybrids exist, but complexity rises fast. RainDB commits to OLAP — deliberately, without apology.</p>
+<hr />
+<h2 id="dimensional-modeling-star-and-snowflake-schemas">1.2 Dimensional modeling: star and snowflake schemas</h2>
+<p>Before you can reason about execution, you need a picture of how analytical data is <strong>organized</strong>. Data warehousing settled on the <strong>dimensional model</strong> — Ralph Kimball's contribution in the 1990s — where measurable events (facts) sit at the center and descriptive context (dimensions) radiate outward.</p>
+<h3 id="fact-tables">Fact tables</h3>
+<p>A <strong>fact table</strong> records business events at a grain the analyst chooses. Each row is one atomic measurement: a sale, a click, a shipment, a sensor reading.</p>
+<table class="table">
+<thead>
+<tr>
+<th>Property</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Grain</td>
+<td>The finest level of detail (e.g., one line item per row)</td>
+</tr>
+<tr>
+<td>Measures</td>
+<td>Numeric columns aggregated in queries (<code>quantity</code>, <code>revenue</code>, <code>margin</code>)</td>
+</tr>
+<tr>
+<td>Foreign keys</td>
+<td>References to dimension tables (<code>product_id</code>, <code>date_id</code>, <code>store_id</code>)</td>
+</tr>
+<tr>
+<td>Row volume</td>
+<td>Typically the largest table in the warehouse</td>
+</tr>
+</tbody>
+</table>
+<p>Example fact table <code>order_lines</code>:</p>
+<table class="table">
+<thead>
+<tr>
+<th>order_line_id</th>
+<th>product_id</th>
+<th>date_id</th>
+<th>store_id</th>
+<th>quantity</th>
+<th>line_total</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1001</td>
+<td>42</td>
+<td>20250911</td>
+<td>7</td>
+<td>3</td>
+<td>89.97</td>
+</tr>
+<tr>
+<td>1002</td>
+<td>17</td>
+<td>20250911</td>
+<td>3</td>
+<td>1</td>
+<td>24.50</td>
+</tr>
+</tbody>
+</table>
+<h3 id="dimension-tables">Dimension tables</h3>
+<p><strong>Dimension tables</strong> supply the &quot;who, what, where, when&quot; around facts. They tend to be wider, shorter, and slower-changing than fact tables.</p>
+<table class="table">
+<thead>
+<tr>
+<th>Dimension</th>
+<th>Typical columns</th>
+<th>Role</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>dim_product</code></td>
+<td>name, category, brand, unit_cost</td>
+<td>Product attributes for slicing</td>
+</tr>
+<tr>
+<td><code>dim_date</code></td>
+<td>year, quarter, month, day_of_week</td>
+<td>Time hierarchies</td>
+</tr>
+<tr>
+<td><code>dim_store</code></td>
+<td>region, city, format</td>
+<td>Geographic rollups</td>
+</tr>
+</tbody>
+</table>
+<p>Dimensions join to facts on surrogate keys. &quot;Revenue by region and quarter&quot; joins <code>order_lines</code> to <code>dim_store</code> and <code>dim_date</code>, then sums <code>line_total</code>.</p>
+<h3 id="star-schema">Star schema</h3>
+<p>In a <strong>star schema</strong>, the fact table sits at the center and dimensions branch out without further normalization:</p>
+<pre><code>                    dim_date
+                   |
+                   |
+dim_product ---- order_lines ---- dim_store
+                   |
+                   |
+              dim_customer
+</code></pre>
+<p><strong>Advantages:</strong></p>
+<ul>
+<li>Simple mental model for analysts</li>
+<li>Fewer joins than snowflake (better for wide scans)</li>
+<li>Denormalized dimensions reduce join fan-out</li>
+</ul>
+<p><strong>Disadvantages:</strong></p>
+<ul>
+<li>Redundant dimension attributes (e.g., <code>category</code> repeated per product row if not normalized)</li>
+<li>Larger dimension tables</li>
+</ul>
+<h3 id="snowflake-schema">Snowflake schema</h3>
+<p>A <strong>snowflake schema</strong> normalizes dimensions into sub-dimensions:</p>
+<pre><code>dim_product → dim_category → dim_department
+</code></pre>
+<p><code>dim_product</code> holds <code>category_id</code>; <code>dim_category</code> holds <code>category_name</code> and <code>department_id</code>; <code>dim_department</code> holds <code>department_name</code>.</p>
+<table class="table">
+<thead>
+<tr>
+<th>Aspect</th>
+<th>Star</th>
+<th>Snowflake</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Join count</td>
+<td>Fewer</td>
+<td>More</td>
+</tr>
+<tr>
+<td>Storage</td>
+<td>More redundancy</td>
+<td>Less redundancy</td>
+</tr>
+<tr>
+<td>Query complexity</td>
+<td>Lower</td>
+<td>Higher</td>
+</tr>
+<tr>
+<td>ETL complexity</td>
+<td>Simpler dimension loads</td>
+<td>More tables to maintain</td>
+</tr>
+</tbody>
+</table>
+<p>Modern columnar engines join efficiently, so snowflake normalization hurts less than it did on 1990s row stores. Star schemas remain common in embedded and mid-tier analytics because they keep join depth shallow.</p>
+<h3 id="relational-algebra-view">Relational algebra view</h3>
+<p>A typical OLAP query over a star schema:</p>
+<pre><code>π_{region, SUM(line_total)} (
+  γ_{region; SUM(line_total)} (
+    σ_{date.year = 2025} (
+      order_lines ⋈_{store_id} dim_store
+                 ⋈_{date_id} dim_date
+    )
+  )
+)
+</code></pre>
+<p>Where:</p>
+<ul>
+<li><code>σ</code> = selection (filter)</li>
+<li><code>⋈</code> = join</li>
+<li><code>γ</code> = group-by aggregate</li>
+<li><code>π</code> = projection</li>
+</ul>
+<p>Each algebraic operator maps to a physical operator in the query plan (scan, hash join, hash aggregate). Knowing the algebra makes EXPLAIN output readable.</p>
+<hr />
+<h2 id="etl-path-versus-query-path">1.3 ETL path versus query path</h2>
+<p>Analytical systems run two lifecycles with different performance goals. Confusing them leads to bad design decisions.</p>
+<h3 id="etl-extract-transform-load">ETL: Extract, Transform, Load</h3>
+<p><strong>ETL</strong> (or ELT — load first, transform in-warehouse) is the <strong>write path</strong>:</p>
+<pre><code>Source systems → staging → cleansing → dimensional model → columnar storage
+</code></pre>
+<table class="table">
+<thead>
+<tr>
+<th>ETL concern</th>
+<th>Implication</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Throughput</td>
+<td>Batch millions of rows per second</td>
+</tr>
+<tr>
+<td>Idempotency</td>
+<td>Re-running a pipeline must not duplicate facts</td>
+</tr>
+<tr>
+<td>Schema drift</td>
+<td>New columns appear; old batches may lack them</td>
+</tr>
+<tr>
+<td>Compression</td>
+<td>Dictionary-encode low-cardinality strings during load</td>
+</tr>
+<tr>
+<td>Sort order</td>
+<td>Clustering by <code>date_id</code> enables zone-map pruning</td>
+</tr>
+</tbody>
+</table>
+<p>ETL favors <strong>append-heavy, batch-oriented</strong> writes. Row-at-a-time inserts are avoided; loaders produce 64K–1M row batches aligned with execution vector sizes.</p>
+<h3 id="query-path">Query path</h3>
+<p>The <strong>query path</strong> is read-mostly:</p>
+<pre><code>SQL / API → parse → logical plan → physical plan → vectorized execution → result
+</code></pre>
+<table class="table">
+<thead>
+<tr>
+<th>Query concern</th>
+<th>Implication</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Latency</td>
+<td>Minimize bytes read and CPU per row</td>
+</tr>
+<tr>
+<td>Parallelism</td>
+<td>Partition work into independent morsels</td>
+</tr>
+<tr>
+<td>Memory</td>
+<td>Stream batches; spill hash tables if needed</td>
+</tr>
+<tr>
+<td>Correctness</td>
+<td>SQL three-valued logic for NULLs</td>
+</tr>
+</tbody>
+</table>
+<h3 id="why-the-split-matters">Why the split matters</h3>
+<p>Tuning ETL and queries at the same time creates friction:</p>
+<ul>
+<li>ETL wants sorted, compressed, wide batches</li>
+<li>Ad-hoc queries want flexible projection and late-binding filters</li>
+<li>Individual fact updates are rare in OLAP; <strong>append-only</strong> storage simplifies both paths</li>
+</ul>
+<p>RainDB's <code>MemoryTable</code> append model reflects this: batches are immutable after append; scans walk them in insertion order.</p>
+<pre><code class="language-text">ETL path (pseudocode):
+  for each source_batch in extractor:
+    transformed = transform(source_batch)
+    columnar_batch = to_columnar(transformed)
+    table.append_batch(columnar_batch)
+
+Query path (pseudocode):
+  plan = compile(sql)
+  for each batch in table.batches:
+    partial = execute_operator(plan, batch)
+    merge(partials)
+  return final_result
+</code></pre>
+<hr />
+<h2 id="amdahls-law-and-parallel-scan">1.4 Amdahl's law and parallel scan</h2>
+<p>Analytical engines split tables into <strong>morsels</strong> — batch-sized chunks of work that workers can process independently. <strong>Amdahl's law</strong> tells you how much speedup parallelism can actually deliver:</p>
+<pre><code>Speedup = 1 / (S + P/N)
+
+S = serial fraction (cannot parallelize)
+P = parallel fraction (1 - S)
+N = number of workers
+</code></pre>
+<h3 id="applied-to-table-scan">Applied to table scan</h3>
+<p>Consider scanning 100 batches on 10 cores:</p>
+<table class="table">
+<thead>
+<tr>
+<th>Component</th>
+<th>Serial?</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Plan compilation</td>
+<td>Yes</td>
+<td>Happens once before scan</td>
+</tr>
+<tr>
+<td>Per-batch scan</td>
+<td>No</td>
+<td>Each batch is independent</td>
+</tr>
+<tr>
+<td>Global aggregate merge</td>
+<td>Partially</td>
+<td>Combining 10 partial sums is cheap</td>
+</tr>
+<tr>
+<td>Result ordering</td>
+<td>Maybe</td>
+<td><code>ORDER BY</code> may require merge sort</td>
+</tr>
+</tbody>
+</table>
+<p>If 95% of scan time parallelizes across batches and 5% is serial setup, maximum speedup at N=∞ is <code>1/0.05 = 20×</code> — no matter how many cores you add.</p>
+<h3 id="practical-implications">Practical implications</h3>
+<ol>
+<li><strong>Batch count must exceed core count</strong> — 4 batches on 32 cores leaves 28 cores idle.</li>
+<li><strong>Batch size trades parallelism for overhead</strong> — tiny batches inflate the serial fraction (dispatch, synchronization).</li>
+<li><strong>Associative aggregates parallelize cleanly</strong> — <code>SUM</code>, <code>COUNT</code>, <code>MIN</code>, <code>MAX</code> combine partials in any order.</li>
+<li><strong>Non-associative operations need care</strong> — floating-point <code>SUM</code> order affects rounding; <code>AVG</code> requires <code>SUM</code> + <code>COUNT</code> partials.</li>
+</ol>
+<pre><code class="language-text">Parallel scan pseudocode:
+partials = array[N_batches]
+parallel_for i in 0..N_batches-1:
+  partials[i] = scan_batch(batches[i], predicate, projection)
+return reduce(partials, combine_fn)
+</code></pre>
+<p>RainDB's <code>VectorizedScanEngine</code> schedules batch indices across threads and merges partial aggregate results deterministically.</p>
+<hr />
+<h2 id="history-of-column-stores">1.5 History of column stores</h2>
+<p>Column-oriented storage did not appear overnight. Tracing its development clarifies why modern engines make the choices they do.</p>
+<h3 id="early-motivations-1980s1990s">Early motivations (1980s–1990s)</h3>
+<p>Systems like <strong>Tandem</strong> and <strong>Sybase IQ</strong> showed that storing columns separately on disk improved scan performance for decision-support queries. The bottleneck was <strong>I/O bandwidth</strong>, not CPU cycles.</p>
+<h3 id="monetdb-1990s2000s">MonetDB (1990s–2000s)</h3>
+<p><strong>MonetDB</strong> (CWI, Netherlands) introduced the <strong>BAT</strong> (Binary Association Table) model:</p>
+<ul>
+<li>Each column is a <code>(oid, value)</code> pair or a dense array</li>
+<li>Operators consume and produce columns, not rows</li>
+<li>Query plans are algebra trees over column vectors</li>
+</ul>
+<p>The <strong>X100</strong> research project added <strong>vectorized execution</strong> — processing thousands of values per operator call instead of one row at a time. That pattern became the blueprint for modern OLAP.</p>
+<h3 id="c-store-vertica-2005">C-Store / Vertica (2005)</h3>
+<p><strong>C-Store</strong> (Stonebraker et al., 2005) split storage into read-optimized and write-optimized stores:</p>
+<table class="table">
+<thead>
+<tr>
+<th>Store</th>
+<th>Layout</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Read-optimized</td>
+<td>Columnar, compressed, sorted</td>
+<td>Analytical queries</td>
+</tr>
+<tr>
+<td>Write-optimized</td>
+<td>Row-oriented</td>
+<td>Ingest and updates</td>
+</tr>
+<tr>
+<td>Tuple mover</td>
+<td>Background merge</td>
+<td>Reconcile stores</td>
+</tr>
+</tbody>
+</table>
+<p>C-Store became commercial <strong>Vertica</strong>. The dual-store pattern influenced <strong>Snowflake</strong> (micro-partitions) and <strong>ClickHouse</strong> (merges).</p>
+<h3 id="apache-parquet-orc-arrow-2010s">Apache Parquet, ORC, Arrow (2010s)</h3>
+<p>Open columnar formats standardized on-disk and in-memory layouts:</p>
+<ul>
+<li><strong>Parquet</strong> — nested columnar with page-level statistics (zone maps)</li>
+<li><strong>ORC</strong> — Hive-optimized with stripe-level indexes</li>
+<li><strong>Apache Arrow</strong> — in-memory columnar interchange (offset strings, validity bitmaps)</li>
+</ul>
+<p>RainDB's <code>Utf8ColumnChunk</code> offset layout follows Arrow's string representation philosophy.</p>
+<h3 id="timeline-summary">Timeline summary</h3>
+<table class="table">
+<thead>
+<tr>
+<th>Era</th>
+<th>System</th>
+<th>Contribution</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1990s</td>
+<td>MonetDB</td>
+<td>Column BAT algebra</td>
+</tr>
+<tr>
+<td>2000s</td>
+<td>Vertica (C-Store)</td>
+<td>Dual-store, compression</td>
+</tr>
+<tr>
+<td>2010s</td>
+<td>DuckDB, ClickHouse</td>
+<td>Embedded / real-time OLAP</td>
+</tr>
+<tr>
+<td>2020s</td>
+<td>RainDB, DataFusion</td>
+<td>In-process columnar for application runtimes</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="volcano-iterator-model-versus-vectorization">1.6 Volcano iterator model versus vectorization</h2>
+<p>How a query engine executes operators is a foundational design choice — one that separates row-store OLTP from column-store OLAP.</p>
+<h3 id="the-volcano-iterator-model">The Volcano (iterator) model</h3>
+<p>Graefe's <strong>Volcano model</strong> (1993), also called the <strong>iterator</strong> or <strong>tuple-at-a-time</strong> model, chains operators through a uniform pull interface:</p>
+<pre><code class="language-text">interface Operator:
+  open()
+  next() → Row | EOF
+  close()
+
+// Scan
+open: position = 0
+next: if position &lt; n: return rows[position++]; else EOF
+
+// Filter
+open: child.open()
+next: while row = child.next():
+         if predicate(row): return row
+       return EOF
+</code></pre>
+<p><strong>Advantages:</strong></p>
+<ul>
+<li>Simple composition — every operator exposes <code>Next()</code></li>
+<li>Low memory — only one row resident</li>
+<li>Easy nested-loop join</li>
+<li>Natural for pipelining (producer pushes to consumer)</li>
+</ul>
+<p><strong>Disadvantages for analytics:</strong></p>
+<ul>
+<li>Virtual dispatch per row (billions of calls)</li>
+<li>Poor CPU cache utilization — jumping between columns and rows</li>
+<li>Hard to apply SIMD — one value per loop iteration</li>
+<li>Function call overhead dominates when scans are billions of rows</li>
+</ul>
+<h3 id="the-vectorization-model">The vectorization model</h3>
+<p>Columnar engines use the <strong>vectorization model</strong> (batch model, morsel model):</p>
+<pre><code class="language-text">for each batch in table.batches:
+column_vectors = load_columns(batch, needed_indices)
+selection = evaluate_filters(column_vectors)   // dense index list or bitmask
+output = project_columns(column_vectors, selection)
+parent.consume(output)
+</code></pre>
+<p>One function invocation processes thousands of rows.</p>
+<p><strong>Advantages:</strong></p>
+<ul>
+<li>Sequential memory access per column</li>
+<li>SIMD-friendly inner loops</li>
+<li>Amortized dispatch and branch prediction</li>
+<li>Cache-conscious — one column fits in L2/L3 during a pass</li>
+</ul>
+<p><strong>Disadvantages:</strong></p>
+<ul>
+<li>Higher memory per operator (full batch resident)</li>
+<li>Complex handling of variable-width types</li>
+<li>Selection vectors add indirection for sparse filters</li>
+</ul>
+<h3 id="comparison-table">Comparison table</h3>
+<table class="table">
+<thead>
+<tr>
+<th>Aspect</th>
+<th>Volcano</th>
+<th>Vectorized</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Unit of work</td>
+<td>1 row</td>
+<td>1 batch (1K–1M rows)</td>
+</tr>
+<tr>
+<td>Dispatch cost</td>
+<td>Per row</td>
+<td>Per batch</td>
+</tr>
+<tr>
+<td>SIMD</td>
+<td>Difficult</td>
+<td>Natural</td>
+</tr>
+<tr>
+<td>Memory</td>
+<td>Minimal</td>
+<td>Batch-sized</td>
+</tr>
+<tr>
+<td>Pipelining</td>
+<td>Tight</td>
+<td>Between batches</td>
+</tr>
+<tr>
+<td>Representative systems</td>
+<td>PostgreSQL (row mode), SQLite</td>
+<td>MonetDB, DuckDB, RainDB</td>
+</tr>
+</tbody>
+</table>
+<h3 id="hybrid-models">Hybrid models</h3>
+<p>Modern systems blend approaches:</p>
+<ul>
+<li><strong>Vectorized scans</strong> with <strong>row-oriented fallbacks</strong> for complex expressions</li>
+<li><strong>Compiled plans</strong> (LLVM JIT) that fuse operators into tight loops</li>
+<li><strong>Morsel parallelism</strong> — vectorized within a batch, parallel across batches</li>
+</ul>
+<p>RainDB Phase 1 is predominantly vectorized for fixed-width predicates and aggregates, with scalar fallbacks for UTF-8 filters and null-heavy paths.</p>
+<hr />
+<h2 id="columnar-memory-layout-conceptual">1.7 Columnar memory layout (conceptual)</h2>
+<h3 id="row-store-layout">Row store layout</h3>
+<p>Imagine a table with three rows and three columns (<code>id</code>, <code>name</code>, <code>amount</code>):</p>
+<pre><code class="language-text">Row store (conceptual memory):
+
+  Row 0: [ id=1 | name=&quot;Ada&quot;  | amount=100.0 ]
+  Row 1: [ id=2 | name=&quot;Bob&quot;  | amount=200.0 ]
+  Row 2: [ id=3 | name=&quot;Cy&quot;   | amount=150.0 ]
+
+Physical bytes (simplified):
+
+  [1][Ada...][100.0][2][Bob...][200.0][3][Cy...][150.0]
+   ^--- row 0 ---^  ^--- row 1 ---^  ^--- row 2 ---^
+</code></pre>
+<p>To sum <code>amount</code>, the CPU loads entire rows and discards <code>id</code> and <code>name</code> bytes. Variable-width strings break cache-line alignment between rows.</p>
+<h3 id="column-store-layout">Column store layout</h3>
+<pre><code class="language-text">Column store (one batch, 3 rows):
+
+Column &quot;id&quot; (Int32):
+  Values:     [ 1 ][ 2 ][ 3 ]     (12 bytes contiguous)
+  NullBitmap: (empty — no nulls)
+
+Column &quot;name&quot; (Utf8):
+  Offsets: [0, 3, 6, 8]
+  Values:  &quot;AdaBobCy&quot;              (concatenated UTF-8)
+
+Column &quot;amount&quot; (Float64):
+  Values:     [100.0][200.0][150.0]  (24 bytes contiguous)
+</code></pre>
+<p>The horizontal slice tying columns together is the <strong>batch</strong>. Row <em>i</em> is not an object — it is the tuple <code>(columns[0].values[i], columns[1].values[i], …)</code> reconstructed by index.</p>
+<p><strong>Key insight:</strong> Hot-path operators never allocate per-row wrapper objects.</p>
+<h3 id="why-contiguous-homogeneous-arrays-matter">Why contiguous homogeneous arrays matter</h3>
+<p>Fixed-width numeric columns store <code>N</code> values as <code>N × width</code> bytes. The execution engine can:</p>
+<ol>
+<li>Cast the byte span to a typed span</li>
+<li>Loop with tight scalar code or SIMD intrinsics</li>
+<li>Prefetch the next cache line because access is sequential</li>
+</ol>
+<hr />
+<h2 id="batches-morsels-and-vector-sizing">1.8 Batches, morsels, and vector sizing</h2>
+<h3 id="terminology">Terminology</h3>
+<table class="table">
+<thead>
+<tr>
+<th>Term</th>
+<th>General meaning</th>
+<th>Role in columnar engines</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Batch</strong></td>
+<td>Horizontal slice of N rows across all columns</td>
+<td>Unit of storage and execution</td>
+</tr>
+<tr>
+<td><strong>Morsel</strong></td>
+<td>Unit of parallel work</td>
+<td>Typically one batch index per worker</td>
+</tr>
+<tr>
+<td><strong>Vector / chunk</strong></td>
+<td>One column's data within a batch</td>
+<td>SIMD kernel input</td>
+</tr>
+<tr>
+<td><strong>Vectorization</strong></td>
+<td>Applying one operation to many values</td>
+<td>Amortizes per-operator overhead</td>
+</tr>
+</tbody>
+</table>
+<p>A table is not one giant array. It is an append-only list of batches. Scans iterate batches, optionally in parallel — each batch is an independent morsel.</p>
+<h3 id="vector-size-tradeoffs">Vector size tradeoffs</h3>
+<table class="table">
+<thead>
+<tr>
+<th>Batch size</th>
+<th>Pros</th>
+<th>Cons</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Small (1–100 rows)</td>
+<td>Low memory, fast unit tests</td>
+<td>High per-batch overhead, poor SIMD</td>
+</tr>
+<tr>
+<td>Medium (64K rows)</td>
+<td>Good SIMD, L2-friendly</td>
+<td>Moderate memory per batch</td>
+</tr>
+<tr>
+<td>Large (1M rows)</td>
+<td>Maximum SIMD amortization</td>
+<td>May exceed L3, limits parallelism</td>
+</tr>
+</tbody>
+</table>
+<p>Production OLAP engines typically target <strong>64K–1M rows</strong> per vector. RainDB documents this range in <code>VectorChunkLimits</code> (see Part II).</p>
+<hr />
+<h2 id="cpu-caches-memory-bandwidth-and-simd">1.9 CPU caches, memory bandwidth, and SIMD</h2>
+<h3 id="the-memory-wall">The memory wall</h3>
+<p>CPU clock speeds plateaued; core counts multiplied. Analytical performance is now usually <strong>memory-bandwidth bound</strong>, not ALU bound. Summing a billion doubles is fast if the doubles stream from L3 cache; it crawls if each load misses to DRAM.</p>
+<p>Columnar layout helps because:</p>
+<ol>
+<li><strong>Spatial locality</strong> — summing <code>Float64</code> touches only 8 bytes per row, packed sequentially</li>
+<li><strong>Temporal locality</strong> — one column fits in cache levels; revisit it for multiple aggregates</li>
+<li><strong>Prefetcher friendliness</strong> — hardware prefetchers recognize stride-8 sequential access</li>
+</ol>
+<h3 id="cache-hierarchy-intuition">Cache hierarchy intuition</h3>
+<pre><code class="language-text">  L1d  (~32 KB per core, ~1 cycle)
+  ↑
+L2   (~256 KB–1 MB per core)
+  ↑
+L3   (~10–60 MB shared)
+  ↑
+DRAM (hundreds of cycles)
+</code></pre>
+<p>A 64K-row <code>Float64</code> column ≈ 512 KB. It may spill past L1 but often fits L2 per core during a single aggregate pass. A row store scanning the same logical rows might load 200+ bytes per row (strings, metadata), blowing cache budgets.</p>
+<h3 id="simd-overview">SIMD overview</h3>
+<p><strong>Single Instruction, Multiple Data</strong> (SIMD) applies one instruction to a vector of values:</p>
+<pre><code class="language-text">Scalar:  sum = a[0]+a[1]+a[2]+a[3]   (4 additions, 4 loads)
+SIMD:    sum_vec = ADD(vec_load(a[0..3]), accumulator)  (1 instruction, 1 load)
+</code></pre>
+<p>AVX2 on x86 processes 4 <code>double</code> values per instruction. Requirements:</p>
+<ul>
+<li>Aligned buffers for optimal loads</li>
+<li>Length multiples of vector width (scalar tail after vector loop)</li>
+<li>Dense non-null data in fast paths (null bitmap checks break vector lanes)</li>
+</ul>
+<hr />
+<h2 id="when-embedded-olap-wins">1.10 When embedded OLAP wins</h2>
+<p>Not every analytical workload needs a cloud data warehouse. <strong>Embedded OLAP</strong> runs the engine inside your application process — no separate server, no network hop per batch.</p>
+<h3 id="client-server-versus-embedded">Client-server versus embedded</h3>
+<table class="table">
+<thead>
+<tr>
+<th>Aspect</th>
+<th>Client-server (Snowflake, BigQuery)</th>
+<th>Embedded (DuckDB, RainDB)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Deployment</td>
+<td>Separate service, network</td>
+<td>NuGet package, in-process</td>
+</tr>
+<tr>
+<td>Latency</td>
+<td>Network + serialization per batch</td>
+<td>Direct memory access</td>
+</tr>
+<tr>
+<td>Scaling</td>
+<td>Independent warehouse scaling</td>
+<td>Scales with app process</td>
+</tr>
+<tr>
+<td>Multi-tenancy</td>
+<td>Native</td>
+<td>One engine per tenant/instance</td>
+</tr>
+<tr>
+<td>Operational cost</td>
+<td>Infrastructure + billing</td>
+<td>Application memory only</td>
+</tr>
+</tbody>
+</table>
+<h3 id="embedded-olap-suits">Embedded OLAP suits</h3>
+<ul>
+<li>Application-local reporting caches</li>
+<li>ETL staging before warehouse upload</li>
+<li>Integration tests needing real columnar semantics without Docker</li>
+<li>Demos and prototypes</li>
+<li>Desktop tools and IDE extensions</li>
+<li>Edge analytics on constrained hardware</li>
+</ul>
+<h3 id="embedded-olap-does-not-suit">Embedded OLAP does not suit</h3>
+<ul>
+<li>Multi-tenant cloud warehouses with independent scaling (unless one engine per tenant)</li>
+<li>High-frequency single-row transactional updates</li>
+<li>Cross-application shared storage with centralized governance</li>
+<li>Petabyte-scale datasets exceeding single-machine RAM (without spill/persistence layers)</li>
+</ul>
+<h3 id="design-goals-of-embedded-engines">Design goals of embedded engines</h3>
+<table class="table">
+<thead>
+<tr>
+<th>Goal</th>
+<th>Typical mechanism</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Zero deployment friction</td>
+<td>Single package reference</td>
+</tr>
+<tr>
+<td>In-process latency</td>
+<td><code>ReadOnlyMemory&lt;byte&gt;</code> batches, no wire protocol</td>
+</tr>
+<tr>
+<td>Composable DI</td>
+<td>Constructor-injected catalog, executor, compilers</td>
+</tr>
+<tr>
+<td>Testability</td>
+<td>Swap in-memory catalog, inject custom spill writers</td>
+</tr>
+<tr>
+<td>Optional persistence</td>
+<td>File-backed batch append</td>
+</tr>
+</tbody>
+</table>
+<p>RainDB embodies these goals as a .NET embedded engine.</p>
+<hr />
+<h2 id="column-stores-versus-row-stores-quantitative-comparison">1.11 Column stores versus row stores — quantitative comparison</h2>
+<h3 id="worked-example-selective-aggregation">Worked example: selective aggregation</h3>
+<p>Table: 10 million rows, 20 columns averaging 40 bytes per row (800 MB total).</p>
+<p>Query: <code>SUM(amount)</code> where <code>amount</code> is 8-byte <code>Float64</code>.</p>
+<table class="table">
+<thead>
+<tr>
+<th>Layout</th>
+<th>Bytes read (ideal)</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Row store</td>
+<td>~800 MB</td>
+<td>Must touch every column in every row unless covering index</td>
+</tr>
+<tr>
+<td>Column store</td>
+<td>~80 MB</td>
+<td>Only <code>amount</code> column (10× reduction)</td>
+</tr>
+</tbody>
+</table>
+<p>With zone maps (min/max per batch), a filtered query <code>WHERE sale_date BETWEEN '2025-01-01' AND '2025-01-31'</code> might skip entire batches whose date range does not overlap — further reducing I/O.</p>
+<h3 id="compression-and-encoding">Compression and encoding</h3>
+<p>Columnar storage enables per-column compression:</p>
+<ul>
+<li><strong>Dictionary encoding</strong> — low-cardinality strings map to integer codes</li>
+<li><strong>Run-length encoding (RLE)</strong> — repeated values stored as (value, count) pairs</li>
+<li><strong>Delta encoding</strong> — sorted integers stored as differences</li>
+</ul>
+<p>Homogeneous columns compress far better than heterogeneous rows.</p>
+<h3 id="write-amplification">Write amplification</h3>
+<table class="table">
+<thead>
+<tr>
+<th>Operation</th>
+<th>Row store</th>
+<th>Column store</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Single-row insert</td>
+<td>Append one record</td>
+<td>Touch every column</td>
+</tr>
+<tr>
+<td>Batch insert</td>
+<td>Moderate</td>
+<td>Amortized across batch</td>
+</tr>
+<tr>
+<td>Update one column</td>
+<td>Rewrite one row</td>
+<td>Rewrite one column segment</td>
+</tr>
+</tbody>
+</table>
+<p>OLAP systems favor <strong>append-only batch ingest</strong> to avoid update amplification.</p>
+<h3 id="when-row-stores-still-win">When row stores still win</h3>
+<ul>
+<li>High-frequency OLTP updates</li>
+<li>Queries that always need most columns (<code>SELECT *</code>)</li>
+<li>Point lookups on primary key without column projection</li>
+<li>Strong multi-row transactional isolation requirements</li>
+</ul>
+<hr />
+<h2 id="building-a-mental-model-from-scratch">1.12 Building a mental model from scratch</h2>
+<p>Suppose you had to design a minimal columnar engine before reading any source code. A reasonable path:</p>
+<h3 id="phase-a-define-the-cell-types">Phase A: Define the cell types</h3>
+<pre><code class="language-text">enum PhysicalType { Int32, Int64, Float64, Boolean, Utf8 }
+</code></pre>
+<p>Fixed-width types map to <code>sizeof</code>; UTF-8 is variable-width.</p>
+<h3 id="phase-b-define-column-chunks">Phase B: Define column chunks</h3>
+<p>Each chunk holds <code>row_count</code>, <code>values</code> bytes, optional null bitmap.</p>
+<h3 id="phase-c-define-batches">Phase C: Define batches</h3>
+<p>A batch is <code>(row_count, columns[])</code> with invariant: all columns share <code>row_count</code>.</p>
+<h3 id="phase-d-define-tables-as-batch-lists">Phase D: Define tables as batch lists</h3>
+<p>Append-only list of batches. Scans are <code>foreach batch in batches</code>.</p>
+<h3 id="phase-e-define-one-vectorized-operator">Phase E: Define one vectorized operator</h3>
+<pre><code class="language-text">function SUM(float64_column):
+sum = 0
+for i in 0..column.row_count-1:
+  if not is_null(column, i):
+    sum += column.values[i]
+return sum
+</code></pre>
+<h3 id="phase-f-add-parallelism">Phase F: Add parallelism</h3>
+<p>Schedule each batch on a thread pool; combine partial sums with associative reduction.</p>
+<p>RainDB implements Phases A–F across its Abstractions, Core, and Query projects. Part II walks the actual types.</p>
+<hr />
+<h2 id="exercises-theory">1.13 Exercises (theory)</h2>
+<h3 id="exercise-1.1-workload-classification">Exercise 1.1 — Workload classification</h3>
+<p>Classify each query as OLTP-leaning or OLAP-leaning and justify:</p>
+<ol>
+<li><code>UPDATE accounts SET balance = balance - 100 WHERE id = 42</code></li>
+<li><code>SELECT product_id, AVG(price) FROM sales GROUP BY product_id</code></li>
+<li><code>SELECT * FROM users WHERE email = 'a@b.com'</code></li>
+<li><code>SELECT COUNT(*) FROM events WHERE ts &gt; '2025-01-01'</code></li>
+</ol>
+<h3 id="exercise-1.2-bytes-read-estimate">Exercise 1.2 — Bytes read estimate</h3>
+<p>A table has 1M rows. Columns: <code>id</code> (4 bytes), <code>payload</code> (200 bytes average UTF-8), <code>score</code> (8 bytes).</p>
+<p>How many megabytes does a column store read for <code>SELECT AVG(score)</code> versus a row store that must load full rows?</p>
+<h3 id="exercise-1.3-amdahls-law">Exercise 1.3 — Amdahl's law</h3>
+<p>A scan spends 2% of time in serial plan setup and 98% in parallel batch processing. What is the maximum speedup with 16 cores? With 64 cores?</p>
+<h3 id="exercise-1.4-star-versus-snowflake">Exercise 1.4 — Star versus snowflake</h3>
+<p>Design a star schema for e-commerce analytics with facts <code>orders</code> and dimensions <code>customer</code>, <code>product</code>, <code>date</code>. How many joins for <code>SUM(revenue) BY region, quarter</code>?</p>
+<h3 id="exercise-1.5-iterator-versus-vector-pseudocode">Exercise 1.5 — Iterator versus vector pseudocode</h3>
+<p>Implement pseudocode for <code>FilterProject</code> in both iterator and vector styles for predicate <code>amount &gt; 1000</code>. Count approximate function calls per 10K rows.</p>
+<h3 id="exercise-1.6-morsel-partial-aggregation">Exercise 1.6 — Morsel partial aggregation</h3>
+<p>Given three batches with partial sums <code>[100, 200, 50]</code>, explain why final <code>SUM</code> is associative and order-independent. When would order matter?</p>
+<hr />
+<h1 id="part-ii-raindb-implementation">Part II: RainDB Implementation</h1>
+<hr />
+<h2 id="raindbs-position-in-the-olap-landscape">1.14 RainDB's position in the OLAP landscape</h2>
+<p>RainDB is an <strong>embedded OLAP engine</strong> for .NET. It runs inside your process — no separate database server, no network hop for every batch. It targets:</p>
+<ul>
+<li>In-process analytics over columnar tables</li>
+<li>Vectorized scan, filter, project, aggregate, join, sort, and group-by</li>
+<li>A strict SQL subset and a LINQ provider that compile to physical plans</li>
+</ul>
+<p>It is <strong>not</strong> optimized for high-frequency single-row updates, foreign-key enforcement, or multi-user transactional isolation. Understanding that boundary prevents misapplying RainDB patterns to OLTP problems.</p>
+<hr />
+<h2 id="columnar-memory-layout-in-raindb">1.15 Columnar memory layout in RainDB</h2>
+<p>RainDB splits the table horizontally into <strong>batches</strong> (morsels). Within each batch, each column is a separate <strong>chunk</strong> — a packed byte buffer.</p>
+<p>The horizontal slice tying columns together is <code>IColumnarBatch</code>:</p>
+<pre><code class="language-csharp">// src/RainDB.Abstractions/Columnar/IColumnarBatch.cs
+public interface IColumnarBatch
+{
+    int RowCount { get; }
+    IReadOnlyList&lt;IColumnChunk&gt; Columns { get; }
+}
+</code></pre>
+<p>Each column chunk implements <code>IColumnChunk</code>:</p>
+<pre><code class="language-csharp">// src/RainDB.Abstractions/Columnar/IColumnChunk.cs
+public interface IColumnChunk
+{
+    RainDbType PhysicalType { get; }
+    int RowCount { get; }
+    bool HasNulls { get; }
+    /// &lt;summary&gt;Packed bits: 1 = null, row i uses bit (i &gt;&gt; 3) mask 1 &lt;&lt; (i &amp; 7).&lt;/summary&gt;
+    ReadOnlyMemory&lt;byte&gt; NullBitmap { get; }
+    ReadOnlyMemory&lt;byte&gt; Values { get; }
+}
+</code></pre>
+<p><strong>Key insight:</strong> Row <em>i</em> is not a .NET object. It is the tuple <code>(columns[0].values[i], columns[1].values[i], …)</code> reconstructed by index. Hot-path operators never allocate per-row wrapper objects.</p>
+<p>Fixed-width numeric columns (<code>Int32</code>, <code>Int64</code>, <code>Float64</code>, <code>Boolean</code>) store <code>N</code> values as <code>N × width</code> bytes. The execution engine casts via <code>MemoryMarshal.Cast</code> and loops with tight scalar or SIMD code. UTF-8 columns use offset table + blob (Chapter 4).</p>
+<hr />
+<h2 id="batches-morsels-and-vector-sizing-in-raindb">1.16 Batches, morsels, and vector sizing in RainDB</h2>
+<h3 id="terminology-in-raindb">Terminology in RainDB</h3>
+<table class="table">
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning in RainDB</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Batch</strong></td>
+<td>A <code>ColumnarBatch</code> — one horizontal slice with uniform <code>RowCount</code> across columns</td>
+</tr>
+<tr>
+<td><strong>Morsel</strong></td>
+<td>A unit of parallel work — typically one batch index scheduled to a worker</td>
+</tr>
+<tr>
+<td><strong>Vector / chunk</strong></td>
+<td>One column's data within a batch (<code>IColumnChunk</code>)</td>
+</tr>
+<tr>
+<td><strong>Vectorization</strong></td>
+<td>Applying one operation to many values in a tight loop or SIMD kernel</td>
+</tr>
+</tbody>
+</table>
+<p>A table is not one giant array. <code>MemoryTable</code> holds an append-only list of batches:</p>
+<pre><code class="language-csharp">// src/RainDB.Core/Tables/MemoryTable.cs (excerpt)
+/// &lt;summary&gt;Columnar segments in insertion order (OLAP scans iterate these).&lt;/summary&gt;
+public IReadOnlyList&lt;IColumnarBatch&gt; Batches =&gt; _batches;
+</code></pre>
+<p>Scans iterate <code>table.Batches[i]</code>, optionally in parallel — each batch is an independent morsel.</p>
+<h3 id="duckdb-style-vector-bounds">DuckDB-style vector bounds</h3>
+<p>RainDB defines optional strict sizing policy in <code>VectorChunkLimits</code>:</p>
+<pre><code class="language-csharp">// src/RainDB.Core/Columnar/VectorChunkLimits.cs
+public static class VectorChunkLimits
+{
+    /// &lt;summary&gt;64K rows — lower bound for &quot;wide vector&quot; batches in OLAP engines.&lt;/summary&gt;
+    public const int MinRows = 64 * 1024;
+
+    /// &lt;summary&gt;1M rows — upper bound to cap resident set per vector.&lt;/summary&gt;
+    public const int MaxRows = 1024 * 1024;
+
+    public static void ValidateRowCount(int rowCount, bool enforce)
+    {
+        if (!enforce) return;
+        if (rowCount == 0) return;
+        if (rowCount &lt; MinRows || rowCount &gt; MaxRows)
+            throw new ArgumentOutOfRangeException(nameof(rowCount), rowCount,
+                $&quot;When strict vector sizing is enabled, row count must be 0 or in [{MinRows}, {MaxRows}].&quot;);
+    }
+}
+</code></pre>
+<p><strong>Why 64K–1M?</strong></p>
+<ul>
+<li><strong>Lower bound (64K):</strong> Amortizes per-batch overhead (virtual calls, branch setup) and keeps SIMD loops long enough to hide latency.</li>
+<li><strong>Upper bound (1M):</strong> Caps resident set per vector. A 1M-row <code>Float64</code> column is ~8 MB — still L3-friendly on modern CPUs; 10M rows might not be.</li>
+</ul>
+<p>By default <code>MemoryTableOptions.StrictVectorChunkRows</code> is <code>false</code>, so unit tests can append tiny 2-row batches. Production ingest pipelines should target 64K+ rows per batch when enforcing strict mode.</p>
+<h3 id="morsel-parallelism-in-practice">Morsel parallelism in practice</h3>
+<p><code>VectorizedScanEngine</code> schedules batch indices across threads:</p>
+<pre><code class="language-csharp">// src/RainDB.Query/Execution/VectorizedScanEngine.cs (excerpt)
+Parallel.For(
+    0,
+    n,
+    new ParallelOptions { MaxDegreeOfParallelism = dop, CancellationToken = ct },
+    i =&gt; outArr[i] = ProcessOneBatch(plan, batches[i], context));
+</code></pre>
+<p>Each worker processes <strong>whole batches</strong> independently. Results merge in deterministic batch order (<code>outArr[i]</code>). This is <strong>morsel-driven parallelism</strong>: share-nothing workers, no locks on row data during scan.</p>
+<hr />
+<h2 id="iterator-versus-vectorization-in-raindb">1.17 Iterator versus vectorization in RainDB</h2>
+<p>RainDB still exposes <code>IPhysicalPlan</code> with an <code>Explain()</code> method — the <em>interface</em> resembles volcano roots, but <strong>implementations</strong> are batch-oriented engines (<code>VectorizedScanEngine</code>, <code>HashAggregateEngine</code>, etc.).</p>
+<p><code>FixedWidthSelectionKernels</code> illustrate the vectorized pattern — compare an entire <code>Int32</code> column against a constant:</p>
+<pre><code class="language-csharp">// src/RainDB.Query/Vectorized/FixedWidthSelectionKernels.cs (excerpt)
+var ints = MemoryMarshal.Cast&lt;byte, int&gt;(values);
+for (var i = 0; i &lt; ints.Length; i++)
+{
+    if (SelectionEvaluator.IsNull(nb, i, hasNulls))
+        continue;
+    if (CompareInt32(ints[i], imm, op))
+        dest[count++] = i;
+}
+</code></pre>
+<p>When nulls are absent and the operator is equality, a SIMD fast path activates:</p>
+<pre><code class="language-csharp">if (!hasNulls &amp;&amp; op == ScalarCompareOp.Eq &amp;&amp; Vector128.IsHardwareAccelerated)
+return FillInt32EqVectorized(ints, imm, dest);
+</code></pre>
+<p>Phase 1 is predominantly vectorized for fixed-width predicates and aggregates, with scalar fallbacks for UTF-8 filters and null-heavy paths.</p>
+<hr />
+<h2 id="embedded-engine-design-in-raindb">1.18 Embedded engine design in RainDB</h2>
+<p>RainDB is <strong>embedded</strong>, not client-server. Design consequences:</p>
+<table class="table">
+<thead>
+<tr>
+<th>Goal</th>
+<th>RainDB mechanism</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Zero deployment friction</td>
+<td>Reference NuGet packages; <code>RainDbEngine.CreateDefault()</code></td>
+</tr>
+<tr>
+<td>In-process latency</td>
+<td>No serialization protocol; batches are <code>ReadOnlyMemory&lt;byte&gt;</code></td>
+</tr>
+<tr>
+<td>Composable DI</td>
+<td><code>RainDbEngine</code> constructor accepts <code>ICatalog</code>, <code>IQueryExecutor</code>, compilers</td>
+</tr>
+<tr>
+<td>Testability</td>
+<td>Swap <code>InMemoryCatalog</code>, inject custom <code>ISpillWriter</code></td>
+</tr>
+<tr>
+<td>Optional persistence</td>
+<td><code>RainDbEngine.OpenPersistent(directory)</code> wires <code>RainDbFileDatabase</code></td>
+</tr>
+</tbody>
+</table>
+<p>The composition root:</p>
+<pre><code class="language-csharp">// src/RainDB.Driver/RainDbEngine.cs (excerpt)
+public sealed class RainDbEngine
+{
+    public static RainDbEngine CreateDefault(ICatalog catalog)
+    {
+        var buffers = new HybridBufferPool();
+        var executor = new DefaultQueryExecutor();
+        var sql = new DefaultSqlCompiler();
+        var linq = new DefaultLinqCompiler();
+        return new RainDbEngine(catalog, buffers, buffers, executor, sql, linq, NoOpSpillWriter.Instance);
+    }
+}
+</code></pre>
+<p>Embedded OLAP suits application-local reporting, ETL staging, integration tests, and demos (<code>samples/RainDB.AnalyticsDemo</code>). It does <strong>not</strong> suit multi-tenant cloud warehouses with independent scaling, unless you embed one engine instance per tenant.</p>
+<hr />
+<h2 id="simd-in-raindb">1.19 SIMD in RainDB</h2>
+<p><code>AggregateIntrinsics.SumFloat64</code> uses AVX2 when available:</p>
+<pre><code class="language-csharp">// src/RainDB.Core/Columnar/AggregateIntrinsics.cs (excerpt)
+public static double SumFloat64(ReadOnlySpan&lt;byte&gt; valuesLittleEndian, bool allowAvx2 = true)
+{
+    var doubles = MemoryMarshal.Cast&lt;byte, double&gt;(valuesLittleEndian);
+    if (allowAvx2 &amp;&amp; Avx2.IsSupported &amp;&amp; doubles.Length &gt;= Vector256&lt;double&gt;.Count)
+        return SumDoubleAvx2(doubles);
+    return SumDoubleScalar(doubles);
+}
+</code></pre>
+<p><code>VectorizedScanPhysicalPlan</code> exposes <code>UseAvx2DoubleSum</code> so callers opt in per query. SIMD requires:</p>
+<ul>
+<li>Aligned buffers for optimal loads (<code>HybridBufferPool.RentAligned</code> guarantees 32-byte alignment)</li>
+<li>Length multiples of vector width (scalar tail handled after the vector loop)</li>
+<li>No nulls in the fast path (null handling branches break vector lanes)</li>
+</ul>
+<hr />
+<h2 id="end-to-end-query-path">1.20 End-to-end query path</h2>
+<p>Tracing <code>SELECT SUM(line_total) FROM order_lines</code> through RainDB:</p>
+<pre class="mermaid">flowchart LR
+    SQL["SQL string"] --> Parser["SqlParser.Parse"]
+    Parser --> Logical["LogicalTableScan"]
+    Logical --> Binder["LogicalTableScanBinder"]
+    Binder --> Physical["VectorizedScanPhysicalPlan"]
+    Physical --> Session["RainDbExecutionContext"]
+    Session --> Executor["DefaultQueryExecutor"]
+    Executor --> Engine["VectorizedScanEngine"]
+    Engine --> Result["IAggregateQueryResult"]
+</pre>
+<h3 id="step-1-public-api">Step 1: Public API</h3>
+<pre><code class="language-csharp">var engine = RainDbEngine.CreateDefault();
+await using var result = await engine.ExecuteSqlAsync(
+    &quot;SELECT SUM(line_total) FROM order_lines&quot;);
+var agg = (IAggregateQueryResult)result;
+</code></pre>
+<h3 id="step-2-session-creation">Step 2: Session creation</h3>
+<pre><code class="language-csharp">// src/RainDB.Driver/RainDbEngine.cs
+public IExecutionContext CreateSession(CancellationToken cancellationToken = default) =&gt;
+    new RainDbExecutionContext(Catalog, BufferPool, AlignedBufferPool, SpillWriter, cancellationToken);
+</code></pre>
+<p>The session carries catalog lookup, buffer pools for output materialization, spill hooks, and cancellation.</p>
+<h3 id="step-3-sql-compilation">Step 3: SQL compilation</h3>
+<pre><code class="language-csharp">// src/RainDB.Sql/Compilation/DefaultSqlCompiler.cs
+var logical = SqlParser.Parse(sql);
+IPhysicalPlan plan = logical.Root switch
+{
+    LogicalTableScan s =&gt; LogicalTableScanBinder.BindAndLower(s, catalog, _defaultScanOptions),
+    LogicalInnerJoin j =&gt; LogicalJoinBinder.BindAndLower(j, catalog, PhysicalJoinAlgorithm.Hash, _defaultScanOptions),
+    _ =&gt; throw new InvalidOperationException($&quot;Unsupported logical root {logical.Root.GetType().Name}.&quot;),
+};
+</code></pre>
+<p>Logical IR describes <em>what</em> (table name, aggregates, filters). Physical IR describes <em>how</em> (column indices, kernel options).</p>
+<h3 id="step-4-executor-dispatch">Step 4: Executor dispatch</h3>
+<pre><code class="language-csharp">// src/RainDB.Query/Execution/DefaultQueryExecutor.cs (excerpt)
+if (plan is VectorizedScanPhysicalPlan vs)
+{
+    if (!context.Catalog.TryGetTable(vs.TableId, out var ts) || ts is not IColumnarTableSource cols)
+        throw new InvalidOperationException($&quot;Columnar table {vs.TableId} was not found in the catalog.&quot;);
+    return await VectorizedScanEngine.ExecuteAsync(vs, cols, context).ConfigureAwait(false);
+}
+</code></pre>
+<h3 id="step-5-vectorized-execution">Step 5: Vectorized execution</h3>
+<p><code>VectorizedScanEngine</code> validates the plan, then either:</p>
+<ul>
+<li>Runs <code>ComputeAggregateAsync</code> for global aggregates (combines per-batch partials)</li>
+<li>Or <code>ProjectAllBatchesAsync</code> for filter/project queries (parallel per morsel)</li>
+</ul>
+<h3 id="step-6-result-materialization">Step 6: Result materialization</h3>
+<p>Global aggregates return <code>IAggregateQueryResult</code> with <code>Float64Value</code> or <code>Int64Value</code>. Projections return <code>IColumnarQueryResult</code> with a list of output batches.</p>
+<p>You can skip SQL and execute physical plans directly — useful for benchmarks and custom planners:</p>
+<pre><code class="language-csharp">var plan = new VectorizedScanPhysicalPlan(
+    table.Id,
+    outputColumnIndices: [2],
+    aggregate: new AggregateSpec(2, AggregateKind.Sum));
+await using var result = await engine.ExecutePhysicalAsync(plan);
+</code></pre>
+<hr />
+<h2 id="quantitative-comparison-in-raindb">1.21 Quantitative comparison in RainDB</h2>
+<p>RainDB's <code>ColumnarBatch</code> enforces that operators touch column chunks independently — projection is literally selecting column indices:</p>
+<pre><code class="language-csharp">// src/RainDB.Query/Plans/VectorizedScanPhysicalPlan.cs
+/// &lt;summary&gt;Indices into the table schema / batch column list (deduplicated projection).&lt;/summary&gt;
+public int[] OutputColumnIndices { get; }
+</code></pre>
+<p>Columnar storage enables per-column compression in future phases. RainDB Phase 1 stores raw bytes; the layout is <strong>compression-ready</strong> because each column is homogeneous.</p>
+<p>RainDB uses batch append (<code>MemoryTable.AppendBatch</code>) to amortize column-store write cost.</p>
+<hr />
+<h2 id="worked-example-order-lines-analytics">1.22 Worked example: order lines analytics</h2>
+<p>Sample data (from <code>samples/RainDB.AnalyticsDemo</code>):</p>
+<table class="table">
+<thead>
+<tr>
+<th>region</th>
+<th>quantity</th>
+<th>line_total</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>US-East</td>
+<td>12</td>
+<td>1200.00</td>
+</tr>
+<tr>
+<td>US-West</td>
+<td>4</td>
+<td>199.50</td>
+</tr>
+<tr>
+<td>EU</td>
+<td>20</td>
+<td>4500.00</td>
+</tr>
+<tr>
+<td>US-East</td>
+<td>2</td>
+<td>49.99</td>
+</tr>
+<tr>
+<td>US-West</td>
+<td>1</td>
+<td>9.99</td>
+</tr>
+<tr>
+<td>EU</td>
+<td>50</td>
+<td>12000.00</td>
+</tr>
+<tr>
+<td>US-East</td>
+<td>6</td>
+<td>300.00</td>
+</tr>
+</tbody>
+</table>
+<p>Stored as <strong>two batches</strong> (4 rows + 3 rows) to demonstrate morsel parallelism.</p>
+<p><strong>Query:</strong> <code>SUM(line_total)</code></p>
+<ol>
+<li>Batch 0 partial sum: <code>1200 + 199.5 + 4500 + 49.99 = 5949.49</code></li>
+<li>Batch 1 partial sum: <code>9.99 + 12000 + 300 = 12309.99</code></li>
+<li>Combined: <code>18259.48</code></li>
+</ol>
+<p>With <code>UseAvx2DoubleSum: true</code>, each partial sum may use AVX2 horizontal add on the <code>Float64</code> value bytes.</p>
+<p><strong>Query:</strong> <code>SELECT region, line_total WHERE line_total &gt; 1000</code></p>
+<ol>
+<li>Per batch: <code>SelectionEvaluator</code> builds selected row indices on <code>line_total</code></li>
+<li><code>ProjectGather</code> copies <code>region</code> and <code>line_total</code> columns for surviving rows</li>
+<li>Output: two projected batches (not merged into one — preserves morsel boundaries)</li>
+</ol>
+<hr />
+<h2 id="common-pitfalls">1.23 Common pitfalls</h2>
+<h3 id="pitfall-1-treating-batches-as-rows">Pitfall 1: Treating batches as rows</h3>
+<p>A batch is not a row. Index <code>r</code> means row <code>r</code> <strong>within that batch</strong>, not global row id. Global row numbers require tracking batch offset.</p>
+<h3 id="pitfall-2-ignoring-endianness">Pitfall 2: Ignoring endianness</h3>
+<p><code>FixedWidthColumnChunk</code> stores native little-endian bytes. Use <code>BinaryPrimitives.WriteInt32LittleEndian</code> when building test data on any platform RainDB targets (.NET little-endian).</p>
+<h3 id="pitfall-3-mixing-row-counts-across-columns">Pitfall 3: Mixing row counts across columns</h3>
+<p><code>ColumnarBatch</code> constructor throws if any column's <code>RowCount</code> differs. This invariant is foundational — never bypass it.</p>
+<h3 id="pitfall-4-assuming-sql-full-fidelity">Pitfall 4: Assuming SQL full fidelity</h3>
+<p>RainDB implements a <strong>strict subset</strong>. Unsupported syntax fails at parse or bind time. Check <code>StrictSqlSubset</code> and tests in <code>SqlStrictSubsetCompilerTests</code>.</p>
+<h3 id="pitfall-5-tiny-batches-in-production-with-strict-sizing">Pitfall 5: Tiny batches in production with strict sizing</h3>
+<p><code>MemoryTableOptions(StrictVectorChunkRows: true)</code> rejects batches outside 64K–1M rows. Tests use small batches with default options; production ingest should align.</p>
+<h3 id="pitfall-6-simd-with-nulls">Pitfall 6: SIMD with nulls</h3>
+<p>AVX2 sum fast paths assume dense non-null values. Nullable columns take scalar paths with bitmap checks per row.</p>
+<h3 id="pitfall-7-confusing-logical-and-physical-plans">Pitfall 7: Confusing logical and physical plans</h3>
+<p><code>LogicalTableScan</code> references table <strong>names</strong> and column <strong>names</strong>. <code>VectorizedScanPhysicalPlan</code> references <code>TableId</code> and column <strong>indices</strong>. Compilation bridges the gap.</p>
+<hr />
+<h2 id="exercises-implementation">1.24 Exercises (implementation)</h2>
+<h3 id="exercise-1.7-trace-the-path">Exercise 1.7 — Trace the path</h3>
+<p>Draw your own flowchart for <code>ExecutePhysicalAsync</code> with a <code>HashAggregatePhysicalPlan</code>. Which engine class runs? What does the catalog provide?</p>
+<h3 id="exercise-1.8-batch-invariants">Exercise 1.8 — Batch invariants</h3>
+<p>Write pseudocode for <code>ValidateBatch(columns, rowCount)</code> that checks type consistency and row count alignment. Compare to <code>TableSchema.MatchesBatch</code> (Chapter 3).</p>
+<h3 id="exercise-1.9-executephysicalasync-benchmark">Exercise 1.9 — ExecutePhysicalAsync benchmark</h3>
+<p>Construct a <code>VectorizedScanPhysicalPlan</code> with <code>UseAvx2DoubleSum: true</code> and compare timing against scalar path on a 1M-row <code>Float64</code> column.</p>
+<hr />
+<h2 id="chapter-summary">1.25 Chapter summary</h2>
+<table class="table">
+<thead>
+<tr>
+<th>Concept</th>
+<th>RainDB artifact</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Columnar layout</td>
+<td><code>IColumnChunk</code>, <code>IColumnarBatch</code></td>
+</tr>
+<tr>
+<td>Table storage</td>
+<td><code>MemoryTable.Batches</code></td>
+</tr>
+<tr>
+<td>Vector bounds</td>
+<td><code>VectorChunkLimits</code></td>
+</tr>
+<tr>
+<td>Morsel parallelism</td>
+<td><code>VectorizedScanEngine</code> + <code>Parallel.For</code> / channels</td>
+</tr>
+<tr>
+<td>SIMD sums</td>
+<td><code>AggregateIntrinsics</code>, <code>UseAvx2DoubleSum</code></td>
+</tr>
+<tr>
+<td>Embedded entry</td>
+<td><code>RainDbEngine</code></td>
+</tr>
+<tr>
+<td>Query path</td>
+<td>SQL → Logical → Physical → Executor → Engine → Result</td>
+</tr>
+</tbody>
+</table>
+<p>The next chapter maps these concepts onto RainDB's six-project architecture, dependency rules, and extension points.</p>
+</div>
+          <footer class="doc-footer">
+            <p>Generated by <strong>hoihky</strong> with <strong>MDWeb</strong> and with assistance from <strong>AI</strong></p>
+
+          </footer>
+        </article>
+
+        
+                <aside class="toc" aria-label="On this page">
+                  <p class="toc-title">On this page</p>
+                  <ul>
+                    
+                        <li class="toc-h1">
+                          <a href="#chapter-1-olap-fundamentals">Chapter 1: OLAP Fundamentals</a>
+                        </li>
+                        
+                        <li class="toc-h1">
+                          <a href="#part-i-concepts-and-theory">Part I: Concepts and Theory</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#11-two-families-of-database-workloads">1.1 Two families of database workloads</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#oltp-online-transaction-processing">OLTP: Online Transaction Processing</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#olap-online-analytical-processing">OLAP: Online Analytical Processing</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#the-fundamental-tension">The fundamental tension</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#12-dimensional-modeling-star-and-snowflake-schemas">1.2 Dimensional modeling: star and snowflake schemas</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#fact-tables">Fact tables</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#dimension-tables">Dimension tables</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#star-schema">Star schema</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#snowflake-schema">Snowflake schema</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#relational-algebra-view">Relational algebra view</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#13-etl-path-versus-query-path">1.3 ETL path versus query path</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#etl-extract-transform-load">ETL: Extract, Transform, Load</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#query-path">Query path</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#why-the-split-matters">Why the split matters</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#14-amdahls-law-and-parallel-scan">1.4 Amdahl's law and parallel scan</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#applied-to-table-scan">Applied to table scan</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#practical-implications">Practical implications</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#15-history-of-column-stores">1.5 History of column stores</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#early-motivations-1980s1990s">Early motivations (1980s–1990s)</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#monetdb-1990s2000s">MonetDB (1990s–2000s)</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#c-store-vertica-2005">C-Store / Vertica (2005)</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#apache-parquet-orc-arrow-2010s">Apache Parquet, ORC, Arrow (2010s)</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#timeline-summary">Timeline summary</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#16-volcano-iterator-model-versus-vectorization">1.6 Volcano iterator model versus vectorization</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#the-volcano-iterator-model">The Volcano (iterator) model</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#the-vectorization-model">The vectorization model</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#comparison-table">Comparison table</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#hybrid-models">Hybrid models</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#17-columnar-memory-layout-conceptual">1.7 Columnar memory layout (conceptual)</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#row-store-layout">Row store layout</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#column-store-layout">Column store layout</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#why-contiguous-homogeneous-arrays-matter">Why contiguous homogeneous arrays matter</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#18-batches-morsels-and-vector-sizing">1.8 Batches, morsels, and vector sizing</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#terminology">Terminology</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#vector-size-tradeoffs">Vector size tradeoffs</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#19-cpu-caches-memory-bandwidth-and-simd">1.9 CPU caches, memory bandwidth, and SIMD</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#the-memory-wall">The memory wall</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#cache-hierarchy-intuition">Cache hierarchy intuition</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#simd-overview">SIMD overview</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#110-when-embedded-olap-wins">1.10 When embedded OLAP wins</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#client-server-versus-embedded">Client-server versus embedded</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#embedded-olap-suits">Embedded OLAP suits</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#embedded-olap-does-not-suit">Embedded OLAP does not suit</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#design-goals-of-embedded-engines">Design goals of embedded engines</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#111-column-stores-versus-row-stores-quantitative-comparison">1.11 Column stores versus row stores — quantitative comparison</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#worked-example-selective-aggregation">Worked example: selective aggregation</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#compression-and-encoding">Compression and encoding</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#write-amplification">Write amplification</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#when-row-stores-still-win">When row stores still win</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#112-building-a-mental-model-from-scratch">1.12 Building a mental model from scratch</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#phase-a-define-the-cell-types">Phase A: Define the cell types</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#phase-b-define-column-chunks">Phase B: Define column chunks</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#phase-c-define-batches">Phase C: Define batches</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#phase-d-define-tables-as-batch-lists">Phase D: Define tables as batch lists</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#phase-e-define-one-vectorized-operator">Phase E: Define one vectorized operator</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#phase-f-add-parallelism">Phase F: Add parallelism</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#113-exercises-theory">1.13 Exercises (theory)</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#exercise-11-workload-classification">Exercise 1.1 — Workload classification</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#exercise-12-bytes-read-estimate">Exercise 1.2 — Bytes read estimate</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#exercise-13-amdahls-law">Exercise 1.3 — Amdahl's law</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#exercise-14-star-versus-snowflake">Exercise 1.4 — Star versus snowflake</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#exercise-15-iterator-versus-vector-pseudocode">Exercise 1.5 — Iterator versus vector pseudocode</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#exercise-16-morsel-partial-aggregation">Exercise 1.6 — Morsel partial aggregation</a>
+                        </li>
+                        
+                        <li class="toc-h1">
+                          <a href="#part-ii-raindb-implementation">Part II: RainDB Implementation</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#114-raindbs-position-in-the-olap-landscape">1.14 RainDB's position in the OLAP landscape</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#115-columnar-memory-layout-in-raindb">1.15 Columnar memory layout in RainDB</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#116-batches-morsels-and-vector-sizing-in-raindb">1.16 Batches, morsels, and vector sizing in RainDB</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#terminology-in-raindb">Terminology in RainDB</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#duckdb-style-vector-bounds">DuckDB-style vector bounds</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#morsel-parallelism-in-practice">Morsel parallelism in practice</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#117-iterator-versus-vectorization-in-raindb">1.17 Iterator versus vectorization in RainDB</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#118-embedded-engine-design-in-raindb">1.18 Embedded engine design in RainDB</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#119-simd-in-raindb">1.19 SIMD in RainDB</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#120-end-to-end-query-path">1.20 End-to-end query path</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#step-1-public-api">Step 1: Public API</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#step-2-session-creation">Step 2: Session creation</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#step-3-sql-compilation">Step 3: SQL compilation</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#step-4-executor-dispatch">Step 4: Executor dispatch</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#step-5-vectorized-execution">Step 5: Vectorized execution</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#step-6-result-materialization">Step 6: Result materialization</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#121-quantitative-comparison-in-raindb">1.21 Quantitative comparison in RainDB</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#122-worked-example-order-lines-analytics">1.22 Worked example: order lines analytics</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#123-common-pitfalls">1.23 Common pitfalls</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#pitfall-1-treating-batches-as-rows">Pitfall 1: Treating batches as rows</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#pitfall-2-ignoring-endianness">Pitfall 2: Ignoring endianness</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#pitfall-3-mixing-row-counts-across-columns">Pitfall 3: Mixing row counts across columns</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#pitfall-4-assuming-sql-full-fidelity">Pitfall 4: Assuming SQL full fidelity</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#pitfall-5-tiny-batches-in-production-with-strict-sizing">Pitfall 5: Tiny batches in production with strict sizing</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#pitfall-6-simd-with-nulls">Pitfall 6: SIMD with nulls</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#pitfall-7-confusing-logical-and-physical-plans">Pitfall 7: Confusing logical and physical plans</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#124-exercises-implementation">1.24 Exercises (implementation)</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#exercise-17-trace-the-path">Exercise 1.7 — Trace the path</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#exercise-18-batch-invariants">Exercise 1.8 — Batch invariants</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#exercise-19-executephysicalasync-benchmark">Exercise 1.9 — ExecutePhysicalAsync benchmark</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#125-chapter-summary">1.25 Chapter summary</a>
+                        </li>
+                        
+                  </ul>
+                </aside>
+                
+      </main>
+    </div>
+  </div>
+  <script src="assets/vendor/mermaid.min.js"></script>
+  <script src="assets/vendor/highlight.min.js"></script>
+  <script src="assets/js/site.js"></script>
+</body>
+</html>

@@ -1,0 +1,1079 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Chapter 12: Sort and Limit · Building an OLAP Database Engine from Scratch with RainDB</title>
+  <meta name="description" content="Generated documentation site">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="assets/css/site.css">
+  <link rel="stylesheet" href="assets/vendor/atom-one-dark.min.css">
+</head>
+<body>
+  <div class="site">
+    <header class="topbar">
+      <button class="sidebar-toggle" id="sidebar-toggle" aria-label="Toggle navigation">☰</button>
+      <a href="index.html" class="brand">Building an OLAP Database Engine from Scratch with RainDB</a>
+      <div class="search-wrap">
+        <input type="search" id="search" placeholder="Search docs…" autocomplete="off">
+      </div>
+    </header>
+
+    <div class="layout">
+      <aside class="sidebar" id="sidebar">
+        <nav class="nav" aria-label="Documentation">
+          <ul class="nav-list">
+            
+                        <li class="nav-item depth-0">
+                          
+                            <a href="index.html" class="nav-link">Building an OLAP Database Engine from Scratch</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="01-olap-fundamentals.html" class="nav-link">Chapter 1: OLAP Fundamentals</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="02-architecture-and-modules.html" class="nav-link">Chapter 2: Architecture and Modules</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="03-columnar-storage-model.html" class="nav-link">Chapter 3: Columnar Storage Model</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="04-chunk-data-structures.html" class="nav-link">Chapter 4: Chunk Data Structures</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="05-catalog-and-tables.html" class="nav-link">Chapter 5: Catalog and Tables</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="06-buffer-management.html" class="nav-link">Chapter 6: Buffer Management</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="07-execution-pipeline.html" class="nav-link">Chapter 7: Execution Pipeline</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="08-vectorized-scan-filter-project.html" class="nav-link">Chapter 8: Vectorized Scan, Filter, and Project</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="09-global-aggregates.html" class="nav-link">Chapter 9: Global Aggregates</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="10-hash-aggregation.html" class="nav-link">Chapter 10: Hash Aggregation</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="11-joins.html" class="nav-link">Chapter 11: Joins</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0 is-active">
+                          
+                            <a href="12-sort-and-limit.html" class="nav-link">Chapter 12: Sort and Limit</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="13-sql-compilation.html" class="nav-link">Chapter 13: SQL Compilation</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="14-persistence.html" class="nav-link">Chapter 14: Persistence</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="15-future-extensions.html" class="nav-link">Chapter 15: Future Extensions</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="16-mmap-io.html" class="nav-link">Chapter 16: mmap I/O</a>
+                            
+                        </li>
+                        
+          </ul>
+        </nav>
+      </aside>
+
+      <main class="content">
+        <article class="doc">
+          <header class="doc-header">
+            <h1>Chapter 12: Sort and Limit</h1>
+          </header>
+          <div class="doc-body"><h1 id="chapter-12-sort-and-limit">Chapter 12: Sort and Limit</h1>
+<p><code>ORDER BY</code> and <code>LIMIT</code> in RainDB are handled by <code>SortTopNEngine</code> — an in-memory operator that collects row locations from columnar batches, optionally sorts them with a multi-column comparer, truncates to a limit, and gathers output columns into a single result batch.</p>
+<p>This chapter is split into two parts. <strong>Part I</strong> covers sorting theory in query engines: external vs in-memory sort, stable vs unstable algorithms, ORDER BY semantics, Top-K algorithms, sort vs hash for grouping, and sort as a physical operator. <strong>Part II</strong> traces RainDB's <code>SortTopNPhysicalPlan</code>, <code>ExecuteTableAsync</code>, <code>ExecuteJoinAsync</code>, <code>RowLoc</code>, and gather materialization.</p>
+<hr />
+<h1 id="part-i-theory">Part I: Theory</h1>
+<h2 id="sorting-in-query-engines">12.1 Sorting in query engines</h2>
+<p>Sort shows up everywhere once you leave pure scan-filter-project:</p>
+<ul>
+<li><code>ORDER BY</code> in user queries</li>
+<li>Sort-aggregation as a <code>GROUP BY</code> alternative</li>
+<li>Sort-merge join</li>
+<li>Window functions (<code>ROW_NUMBER</code>, <code>RANK</code>) — partition, then order</li>
+<li><code>DISTINCT</code> via sort + adjacent dedup</li>
+<li>Set ops with duplicate removal</li>
+</ul>
+<p>It is often the most expensive operator in an analytical plan because it touches every row and compares wide keys repeatedly.</p>
+<h3 id="in-memory-sort">In-memory sort</h3>
+<p>When the working set fits the operator memory budget (<code>work_mem</code>, buffer pool):</p>
+<ol>
+<li>Collect row handles (or keys + row ids)</li>
+<li>Run a comparison sort — typically O(n log n)</li>
+<li>Emit sorted output or materialize a batch</li>
+</ol>
+<p><strong>Introsort</strong> — what .NET <code>Array.Sort</code> uses — blends quicksort, heapsort fallback, and insertion sort on tiny partitions for O(n log n) worst case.</p>
+<p><code>SortTopNEngine</code> sorts a <code>RowLoc[]</code> with <code>RowLocComparer</code> entirely in memory.</p>
+<h3 id="external-sort-disk-backed">External sort (disk-backed)</h3>
+<p>When n exceeds RAM:</p>
+<p><strong>Phase 1 — run generation</strong></p>
+<ul>
+<li>Read memory-sized chunks</li>
+<li>Sort each chunk in RAM</li>
+<li>Write sorted <strong>runs</strong> to temp files</li>
+</ul>
+<p><strong>Phase 2 — merge</strong></p>
+<ul>
+<li>K-way merge with a heap of size k (fan-in)</li>
+<li>Stream globally sorted output</li>
+</ul>
+<p>Still O(n log n) comparisons; I/O stays O(n) if merge width is tuned. <strong>Replacement selection</strong> can lengthen initial runs beyond one memory chunk, cutting merge passes.</p>
+<p>RainDB Phase 1 has <strong>no external sort</strong> — everything must fit in process memory. <code>ISpillWriter</code> or mmap temp files are the likely extension points.</p>
+<h3 id="sort-keys-vs-row-payloads">Sort keys vs row payloads</h3>
+<p>Compare skinny records, not whole rows:</p>
+<pre><code>sort key: (salary DESC, name ASC)
+payload:  (batch_idx, row_idx)   ← RainDB RowLoc
+</code></pre>
+<p>Sort permutes indices; a later <strong>gather</strong> reads column values. Wide VARCHAR columns never move during comparisons.</p>
+<h2 id="stable-vs-unstable-sort">12.2 Stable vs unstable sort</h2>
+<p><strong>Stable</strong> means equal keys keep their original relative order.</p>
+<table class="table">
+<thead>
+<tr>
+<th>Property</th>
+<th>Stable sort</th>
+<th>Unstable sort</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Equal keys</td>
+<td>original order preserved</td>
+<td>order undefined</td>
+</tr>
+<tr>
+<td>Implementation</td>
+<td>merge sort, timsort</td>
+<td>quicksort (typical)</td>
+</tr>
+<tr>
+<td>Use case</td>
+<td>implicit tie-break via input order</td>
+<td>raw speed</td>
+</tr>
+</tbody>
+</table>
+<p>SQL does not mandate tie order for <code>ORDER BY k</code> alone — ties are implementation-defined unless you add more keys.</p>
+<p>.NET <code>Array.Sort</code> with <code>IComparer&lt;T&gt;</code> is <strong>not stable</strong> for reference types. RainDB does not depend on stability.</p>
+<p>For deterministic ties, list explicit secondary keys:</p>
+<pre><code class="language-sql">ORDER BY salary DESC, employee_id ASC
+</code></pre>
+<h2 id="order-by-semantics">12.3 ORDER BY semantics</h2>
+<p><code>ORDER BY</code> defines a sort order over result rows — almost a total order once you fix NULL placement.</p>
+<h3 id="multi-column-ordering">Multi-column ordering</h3>
+<p>Lexicographic: compare column 1; on tie, compare column 2; repeat.</p>
+<pre><code>ORDER BY a ASC, b DESC
+</code></pre>
+<p>Sort by <code>a</code> ascending; within equal <code>a</code>, sort by <code>b</code> descending.</p>
+<h3 id="null-placement">NULL placement</h3>
+<p>SQL:2003 adds <code>NULLS FIRST</code> / <code>NULLS LAST</code> per key. Defaults differ:</p>
+<table class="table">
+<thead>
+<tr>
+<th>DBMS</th>
+<th>Default NULL order ASC</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>PostgreSQL</td>
+<td>NULLS LAST</td>
+</tr>
+<tr>
+<td>Oracle</td>
+<td>NULLS LAST</td>
+</tr>
+<tr>
+<td>SQL Server</td>
+<td>NULLs first (clustered index legacy)</td>
+</tr>
+</tbody>
+</table>
+<p>RainDB <code>RowLocComparer</code> puts <strong>NULLs first</strong> on ascending keys (<code>na</code> returns <code>-1</code> when only the left side is null). <code>DESC</code> negates the final comparison, so nulls tend to sort last on descending keys.</p>
+<p><code>NULLS FIRST</code> / <code>NULLS LAST</code> syntax is not exposed yet.</p>
+<h3 id="expressions-and-aliases">Expressions and aliases</h3>
+<p>Full SQL allows sorting expressions and SELECT aliases. RainDB binds <code>SortKeyPhysicalSpec</code> to concrete column indices — expression keys need an upstream projection node.</p>
+<h3 id="order-by-without-limit">ORDER BY without LIMIT</h3>
+<p>Legal and common. Cost is O(n log n) compare work plus O(n) gather. RainDB pays full sort even when <code>LIMIT</code> is tiny — no Top-K shortcut yet.</p>
+<h2 id="top-k-algorithms">12.4 Top-K algorithms</h2>
+<p><code>LIMIT K</code> after <code>ORDER BY</code> only needs the best K rows, not a full ranking.</p>
+<h3 id="naive-approach">Naive approach</h3>
+<p>Sort all n rows, slice the first K — O(n log n). RainDB does this today.</p>
+<h3 id="heap-based-top-k">Heap-based Top-K</h3>
+<p>Keep a size-K heap (min-heap for &quot;top K largest&quot;, max-heap for &quot;top K smallest&quot;):</p>
+<pre><code>for each row r:
+if heap.size &lt; K: push r
+else if r &gt; heap.min(): pop min, push r
+</code></pre>
+<ul>
+<li>Time: O(n log K)</li>
+<li>Space: O(K)</li>
+</ul>
+<p>When K ≪ n (<code>LIMIT 10</code> on a billion rows), heaps win by a lot.</p>
+<h3 id="quickselect">Quickselect</h3>
+<p>Partition like quicksort but recurse only toward the K-th element — O(n) average, O(n²) worst.</p>
+<p>Some engines use this for <code>LIMIT</code> without <code>ORDER BY</code> (any K rows).</p>
+<h3 id="partial-sort-nth_element">Partial sort (nth_element)</h3>
+<p><code>std::partial_sort</code> — only the first K positions are fully ordered — O(n log K).</p>
+<h3 id="top-k-with-order-by-on-multiple-columns">Top-K with ORDER BY on multiple columns</h3>
+<p>The heap entry must carry the full sort key tuple; the comparer matches <code>RowLocComparer</code>.</p>
+<h3 id="distributed-top-k">Distributed Top-K</h3>
+<p>Each shard returns local top-K; the coordinator merges with care — global bounds matter when keys are partitioned.</p>
+<p>Future RainDB work: heap path when <code>plan.Limit</code> is set and <code>Limit &lt;&lt; row_count</code>.</p>
+<h2 id="sort-vs-hash-for-grouping">12.5 Sort vs hash for grouping</h2>
+<p><code>GROUP BY</code> has two classic implementations:</p>
+<table class="table">
+<thead>
+<tr>
+<th>Aspect</th>
+<th>Hash aggregation</th>
+<th>Sort aggregation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Passes</td>
+<td>1 over data</td>
+<td>Sort + 1 scan of sorted data</td>
+</tr>
+<tr>
+<td>Memory</td>
+<td>O(groups)</td>
+<td>O(n) for sort</td>
+</tr>
+<tr>
+<td>Output order</td>
+<td>Unordered unless extra sort</td>
+<td>Sorted by group key</td>
+</tr>
+<tr>
+<td>Spill</td>
+<td>Grace hash partition</td>
+<td>External sort runs</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Sort aggregation:</strong></p>
+<ol>
+<li>Sort rows by group key</li>
+<li>Scan sorted array; accumulate within each equal-key <strong>run</strong></li>
+<li>Emit one row per run</li>
+</ol>
+<p>Wins when data arrives pre-sorted or hash memory is impossible but external sort is OK. Loses when groups are numerous and random — hash often needs only one pass.</p>
+<p>RainDB hashes (Chapter 10), then sorts keys for deterministic output — not sort-aggregation as the primary path.</p>
+<h3 id="when-sort-beats-hash-for-group-by">When sort beats hash for GROUP BY</h3>
+<ul>
+<li>Hash table cannot fit, but sort can spill</li>
+<li>Input already ordered on group keys</li>
+<li>You need grouped output in key order without a second sort</li>
+</ul>
+<h2 id="sort-as-physical-operator">12.6 Sort as physical operator</h2>
+<p>Volcano/Cascades treat <strong>Sort</strong> as a unary operator:</p>
+<pre><code>Sort(keys, limit?)
+└── child operator
+</code></pre>
+<p>Notable properties:</p>
+<ul>
+<li><strong>Blocking</strong> — usually must drain the child before emitting row 1 (unless incremental sort applies)</li>
+<li><strong>Interesting order</strong> — elide sort when the child already delivers the required key order</li>
+<li><strong>Limit pushdown</strong> — Top-N can use a heap instead of full sort</li>
+</ul>
+<p>RainDB fuses sort and limit in <code>SortTopNPhysicalPlan</code> and <code>JoinSortTopNPhysicalPlan</code> rather than chaining separate <code>Sort</code> and <code>Limit</code> nodes.</p>
+<h3 id="interesting-orders">Interesting orders</h3>
+<p>If the child is sorted on a prefix of the <code>ORDER BY</code> keys, <strong>incremental sort</strong> only sorts within equal-prefix groups.</p>
+<p>Example: data clustered on <code>region</code>; query <code>ORDER BY region, revenue</code> — sort inside each region block only.</p>
+<p>RainDB does not detect interesting orders; it always full-sorts when keys are present.</p>
+<h3 id="sort-join-interaction">Sort + join interaction</h3>
+<p><code>JoinSortTopNPhysicalPlan</code> runs:</p>
+<pre><code>Join → materialize all matches → Sort → Limit
+</code></pre>
+<p><code>LIMIT</code> does not prune the join — every match is built first. <strong>Top-K join</strong> pushdown is an obvious future optimization.</p>
+<hr />
+<h1 id="part-ii-raindb-implementation">Part II: RainDB Implementation</h1>
+<h2 id="physical-plans">12.7 Physical plans</h2>
+<h3 id="sorttopnphysicalplan">SortTopNPhysicalPlan</h3>
+<pre><code class="language-csharp">// src/RainDB.Query/Plans/SortTopNPhysicalPlan.cs
+public sealed class SortTopNPhysicalPlan : IPhysicalPlan
+{
+    public TableId TableId { get; }
+    public int[] OutputColumnIndices { get; }
+    public ColumnCompareFilter[]? Filters { get; }
+    public SortKeyPhysicalSpec[] SortKeys { get; }
+    public int? Limit { get; }
+    public VectorizedScanExecutionOptions Options { get; }
+}
+</code></pre>
+<p>Constructor rejects <code>limit &lt; 1</code> when specified.</p>
+<p><code>Explain()</code> example:</p>
+<pre><code>SortTopN(table=...) PROJECT[0,2] KEYS[2D,0A] FILTER[col1&gt;5] LIMIT(100)
+</code></pre>
+<h3 id="joinsorttopnphysicalplan">JoinSortTopNPhysicalPlan</h3>
+<pre><code class="language-csharp">// src/RainDB.Query/Plans/JoinSortTopNPhysicalPlan.cs
+public sealed class JoinSortTopNPhysicalPlan : IPhysicalPlan
+{
+    public JoinPhysicalPlan Join { get; }
+    public SortKeyPhysicalSpec[] SortKeys { get; }
+    public int? Limit { get; }
+}
+</code></pre>
+<h3 id="sortkeyphysicalspec">SortKeyPhysicalSpec</h3>
+<pre><code class="language-csharp">public readonly record struct SortKeyPhysicalSpec(int ColumnIndex, bool Descending);
+</code></pre>
+<p>When <code>SortKeys</code> is empty, rows keep collection order (batch index, then row index) — <code>LIMIT</code> without <code>ORDER BY</code>.</p>
+<h2 id="executetableasync">12.8 ExecuteTableAsync</h2>
+<pre><code class="language-csharp">// src/RainDB.Query/Execution/SortTopNEngine.cs
+public static ValueTask&lt;IQueryResult&gt; ExecuteTableAsync(
+    SortTopNPhysicalPlan plan,
+    IColumnarTableSource table,
+    IExecutionContext context)
+{
+    ArgumentNullException.ThrowIfNull(plan);
+    ArgumentNullException.ThrowIfNull(table);
+    ArgumentNullException.ThrowIfNull(context);
+    if (plan.TableId != table.Id)
+        throw new ArgumentException(&quot;SortTopN plan table id does not match source.&quot;, nameof(table));
+    ValidateSortKeys(table.Schema, plan.SortKeys);
+    ValidateOutputAndFilters(table.Schema, plan.OutputColumnIndices, plan.Filters);
+
+    var batches = table.Batches;
+    var ct = context.CancellationToken;
+    var rows = CollectFilteredRows(batches, plan.Filters, ct);
+    if (plan.SortKeys.Length &gt; 0)
+        Array.Sort(rows, new RowLocComparer(table.Schema, plan.SortKeys, batches));
+
+    var take = plan.Limit is { } lim ? Math.Min(lim, rows.Length) : rows.Length;
+    var batch = MaterializeRows(batches, table.Schema, rows.AsSpan(0, take), plan.OutputColumnIndices);
+    return new ValueTask&lt;IQueryResult&gt;(new ColumnarMaterializedQueryResult([batch]));
+}
+</code></pre>
+<p>Pipeline:</p>
+<ol>
+<li><strong>Collect</strong> — <code>RowLoc[]</code> with optional filters</li>
+<li><strong>Sort</strong> — <code>Array.Sort</code> if sort keys present</li>
+<li><strong>Limit</strong> — slice first <code>take</code> elements</li>
+<li><strong>Materialize</strong> — gather into one <code>ColumnarBatch</code></li>
+</ol>
+<p><code>DefaultQueryExecutor</code> dispatches <code>SortTopNPhysicalPlan</code> to this method.</p>
+<h2 id="executejoinasync">12.9 ExecuteJoinAsync</h2>
+<pre><code class="language-csharp">public static async ValueTask&lt;IQueryResult&gt; ExecuteJoinAsync(
+    JoinSortTopNPhysicalPlan plan,
+    IColumnarTableSource probeTable,
+    IColumnarTableSource buildTable,
+    IExecutionContext context)
+{
+    var joinRes = await JoinExecutionEngine.ExecuteAsync(
+        plan.Join, probeTable, buildTable, context).ConfigureAwait(false);
+    if (joinRes is not IColumnarQueryResult col)
+        throw new InvalidOperationException(&quot;Join must return columnar result.&quot;);
+    var batches = col.Batches;
+    var schema = plan.Join.OutputSchema;
+    ValidateSortKeys(schema, plan.SortKeys);
+    var rows = CollectAllRows(batches, context.CancellationToken);
+    if (plan.SortKeys.Length &gt; 0)
+        Array.Sort(rows, new RowLocComparer(schema, plan.SortKeys, batches));
+
+    var take = plan.Limit is { } lim ? Math.Min(lim, rows.Length) : rows.Length;
+    var outIx = new int[schema.Columns.Count];
+    for (var i = 0; i &lt; outIx.Length; i++)
+        outIx[i] = i;
+    var batch = MaterializeRows(batches, schema, rows.AsSpan(0, take), outIx);
+    return new ColumnarMaterializedQueryResult([batch]);
+}
+</code></pre>
+<p>Differences from table path:</p>
+<ul>
+<li>Join executes first — full materialization</li>
+<li>No sort-engine filters (join side filters already applied)</li>
+<li>All join output columns projected (<code>outIx[i] = i</code>)</li>
+</ul>
+<p>Performance: join cost dominates when match count is large; <code>LIMIT</code> does not reduce join work.</p>
+<h2 id="rowloc-indirect-row-addressing">12.10 RowLoc: indirect row addressing</h2>
+<pre><code class="language-csharp">private readonly struct RowLoc
+{
+    public RowLoc(int batchIdx, int rowIdx)
+    {
+        BatchIdx = batchIdx;
+        RowIdx = rowIdx;
+    }
+
+    public int BatchIdx { get; }
+    public int RowIdx { get; }
+}
+</code></pre>
+<p>Sorting permutes <code>RowLoc</code> values without moving column data — <strong>sort indirect indices</strong> pattern.</p>
+<p>After sort, <code>MaterializeRows</code> reads <code>batches[loc.BatchIdx].Columns[col][loc.RowIdx]</code> — one gather per output column.</p>
+<p>Comparison to join's <code>RowRefMatch</code>: <code>RowLoc</code> addresses single table; <code>RowRefMatch</code> pairs left and right.</p>
+<h2 id="collectfilteredrows">12.11 CollectFilteredRows</h2>
+<pre><code class="language-csharp">private static RowLoc[] CollectFilteredRows(
+    IReadOnlyList&lt;IColumnarBatch&gt; batches,
+    ColumnCompareFilter[]? filters,
+    CancellationToken ct)
+{
+    var rent = ArrayPool&lt;int&gt;.Shared;
+    var total = 0;
+    foreach (var b in batches)
+        total += b.RowCount;
+    var tmp = rent.Rent(Math.Max(total, 16));
+    try
+    {
+        var list = new List&lt;RowLoc&gt;(total);
+        for (var bi = 0; bi &lt; batches.Count; bi++)
+        {
+            ct.ThrowIfCancellationRequested();
+            var batch = batches[bi];
+            if (filters is { Length: &gt; 0 } fa)
+            {
+                var k = SelectionEvaluator.FillSelectedRowsConjunctive(
+                    batch, fa, tmp.AsSpan(0, batch.RowCount));
+                for (var i = 0; i &lt; k; i++)
+                    list.Add(new RowLoc(bi, tmp[i]));
+            }
+            else
+            {
+                for (var r = 0; r &lt; batch.RowCount; r++)
+                    list.Add(new RowLoc(bi, r));
+            }
+        }
+        return list.ToArray();
+    }
+    finally
+    {
+        rent.Return(tmp);
+    }
+}
+</code></pre>
+<p><strong>Capacity hint:</strong> <code>List&lt;RowLoc&gt;(total)</code> pre-allocates when unfiltered.</p>
+<p><strong>Filter path:</strong> rented <code>int[]</code> selection buffer per batch — same as scan/hash aggregate.</p>
+<p><strong>Dense path:</strong> <code>r = 0 .. RowCount-1</code> without selection buffer.</p>
+<p><strong>Pre-sort order:</strong> increasing batch index, then row index.</p>
+<h3 id="collectallrows">CollectAllRows</h3>
+<pre><code class="language-csharp">private static RowLoc[] CollectAllRows(IReadOnlyList&lt;IColumnarBatch&gt; batches, CancellationToken ct)
+{
+    var list = new List&lt;RowLoc&gt;();
+    for (var bi = 0; bi &lt; batches.Count; bi++)
+    {
+        ct.ThrowIfCancellationRequested();
+        var batch = batches[bi];
+        for (var r = 0; r &lt; batch.RowCount; r++)
+            list.Add(new RowLoc(bi, r));
+    }
+    return list.ToArray();
+}
+</code></pre>
+<p>Join output typically one batch; code handles multiple.</p>
+<h2 id="rowloccomparer">12.12 RowLocComparer</h2>
+<pre><code class="language-csharp">private sealed class RowLocComparer : IComparer&lt;RowLoc&gt;
+{
+    public int Compare(RowLoc x, RowLoc y)
+    {
+        foreach (var spec in _keys)
+        {
+            var c = CompareAtColumn(spec.ColumnIndex, x, y);
+            if (c != 0)
+                return spec.Descending ? -c : c;
+        }
+        return 0;
+    }
+}
+</code></pre>
+<p>Lexicographic multi-column compare with per-key <code>Descending</code> flip.</p>
+<h3 id="null-ordering">NULL ordering</h3>
+<pre><code class="language-csharp">private int CompareAtColumn(int colIx, RowLoc a, RowLoc b)
+{
+    var na = colA.HasNulls &amp;&amp; SelectionEvaluator.IsNull(colA.NullBitmap.Span, a.RowIdx, true);
+    var nb = colB.HasNulls &amp;&amp; SelectionEvaluator.IsNull(colB.NullBitmap.Span, b.RowIdx, true);
+    if (na &amp;&amp; nb) return 0;
+    if (na) return -1;
+    if (nb) return 1;
+
+    return t switch
+    {
+        RainDbType.Utf8 =&gt; CompareUtf8(colA, a.RowIdx, colB, b.RowIdx),
+        RainDbType.Int32 =&gt; ReadI32(colA, a.RowIdx).CompareTo(ReadI32(colB, b.RowIdx)),
+        RainDbType.Int64 =&gt; ReadI64(colA, a.RowIdx).CompareTo(ReadI64(colB, b.RowIdx)),
+        RainDbType.Float64 =&gt; ReadF64(colA, a.RowIdx).CompareTo(ReadF64(colB, b.RowIdx)),
+        RainDbType.Boolean =&gt; ReadBool(colA, a.RowIdx).CompareTo(ReadBool(colB, b.RowIdx)),
+        _ =&gt; 0,
+    };
+}
+</code></pre>
+<p>NULLs first in ASC; DESC inverts final non-zero comparison.</p>
+<h3 id="utf-8-comparison">UTF-8 comparison</h3>
+<pre><code class="language-csharp">private static int CompareUtf8(IColumnChunk ca, int ra, IColumnChunk cb, int rb)
+{
+    ReadOnlySpan&lt;byte&gt; sa = ca switch
+    {
+        Utf8ColumnChunk u =&gt; u.Values.Span[u.Offsets.Span[ra]..u.Offsets.Span[ra + 1]],
+        Utf8LengthPrefixedColumnChunk lp =&gt; lp.GetPayloadSpan(ra),
+        _ =&gt; throw new InvalidOperationException(),
+    };
+    // symmetric for sb
+    return sa.SequenceCompareTo(sb);
+}
+</code></pre>
+<p>Byte-wise lexicographic (UTF-8 code unit order, not Unicode collation). Consistent with join key equality.</p>
+<h3 id="fixed-width-reads">Fixed-width reads</h3>
+<p>Little-endian <code>BinaryPrimitives</code> / <code>BitConverter</code> for <code>Float64</code> — matches storage layout elsewhere.</p>
+<h2 id="limit-semantics">12.13 LIMIT semantics</h2>
+<pre><code class="language-csharp">var take = plan.Limit is { } lim ? Math.Min(lim, rows.Length) : rows.Length;
+var batch = MaterializeRows(batches, table.Schema, rows.AsSpan(0, take), plan.OutputColumnIndices);
+</code></pre>
+<table class="table">
+<thead>
+<tr>
+<th><code>Limit</code></th>
+<th>Behavior</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>null</code></td>
+<td>All qualifying rows (after sort)</td>
+</tr>
+<tr>
+<td><code>N &gt;= 1</code></td>
+<td>First N in sort order</td>
+</tr>
+<tr>
+<td><code>N &gt; rows.Length</code></td>
+<td>All rows (<code>Math.Min</code>)</td>
+</tr>
+</tbody>
+</table>
+<p><code>LIMIT</code> without <code>ORDER BY</code> — arbitrary prefix in batch/row collection order.</p>
+<p><strong>No <code>OFFSET</code></strong> in physical plan yet.</p>
+<p>Constructor throws if <code>limit &lt; 1</code> when provided.</p>
+<h2 id="materializerows">12.14 MaterializeRows</h2>
+<pre><code class="language-csharp">private static ColumnarBatch MaterializeRows(
+    IReadOnlyList&lt;IColumnarBatch&gt; batches,
+    TableSchema schema,
+    ReadOnlySpan&lt;RowLoc&gt; rows,
+    ReadOnlySpan&lt;int&gt; outputColumnIndices)
+{
+    var n = rows.Length;
+    var cols = new IColumnChunk[outputColumnIndices.Length];
+    for (var c = 0; c &lt; outputColumnIndices.Length; c++)
+    {
+        var colIx = outputColumnIndices[c];
+        var t = schema.Columns[colIx].Type;
+        cols[c] = t == RainDbType.Utf8
+            ? GatherUtf8Column(batches, colIx, rows)
+            : GatherFixedWidthColumn(batches, colIx, t, rows);
+    }
+    return new ColumnarBatch(n, cols);
+}
+</code></pre>
+<p>Output always <strong>one batch</strong> — consolidation regardless of input batch count.</p>
+<p>Supports <code>SELECT name FROM t ORDER BY salary</code> — <code>OutputColumnIndices</code> may differ from sort keys.</p>
+<h2 id="gatherfixedwidthcolumn">12.15 GatherFixedWidthColumn</h2>
+<pre><code class="language-csharp">private static IColumnChunk GatherFixedWidthColumn(
+    IReadOnlyList&lt;IColumnarBatch&gt; batches,
+    int colIx,
+    RainDbType type,
+    ReadOnlySpan&lt;RowLoc&gt; rows)
+{
+    var w = ColumnTypeSizes.FixedWidthBytes(type);
+    var values = new byte[checked(rows.Length * w)];
+    var nbBytes = ColumnTypeSizes.NullBitmapBytes(rows.Length);
+    var nb = nbBytes &gt; 0 ? new byte[nbBytes] : Array.Empty&lt;byte&gt;();
+    var anyNull = false;
+    for (var o = 0; o &lt; rows.Length; o++)
+    {
+        var loc = rows[o];
+        var col = batches[loc.BatchIdx].Columns[colIx];
+        var r = loc.RowIdx;
+        if (SelectionEvaluator.IsNull(srcNb, r, col.HasNulls))
+        {
+            anyNull = true;
+            SetNull(nb, o);
+            continue;
+        }
+        col.Values.Span.Slice(r * w, w).CopyTo(values.AsSpan(o * w, w));
+    }
+    return new FixedWidthColumnChunk(type, rows.Length, values, nb, anyNull);
+}
+</code></pre>
+<p>Same gather pattern as <code>JoinExecutionEngine.MaterializeOneColumn</code>.</p>
+<h2 id="gatherutf8column">12.16 GatherUtf8Column</h2>
+<pre><code class="language-csharp">private static IColumnChunk GatherUtf8Column(
+    IReadOnlyList&lt;IColumnarBatch&gt; batches, int colIx, ReadOnlySpan&lt;RowLoc&gt; rows)
+{
+    var offsets = new int[rows.Length + 1];
+    using var blob = new MemoryStream();
+    // ...
+    for (var o = 0; o &lt; rows.Length; o++)
+    {
+        offsets[o] = (int)blob.Length;
+        // null check → SetNull
+        // else append payload bytes
+    }
+    offsets[rows.Length] = (int)blob.Length;
+    return new Utf8ColumnChunk(rows.Length, offsets, blob.ToArray(), nb, anyNull);
+}
+</code></pre>
+<p>Arrow-style offset + blob UTF-8 layout.</p>
+<h2 id="validation">12.17 Validation</h2>
+<h3 id="sort-keys">Sort keys</h3>
+<pre><code class="language-csharp">private static void ValidateSortKeys(TableSchema schema, SortKeyPhysicalSpec[] keys)
+{
+    foreach (var k in keys)
+    {
+        if ((uint)k.ColumnIndex &gt;= (uint)schema.Columns.Count)
+            throw new ArgumentException($&quot;Sort key column index {k.ColumnIndex} is out of range.&quot;);
+        var t = schema.Columns[k.ColumnIndex].Type;
+        if (t != RainDbType.Utf8 &amp;&amp; !ColumnTypeSizes.IsFixedWidth(t))
+            throw new NotSupportedException($&quot;ORDER BY on type {t} is not supported.&quot;);
+    }
+}
+</code></pre>
+<p>Same type restrictions as group keys and join keys.</p>
+<h3 id="output-and-filters">Output and filters</h3>
+<p>Bounds-checks <code>OutputColumnIndices</code> and filter column indices against schema.</p>
+<h2 id="sql-compilation-mapping">12.18 SQL compilation mapping</h2>
+<p>Binder produces <code>SortTopNPhysicalPlan</code> for single-table <code>ORDER BY</code> / <code>LIMIT</code>, or <code>JoinSortTopNPhysicalPlan</code> when sort follows join.</p>
+<p>Example:</p>
+<pre><code class="language-sql">SELECT a, b FROM t WHERE c &gt; 0 ORDER BY b DESC, a LIMIT 100
+</code></pre>
+<p>Maps to:</p>
+<ul>
+<li><code>Filters</code>: <code>c &gt; 0</code></li>
+<li><code>SortKeys</code>: <code>[{b, Descending}, {a, Ascending}]</code></li>
+<li><code>OutputColumnIndices</code>: indices of <code>a</code>, <code>b</code></li>
+<li><code>Limit</code>: <code>100</code></li>
+</ul>
+<p>Global aggregates bypass sort engine. <code>GROUP BY</code> key sort happens in <code>HashAggregateEngine.SortKeys</code> — separate from <code>SortTopNEngine</code>.</p>
+<h2 id="complexity-and-memory">12.19 Complexity and memory</h2>
+<p>Let R = qualifying rows, C = output columns, K = sort keys.</p>
+<table class="table">
+<thead>
+<tr>
+<th>Phase</th>
+<th>Time</th>
+<th>Extra memory</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Collect</td>
+<td>O(R)</td>
+<td><code>RowLoc[R]</code></td>
+</tr>
+<tr>
+<td>Sort</td>
+<td>O(R log R) × compare cost</td>
+<td>in-place on array</td>
+</tr>
+<tr>
+<td>Materialize</td>
+<td>O(take × C)</td>
+<td>output buffers</td>
+</tr>
+</tbody>
+</table>
+<p>Each compare may read K columns from random batches — cache-unfriendly for large R.</p>
+<p>For <code>LIMIT k</code> with large R: heap Top-K would be O(R log k) — not implemented.</p>
+<h2 id="comparison-to-hash-aggregate-sorting">12.20 Comparison to hash aggregate sorting</h2>
+<table class="table">
+<thead>
+<tr>
+<th></th>
+<th><code>HashAggregateEngine.SortKeys</code></th>
+<th><code>SortTopNEngine</code></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Input</td>
+<td><code>GroupKey</code> in hash map</td>
+<td><code>RowLoc</code> across batches</td>
+</tr>
+<tr>
+<td>Purpose</td>
+<td>Deterministic group order</td>
+<td>User <code>ORDER BY</code></td>
+</tr>
+<tr>
+<td>Comparator</td>
+<td><code>GroupKeyComparer</code></td>
+<td><code>RowLocComparer</code></td>
+</tr>
+<tr>
+<td>Output</td>
+<td>In-place key array → materialize</td>
+<td>Gather → new batch</td>
+</tr>
+</tbody>
+</table>
+<p>Both use <code>FixedWidthKeyCompare</code> / UTF-8 <code>SequenceCompareTo</code> for column parts.</p>
+<h2 id="cancellation">12.21 Cancellation</h2>
+<p><code>CollectFilteredRows</code> and <code>CollectAllRows</code> check <code>CancellationToken</code> per batch. Sort and materialize do not — once collection completes, remaining work runs to completion.</p>
+<h2 id="example-filtered-sort-with-limit">12.22 Example: filtered sort with limit</h2>
+<p>Table <code>employees</code>, 3 batches × 1000 rows:</p>
+<pre><code class="language-sql">SELECT name, salary FROM employees
+WHERE dept = 'eng'
+ORDER BY salary DESC
+LIMIT 5
+</code></pre>
+<pre><code>CollectFilteredRows → 590 RowLoc entries
+Array.Sort(RowLocComparer, salary DESC)
+take = min(5, 590) = 5
+MaterializeRows → ColumnarBatch(5, [name_chunk, salary_chunk])
+</code></pre>
+<h2 id="example-join-then-sort">12.23 Example: join then sort</h2>
+<pre><code class="language-sql">SELECT o.id, c.name
+FROM orders o JOIN customers c ON o.cid = c.id
+ORDER BY o.id
+LIMIT 50
+</code></pre>
+<pre><code>JoinExecutionEngine → ColumnarBatch (all matches)
+CollectAllRows → RowLoc[]
+Array.Sort by o.id
+take = 50
+MaterializeRows (all columns)
+</code></pre>
+<p>Join cost is independent of LIMIT.</p>
+<h2 id="empty-results">12.24 Empty results</h2>
+<p>Filters eliminate all rows → <code>RowLoc[0]</code> → empty <code>ColumnarBatch</code> with typed zero-row chunks.</p>
+<p><code>Limit = 0</code> rejected at plan construction (<code>limit &lt; 1</code>).</p>
+<h2 id="future-optimizations">12.25 Future optimizations</h2>
+<table class="table">
+<thead>
+<tr>
+<th>Optimization</th>
+<th>Benefit</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Heap Top-K when <code>Limit &lt;&lt; R</code></td>
+<td>O(R log K) vs O(R log R)</td>
+</tr>
+<tr>
+<td>External sort + spill</td>
+<td>Larger-than-RAM datasets</td>
+</tr>
+<tr>
+<td>LIMIT pushdown into join</td>
+<td>Avoid full match materialization</td>
+</tr>
+<tr>
+<td>Key normalization before sort</td>
+<td>Sort encoded keys once, not per-compare column reads</td>
+</tr>
+<tr>
+<td>Stable sort (Timsort)</td>
+<td>Predictable tie ordering</td>
+</tr>
+<tr>
+<td><code>OFFSET</code> support</td>
+<td>Pagination</td>
+</tr>
+</tbody>
+</table>
+<h2 id="summary">12.26 Summary</h2>
+<p><code>SortTopNEngine</code> implements in-memory sort and limit over columnar data:</p>
+<ol>
+<li><strong><code>RowLoc</code></strong> — indirect row references across batches</li>
+<li><strong><code>CollectFilteredRows</code></strong> — apply <code>WHERE</code>, build row list</li>
+<li><strong><code>RowLocComparer</code></strong> — multi-column sort with NULL and DESC handling</li>
+<li><strong><code>MaterializeRows</code></strong> — gather projected columns into one output batch</li>
+<li><strong><code>ExecuteJoinAsync</code></strong> — join via <code>JoinExecutionEngine</code>, then same sort/limit path</li>
+</ol>
+<p>The design separates <strong>ordering</strong> (permute indices) from <strong>projection</strong> (gather values) — the same separation used in analytics engines that sort selection vectors before vectorized materialization.</p>
+</div>
+          <footer class="doc-footer">
+            <p>Generated by <strong>hoihky</strong> with <strong>MDWeb</strong> and with assistance from <strong>AI</strong></p>
+
+          </footer>
+        </article>
+
+        
+                <aside class="toc" aria-label="On this page">
+                  <p class="toc-title">On this page</p>
+                  <ul>
+                    
+                        <li class="toc-h1">
+                          <a href="#chapter-12-sort-and-limit">Chapter 12: Sort and Limit</a>
+                        </li>
+                        
+                        <li class="toc-h1">
+                          <a href="#part-i-theory">Part I: Theory</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#121-sorting-in-query-engines">12.1 Sorting in query engines</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#in-memory-sort">In-memory sort</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#external-sort-disk-backed">External sort (disk-backed)</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#sort-keys-vs-row-payloads">Sort keys vs row payloads</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#122-stable-vs-unstable-sort">12.2 Stable vs unstable sort</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#123-order-by-semantics">12.3 ORDER BY semantics</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#multi-column-ordering">Multi-column ordering</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#null-placement">NULL placement</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#expressions-and-aliases">Expressions and aliases</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#order-by-without-limit">ORDER BY without LIMIT</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#124-top-k-algorithms">12.4 Top-K algorithms</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#naive-approach">Naive approach</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#heap-based-top-k">Heap-based Top-K</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#quickselect">Quickselect</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#partial-sort-nthelement">Partial sort (nth_element)</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#top-k-with-order-by-on-multiple-columns">Top-K with ORDER BY on multiple columns</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#distributed-top-k">Distributed Top-K</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#125-sort-vs-hash-for-grouping">12.5 Sort vs hash for grouping</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#when-sort-beats-hash-for-group-by">When sort beats hash for GROUP BY</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#126-sort-as-physical-operator">12.6 Sort as physical operator</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#interesting-orders">Interesting orders</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#sort-join-interaction">Sort + join interaction</a>
+                        </li>
+                        
+                        <li class="toc-h1">
+                          <a href="#part-ii-raindb-implementation">Part II: RainDB Implementation</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#127-physical-plans">12.7 Physical plans</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#sorttopnphysicalplan">SortTopNPhysicalPlan</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#joinsorttopnphysicalplan">JoinSortTopNPhysicalPlan</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#sortkeyphysicalspec">SortKeyPhysicalSpec</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#128-executetableasync">12.8 ExecuteTableAsync</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#129-executejoinasync">12.9 ExecuteJoinAsync</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1210-rowloc-indirect-row-addressing">12.10 RowLoc: indirect row addressing</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1211-collectfilteredrows">12.11 CollectFilteredRows</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#collectallrows">CollectAllRows</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1212-rowloccomparer">12.12 RowLocComparer</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#null-ordering">NULL ordering</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#utf-8-comparison">UTF-8 comparison</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#fixed-width-reads">Fixed-width reads</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1213-limit-semantics">12.13 LIMIT semantics</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1214-materializerows">12.14 MaterializeRows</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1215-gatherfixedwidthcolumn">12.15 GatherFixedWidthColumn</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1216-gatherutf8column">12.16 GatherUtf8Column</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1217-validation">12.17 Validation</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#sort-keys">Sort keys</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#output-and-filters">Output and filters</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1218-sql-compilation-mapping">12.18 SQL compilation mapping</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1219-complexity-and-memory">12.19 Complexity and memory</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1220-comparison-to-hash-aggregate-sorting">12.20 Comparison to hash aggregate sorting</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1221-cancellation">12.21 Cancellation</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1222-example-filtered-sort-with-limit">12.22 Example: filtered sort with limit</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1223-example-join-then-sort">12.23 Example: join then sort</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1224-empty-results">12.24 Empty results</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1225-future-optimizations">12.25 Future optimizations</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1226-summary">12.26 Summary</a>
+                        </li>
+                        
+                  </ul>
+                </aside>
+                
+      </main>
+    </div>
+  </div>
+  <script src="assets/vendor/mermaid.min.js"></script>
+  <script src="assets/vendor/highlight.min.js"></script>
+  <script src="assets/js/site.js"></script>
+</body>
+</html>

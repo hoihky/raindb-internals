@@ -1,0 +1,1372 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Chapter 15: Future Extensions · Building an OLAP Database Engine from Scratch with RainDB</title>
+  <meta name="description" content="Generated documentation site">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="assets/css/site.css">
+  <link rel="stylesheet" href="assets/vendor/atom-one-dark.min.css">
+</head>
+<body>
+  <div class="site">
+    <header class="topbar">
+      <button class="sidebar-toggle" id="sidebar-toggle" aria-label="Toggle navigation">☰</button>
+      <a href="index.html" class="brand">Building an OLAP Database Engine from Scratch with RainDB</a>
+      <div class="search-wrap">
+        <input type="search" id="search" placeholder="Search docs…" autocomplete="off">
+      </div>
+    </header>
+
+    <div class="layout">
+      <aside class="sidebar" id="sidebar">
+        <nav class="nav" aria-label="Documentation">
+          <ul class="nav-list">
+            
+                        <li class="nav-item depth-0">
+                          
+                            <a href="index.html" class="nav-link">Building an OLAP Database Engine from Scratch</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="01-olap-fundamentals.html" class="nav-link">Chapter 1: OLAP Fundamentals</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="02-architecture-and-modules.html" class="nav-link">Chapter 2: Architecture and Modules</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="03-columnar-storage-model.html" class="nav-link">Chapter 3: Columnar Storage Model</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="04-chunk-data-structures.html" class="nav-link">Chapter 4: Chunk Data Structures</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="05-catalog-and-tables.html" class="nav-link">Chapter 5: Catalog and Tables</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="06-buffer-management.html" class="nav-link">Chapter 6: Buffer Management</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="07-execution-pipeline.html" class="nav-link">Chapter 7: Execution Pipeline</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="08-vectorized-scan-filter-project.html" class="nav-link">Chapter 8: Vectorized Scan, Filter, and Project</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="09-global-aggregates.html" class="nav-link">Chapter 9: Global Aggregates</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="10-hash-aggregation.html" class="nav-link">Chapter 10: Hash Aggregation</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="11-joins.html" class="nav-link">Chapter 11: Joins</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="12-sort-and-limit.html" class="nav-link">Chapter 12: Sort and Limit</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="13-sql-compilation.html" class="nav-link">Chapter 13: SQL Compilation</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="14-persistence.html" class="nav-link">Chapter 14: Persistence</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0 is-active">
+                          
+                            <a href="15-future-extensions.html" class="nav-link">Chapter 15: Future Extensions</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="16-mmap-io.html" class="nav-link">Chapter 16: mmap I/O</a>
+                            
+                        </li>
+                        
+          </ul>
+        </nav>
+      </aside>
+
+      <main class="content">
+        <article class="doc">
+          <header class="doc-header">
+            <h1>Chapter 15: Future Extensions</h1>
+          </header>
+          <div class="doc-body"><h1 id="chapter-15-future-extensions">Chapter 15: Future Extensions</h1>
+<p>RainDB is an embedded OLAP prototype with a real execution stack and explicit stubs for production features. This chapter opens with what mature analytical engines require — cost-based optimization, statistics, spill, observability, and format evolution — at a conceptual level. Part II maps those ideas onto RainDB's phased roadmap, existing interfaces, and extension hooks in the repository.</p>
+<hr />
+<h1 id="part-i-concepts">Part I — Concepts</h1>
+<h2 id="what-production-olap-engines-require">15.1 What production OLAP engines require</h2>
+<p>A working prototype that scans in-memory column batches proves core ideas; shipping analytics software demands more. Whether the engine embeds in-process like DuckDB or runs as a cluster service like ClickHouse or Snowflake, mature products converge on overlapping capabilities beyond raw SQL and storage.</p>
+<h3 id="architectural-patterns-conceptual">Architectural patterns (conceptual)</h3>
+<table class="table">
+<thead>
+<tr>
+<th>Engine</th>
+<th>Distinctive pattern</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>DuckDB</strong></td>
+<td>In-process vectorized execution, strong compression, integrated buffer management, portable single-file storage</td>
+</tr>
+<tr>
+<td><strong>ClickHouse</strong></td>
+<td>MergeTree append-only parts, per-column compression, sharding, materialized views</td>
+</tr>
+<tr>
+<td><strong>Snowflake</strong></td>
+<td>Separated storage and compute, immutable micro-partitions, elastic cloud warehouses</td>
+</tr>
+</tbody>
+</table>
+<p>The implementations differ, but the <strong>underlying problems</strong> recur:</p>
+<ol>
+<li><strong>Reuse compiled plans</strong> — pay compile cost once, execute often</li>
+<li><strong>Bound memory</strong> — spill hash structures and sorts when RAM is insufficient</li>
+<li><strong>Reduce I/O</strong> — prune columns, compress data, mmap cold segments, cache hot pages</li>
+<li><strong>Observe execution</strong> — traces, metrics, slow-query logs</li>
+<li><strong>Evolve formats safely</strong> — versioned files with backward-compatible readers</li>
+</ol>
+<p>RainDB's roadmap (Part II) orders work by dependency: tighten in-memory operators before expanding SQL; harden storage before WAL; collect statistics before cost-based join ordering.</p>
+<h2 id="cost-based-optimization-theory">15.2 Cost-based optimization theory</h2>
+<p><strong>Cost-based optimization (CBO)</strong> ranks logically equivalent plans by estimated resource use — pages read, CPU time, memory footprint — instead of relying solely on fixed rewrite rules.</p>
+<h3 id="plan-space">Plan space</h3>
+<p>Joining <em>N</em> tables admits <em>N</em>! orderings. Practical optimizers explore a subset using:</p>
+<ul>
+<li><strong>Dynamic programming</strong> (System R heritage, PostgreSQL-style) — exploit optimal substructure over join subsets</li>
+<li><strong>Greedy or heuristic search</strong> — repeatedly merge the cheapest pair (common at warehouse scale)</li>
+<li><strong>Genetic search</strong> — evolutionary exploration for very large join graphs (historically in SQL Server)</li>
+</ul>
+<h3 id="cost-model-ingredients">Cost model ingredients</h3>
+<pre><code class="language-text">cost(scan) ≈ pages_to_read × seq_page_cost + rows × cpu_per_row
+cost(hash_join) ≈ build_side_pages + probe_side_pages + hash_table_memory
+cost(sort) ≈ n log n × comparison_cost  (or spill-aware variant)
+</code></pre>
+<p>Accurate <strong>selectivity estimates</strong> for filters and joins dominate plan quality: what fraction of rows survives each predicate?</p>
+<h3 id="statistics-dependency">Statistics dependency</h3>
+<p>Without statistics, CBO collapses to uniform-distribution guesses. Production systems run <code>ANALYZE</code> (or equivalent) to gather:</p>
+<ul>
+<li>Per-table row counts</li>
+<li>Per-column NDV (number of distinct values)</li>
+<li>Min/max for range filters</li>
+<li>Histograms where distributions skew</li>
+</ul>
+<p>RainDB has no CBO yet — <code>DefaultSqlCompiler</code> always picks hash join. Phase B introduces heuristics; Phase E feeds statistics into better choices.</p>
+<h2 id="statistics-and-histograms">15.3 Statistics and histograms</h2>
+<h3 id="table-level-statistics">Table-level statistics</h3>
+<ul>
+<li><strong>Row count</strong> — base cardinality or estimated post-filter size</li>
+<li><strong>Average row width</strong> — bytes per row for memory budgeting</li>
+</ul>
+<h3 id="column-level-statistics">Column-level statistics</h3>
+<table class="table">
+<thead>
+<tr>
+<th>Statistic</th>
+<th>Use</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>NDV</strong></td>
+<td>Join cardinality estimates; hash table sizing</td>
+</tr>
+<tr>
+<td><strong>Null fraction</strong></td>
+<td>Selectivity of <code>IS NULL</code> / <code>IS NOT NULL</code></td>
+</tr>
+<tr>
+<td><strong>Min / max</strong></td>
+<td>Range pruning; zone-map style skipping</td>
+</tr>
+<tr>
+<td><strong>Histogram</strong></td>
+<td>Skewed domains (e.g., most rows tagged <code>US</code>)</td>
+</tr>
+</tbody>
+</table>
+<h3 id="histogram-types">Histogram types</h3>
+<ul>
+<li><strong>Equi-width</strong> — buckets cover equal value ranges</li>
+<li><strong>Equi-depth</strong> — buckets hold roughly equal row counts (better under skew)</li>
+</ul>
+<p>Given <code>WHERE region = 'EU'</code>, the optimizer locates the matching bucket and estimates hits as <code>table_rows × bucket_fraction</code>.</p>
+<h3 id="maintenance">Maintenance</h3>
+<p>Bulk loads and heavy updates stale statistics. Engines schedule <code>ANALYZE</code> automatically or on demand. Plan caches should drop entries when statistic generations change materially.</p>
+<h2 id="spill-to-disk-algorithms">15.4 Spill to disk algorithms</h2>
+<p>Hash aggregation and hash join assume the working set fits in RAM. When it does not, engines <strong>spill</strong> partitions to temporary storage and finish in multiple passes.</p>
+<h3 id="hash-aggregation-spill">Hash aggregation spill</h3>
+<ol>
+<li>Hash group keys into <em>k</em> partitions</li>
+<li>Retain some partitions in memory; write others to disk</li>
+<li>Reprocess spilled partitions recursively (possibly re-partitioning with larger <em>k</em>)</li>
+</ol>
+<p><strong>Grace hash join</strong> applies the same partition idea so only one build/probe pair must reside in memory at once.</p>
+<h3 id="external-sort">External sort</h3>
+<p>When an in-memory sort exceeds budget:</p>
+<ol>
+<li><strong>Run generation</strong> — sort manageable chunks, emit sorted runs to disk</li>
+<li><strong>K-way merge</strong> — combine runs with a bounded heap</li>
+</ol>
+<p>When only the top <em>k</em> rows matter, a size-<em>k</em> heap can avoid a full external sort — RainDB Phase A2 targets this for <code>ORDER BY … LIMIT</code>.</p>
+<h3 id="spill-file-format">Spill file format</h3>
+<p>Spill files are usually columnar or length-prefixed binary with partition metadata. Merge passes should be <strong>deterministic</strong> so OLAP results stay reproducible.</p>
+<p>RainDB wires <code>ISpillWriter</code> today but only emits JSON telemetry — durable spill lands in Phase E2.</p>
+<h2 id="observability-in-databases">15.5 Observability in databases</h2>
+<p>Running analytics blind is expensive. Production databases instrument both compile and execute paths.</p>
+<h3 id="tracing">Tracing</h3>
+<p>End-to-end traces stitch parse, bind, optimize, and per-operator execute spans. On .NET, <code>ActivitySource</code> pairs naturally with OpenTelemetry exporters.</p>
+<p>High-value attributes: hashed SQL fingerprint (not raw text when PII is a concern), referenced tables, row counts, operator kinds, bytes spilled.</p>
+<h3 id="metrics">Metrics</h3>
+<p>Typical counters and histograms:</p>
+<ul>
+<li>Query throughput, compile latency, execute latency</li>
+<li>Plan-cache and buffer-pool hit rates</li>
+<li>Spill volume, bytes scanned</li>
+<li>Active queries and queue depth</li>
+</ul>
+<h3 id="slow-query-log">Slow query log</h3>
+<p>Queries above a latency threshold log redacted SQL, plan text, and phase timings — separating bad plans from resource starvation.</p>
+<h3 id="profiling">Profiling</h3>
+<p>Per-operator CPU sampling (<code>EXPLAIN ANALYZE</code> in PostgreSQL) reveals where time goes. Pipeline-oriented OLAP engines may attribute stalls to I/O versus CPU.</p>
+<p>RainDB targets Phase F3 observability (<code>ActivitySource</code> hooks appear in roadmap documentation).</p>
+<h2 id="format-versioning-strategy">15.6 Format versioning strategy</h2>
+<p>On-disk layouts survive many releases. A deliberate versioning policy prevents silent corruption and eases upgrades.</p>
+<h3 id="principles">Principles</h3>
+<ol>
+<li><strong>Magic plus version in every header</strong> — unknown versions fail fast with a clear error</li>
+<li><strong>Never recycle type/kind identifiers</strong> — only append new enum values</li>
+<li><strong>Ship N−1 readers</strong> — support the previous format for at least one release cycle</li>
+<li><strong>Decouple catalog version from payload version</strong> — self-describing segment files can evolve independently of <code>catalog.json</code></li>
+<li><strong>Provide migration paths</strong> — export/import or offline <code>migrate</code> for breaking changes</li>
+<li><strong>Reserve header bytes</strong> — compression codec ids, checksums, feature flags</li>
+</ol>
+<h3 id="compatibility-matrix-example">Compatibility matrix (example)</h3>
+<table class="table">
+<thead>
+<tr>
+<th>Change</th>
+<th>Strategy</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>New column chunk kind</td>
+<td>Bump batch <code>formatVersion</code>; older readers error explicitly</td>
+</tr>
+<tr>
+<td>Optional catalog field</td>
+<td>Ignore unknown JSON keys (forward compatible)</td>
+</tr>
+<tr>
+<td>Different null-bitmap packing</td>
+<td>New magic or version 2; retain version 1 decoder</td>
+</tr>
+</tbody>
+</table>
+<p>RainDB today: <code>formatVersion: 1</code> in <code>catalog.json</code>, <code>RNBATCH1</code> batch magic, <code>RNBFCOL1</code> mmap columns. Part II maps extension hooks on the roadmap.</p>
+<h2 id="query-scheduling-and-resource-governance">15.7 Query scheduling and resource governance</h2>
+<p>Not every query should grab all cores and all RAM. A <strong>scheduler</strong> allocates threads, memory, and I/O bandwidth across concurrent work.</p>
+<h3 id="workload-classes">Workload classes</h3>
+<table class="table">
+<thead>
+<tr>
+<th>Class</th>
+<th>Typical policy</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Interactive</td>
+<td>Cap latency and DOP; prioritize small queries</td>
+</tr>
+<tr>
+<td>Batch ETL</td>
+<td>Favor throughput; tolerate spill; schedule off-peak</td>
+</tr>
+<tr>
+<td>Maintenance</td>
+<td>Background <code>ANALYZE</code>, compaction, checkpoint</td>
+</tr>
+</tbody>
+</table>
+<p>RainDB exposes parallelism through <code>VectorizedScanExecutionOptions</code> today; a future <strong>resource manager</strong> would reconcile per-query DOP with a global memory ceiling and spill pressure.</p>
+<h3 id="admission-control">Admission control</h3>
+<p>When budgets are exhausted, engines <strong>queue</strong> or <strong>reject</strong> new queries instead of risking OOM. Track <code>queries_queued</code> and <code>queries_rejected_resource_limit</code>.</p>
+<h3 id="cancellation">Cancellation</h3>
+<p>Long scans should respect <code>CancellationToken</code> — RainDB threads tokens through <code>ExecuteSqlAsync</code> and operator loops. Hosted systems also cancel on client disconnect or administrative <code>KILL QUERY</code>.</p>
+<h2 id="distributed-and-disaggregated-patterns-conceptual">15.8 Distributed and disaggregated patterns (conceptual)</h2>
+<p>Cluster OLAP partitions tables across machines. RainDB remains single-process, but the vocabulary matters for later extension.</p>
+<h3 id="shared-nothing-partitioning">Shared-nothing partitioning</h3>
+<p>Each node holds a shard. Plans gain <strong>exchange</strong> operators — shuffle, broadcast — to move batches between workers. ClickHouse distributed tables and Snowflake micro-partitions instantiate this at different scales.</p>
+<h3 id="disaggregated-storage">Disaggregated storage</h3>
+<p>Stateless compute nodes read immutable objects from S3-like storage while a catalog service maps tables to partition lists. Elastic scale and cheap durability trade against remote-read latency unless caching is aggressive.</p>
+<h3 id="why-embedded-engines-defer-distribution">Why embedded engines defer distribution</h3>
+<p>Networking, fault tolerance, and distributed consistency dwarf single-node engineering. Proving correctness and performance locally first — DuckDB followed this arc — is deliberate. RainDB's roadmap stays single-process until Phase G ecosystem goals justify cluster modes.</p>
+<h2 id="adaptive-and-feedback-driven-execution">15.9 Adaptive and feedback-driven execution</h2>
+<p><strong>Adaptive query processing</strong> adjusts plans mid-flight using observed cardinalities:</p>
+<ol>
+<li>If a hash-join build side explodes past estimates, switch strategy or spill sooner</li>
+<li>Reorder join inputs after the first scan reveals true row counts</li>
+<li>Choose broadcast versus shuffle in distributed plans based on runtime sizes</li>
+</ol>
+<p>Adaptive switches need <strong>checkpointable operator state</strong> and safe replanning boundaries — substantial complexity. RainDB schedules this for Phase E4, after real spill (E2) and statistics (E3). Without baseline estimates, runtime feedback has little to compare against.</p>
+<h2 id="security-and-multi-tenancy-hooks">15.10 Security and multi-tenancy hooks</h2>
+<p>Serving SQL to untrusted callers — even through an embedded host — demands guardrails:</p>
+<ul>
+<li><strong>Parser fuzzing</strong> — malformed input must not hang or crash the process</li>
+<li><strong>Query cost caps</strong> — limits on rows scanned, spill bytes, compile time</li>
+<li><strong>Tenant isolation</strong> — per-tenant catalog views (distant future for RainDB)</li>
+</ul>
+<p>These concerns span the roadmap's security track. They need not block core engine milestones but must be designed before exposing arbitrary SQL endpoints.</p>
+<hr />
+<h1 id="part-ii-raindb">Part II — RainDB</h1>
+<p>RainDB is an actively developed embedded OLAP prototype. Much of the execution stack is real — columnar storage, vectorized scan, hash aggregation, inner joins, sort/limit, strict SQL compilation, and directory-backed persistence. Other surfaces are <strong>interfaces and stubs</strong> that document where the engine is headed without pretending the feature ships today.</p>
+<p>This part collects those extension points: the phased development roadmap, spill infrastructure, the LINQ compiler stub, plan-cache hooks, column encodings, observability plans, and a practical guide for extending this book when new phases land.</p>
+<h2 id="how-to-read-the-roadmap">15.11 How to read the roadmap</h2>
+<p><code>docs/Development-Roadmap.md</code> sequences work by <strong>dependency</strong>, not calendar quarters. Phases are labeled A through G:</p>
+<table class="table">
+<thead>
+<tr>
+<th>Phase</th>
+<th>Theme</th>
+<th>Depends on</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>A</strong></td>
+<td>Execution efficiency (in-memory core)</td>
+<td>Current operator baseline</td>
+</tr>
+<tr>
+<td><strong>B</strong></td>
+<td>Planning and compile-once semantics</td>
+<td>Logical IR + physical plans</td>
+</tr>
+<tr>
+<td><strong>C</strong></td>
+<td>Storage, I/O, memory budget</td>
+<td>Persistence MVP (Chapter 14)</td>
+</tr>
+<tr>
+<td><strong>D</strong></td>
+<td>SQL and analytics surface</td>
+<td>A + B for performance headroom</td>
+</tr>
+<tr>
+<td><strong>E</strong></td>
+<td>Advanced analytics (windows, real spill, stats)</td>
+<td>A, B, partial C</td>
+</tr>
+<tr>
+<td><strong>F</strong></td>
+<td>Production durability and concurrency</td>
+<td>C</td>
+</tr>
+<tr>
+<td><strong>G</strong></td>
+<td>Ecosystem (LINQ, Parquet, API stability)</td>
+<td>D + stable formats</td>
+</tr>
+</tbody>
+</table>
+<p>Guiding principles (unchanged across phases):</p>
+<ul>
+<li>One physical-plan IR for SQL, LINQ, and programmatic planners</li>
+<li>Columnar batches as the unit of parallel work (morsels)</li>
+<li>Deterministic OLAP ordering where semantics require it</li>
+<li>Minimize allocations on hot paths; isolate unsafe SIMD behind clear boundaries</li>
+</ul>
+<pre><code class="language-text">Phase A (fast in-memory ops)
+    ↓
+Phase B (rewrite + prepared plans) ──→ Phase D (more SQL) ──→ Phase E (windows + spill + stats)
+    ↓                                      ↑
+Phase C (mmap + encodings + durability) ───┘
+    ↓
+Phase F (WAL / MVCC)
+    ↓
+Phase G (LINQ + formats + API stability)
+</code></pre>
+<p>Phases <strong>A</strong> and <strong>C</strong> may overlap (mmap helps file-backed scans), but <strong>D</strong> should not outrun <strong>A</strong> for heavy operators — new SQL that exposes slow join/sort paths only widens the performance gap.</p>
+<h2 id="phase-a-execution-efficiency">15.12 Phase A — Execution efficiency</h2>
+<p><strong>Goal:</strong> Make existing operators fast and memory-safe at scale before adding much new SQL.</p>
+<h3 id="a1.vectorized-selection-and-projection-implemented">A1. Vectorized selection and projection — implemented</h3>
+<p>Documented in Chapter 8. <code>SelectionEvaluator</code> intersects dense row-index vectors; <code>ProjectGather</code> uses pooled output chunks.</p>
+<h3 id="a2.true-top-n-and-sort-discipline-planned">A2. True top-N and sort discipline — planned</h3>
+<p>Today <code>SortTopNPhysicalPlan</code> may sort more rows than necessary. Target: partial sort / heap top-N when <code>LIMIT k</code> is small, retaining full sort only when global order is required.</p>
+<p><strong>Exit criteria:</strong> <code>ORDER BY … LIMIT k</code> memory bounded by O(k), not O(n).</p>
+<h3 id="a3.join-and-grouped-join-memory-model-planned">A3. Join and grouped-join memory model — planned</h3>
+<p>Reduce peak RSS by streaming join output and feeding join batches directly into hash aggregation instead of materializing full match lists.</p>
+<h3 id="a4.simd-and-native-boundaries-partial">A4. SIMD and native boundaries — partial</h3>
+<p><code>AggregateIntrinsics</code> and AVX2 double sum exist. Extend min/max, integer sums, hash combine helpers. Optional <code>RainDB.Native</code> only when C# intrinsics are insufficient.</p>
+<h3 id="a5.micro-benchmarks-planned">A5. Micro-benchmarks — planned</h3>
+<p>BenchmarkDotNet projects for scan, filter+project, hash agg, hash join, sort/top-N with documented baselines.</p>
+<p><strong>Phase A out of scope:</strong> New SQL constructs, WAL, Parquet, cost-based optimizer.</p>
+<h2 id="phase-b-planning-and-compile-once">15.13 Phase B — Planning and compile-once</h2>
+<p><strong>Goal:</strong> Reduce per-query overhead without a full cost-based optimizer.</p>
+<h3 id="b1.logical-rewrite-rule-based-optimizer-v0">B1. Logical rewrite (rule-based optimizer v0)</h3>
+<p>Single pass over logical IR:</p>
+<ul>
+<li>Predicate pushdown to scan/join sides</li>
+<li>Projection pruning (drop unread columns early)</li>
+<li>Limit pushdown where legal</li>
+</ul>
+<p>Keep rules testable with golden logical plans before/after rewrite.</p>
+<h3 id="b2.physical-choices-heuristics">B2. Physical choices (heuristics)</h3>
+<p>Today <code>DefaultSqlCompiler</code> hard-codes hash join:</p>
+<pre><code class="language-csharp">LogicalInnerJoin j =&gt; LogicalJoinBinder.BindAndLower(j, catalog, PhysicalJoinAlgorithm.Hash, _defaultScanOptions),
+</code></pre>
+<p>Future: choose hash vs sort-merge using sorted-input hints or row-count estimates. <code>IPhysicalPlan.Explain()</code> must show the choice.</p>
+<h3 id="b3.prepared-execution-and-plan-cache">B3. Prepared execution and plan cache</h3>
+<p><strong>Compile once:</strong> parse + bind + optional rewrite → cached <code>IPhysicalPlan</code>.</p>
+<p>Cache key candidates:</p>
+<ul>
+<li>Normalized SQL text</li>
+<li>Catalog snapshot id or schema version set</li>
+<li><code>VectorizedScanExecutionOptions</code> fingerprint</li>
+</ul>
+<p><strong>Invalidate</strong> when any referenced table's <code>SchemaVersion</code> changes:</p>
+<pre><code class="language-csharp">// src/RainDB.Core/Tables/MemoryTable.cs
+public int SchemaVersion =&gt; Volatile.Read(ref _schemaVersion);
+
+public event EventHandler&lt;SchemaVersionChangedEventArgs&gt;? SchemaVersionChanged;
+
+public int BumpSchemaVersion()
+{
+    var v = Interlocked.Increment(ref _schemaVersion);
+    SchemaVersionChanged?.Invoke(this, new SchemaVersionChangedEventArgs(v));
+    return v;
+}
+</code></pre>
+<p>Prepared statement API sketch (not implemented):</p>
+<pre><code class="language-csharp">// (planned) src/RainDB.Sql/Compilation/PreparedStatement.cs
+public sealed class PreparedStatement
+{
+    public IPhysicalPlan Plan { get; }
+    public int CompiledAtSchemaVersion { get; }
+    public void BindParameters(IReadOnlyDictionary&lt;string, object&gt; values);
+}
+</code></pre>
+<p>Second execution of the same prepared statement should skip <code>SqlParser.Parse</code> and binder work; only parameter slots in <code>ColumnCompareFilter</code> change.</p>
+<h3 id="b4.explain-and-introspection">B4. Explain and introspection</h3>
+<p>Structured <code>EXPLAIN</code> returning logical + physical text. <code>LogicalTableScan.Explain()</code> and <code>HashAggregatePhysicalPlan.Explain()</code> already produce strings — SQL <code>EXPLAIN</code> would surface them.</p>
+<p>Optional <code>EXPLAIN ANALYZE</code> with operator timers (can start as no-op stubs).</p>
+<p><strong>Phase B out of scope:</strong> Histogram join ordering, adaptive mid-query re-optimization.</p>
+<h2 id="phase-c-storage-io-memory-budget">15.14 Phase C — Storage, I/O, memory budget</h2>
+<p><strong>Goal:</strong> Stop treating durability as &quot;load everything into <code>MemoryTable</code> byte arrays.&quot;</p>
+<h3 id="c1.mmap-first-column-segments-designed-partial-code">C1. mmap-first column segments — designed, partial code</h3>
+<p><code>ColumnarFixedWidthMmapReader</code> and <code>ColumnarFixedWidthFileFormat</code> exist in <code>RainDB.Core/IO/</code> (Chapter 16). Integration work:</p>
+<ul>
+<li>Hydration maps batch files instead of <code>File.ReadAllBytes</code> where format allows</li>
+<li>Scan engine reads through mapped spans without extra copy</li>
+</ul>
+<h3 id="c2.buffer-manager-v0">C2. Buffer manager v0</h3>
+<p>Central policy for mapped regions, pin/unpin, configurable memory cap, naive LRU eviction per table.</p>
+<h3 id="c3.column-encodings">C3. Column encodings</h3>
+<p>Dictionary encoding and lightweight integer compression on write; transparent decode in scan.</p>
+<p>Extension requirements:</p>
+<table class="table">
+<thead>
+<tr>
+<th>Layer</th>
+<th>Change</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Chunk types</td>
+<td>New <code>IColumnChunk</code> implementations or encoded wrappers</td>
+</tr>
+<tr>
+<td><code>RainDbBatchBinaryCodec</code></td>
+<td>New kind bytes; bump batch <code>formatVersion</code></td>
+</tr>
+<tr>
+<td>Scan kernels</td>
+<td>Decode to pooled buffers or operate on encoded data</td>
+</tr>
+<tr>
+<td>Tests</td>
+<td>Round-trip + correctness on encoded fixtures</td>
+</tr>
+</tbody>
+</table>
+<p>Example future kind byte (illustrative, not in repo):</p>
+<pre><code class="language-text">KindDictionaryUtf8 = 4
+→ indices column + dictionary blob + null bitmap
+</code></pre>
+<h3 id="c4.durability-hardening-pre-wal">C4. Durability hardening (pre-WAL)</h3>
+<p>Formalize ordering: batch durable before catalog references it (or defined recovery on open). Crash tests between catalog and batch writes.</p>
+<p><strong>Phase C out of scope:</strong> Full WAL/MVCC (Phase F).</p>
+<h2 id="phase-d-sql-and-analytics-surface">15.15 Phase D — SQL and analytics surface</h2>
+<p>Sequence inside Phase D (each slice: parser → logical IR → binder → physical plan → tests):</p>
+<table class="table">
+<thead>
+<tr>
+<th>Slice</th>
+<th>Features</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>D1</td>
+<td>Scalar expressions: arithmetic, <code>CASE</code>, casts</td>
+</tr>
+<tr>
+<td>D2</td>
+<td><code>HAVING</code>, <code>DISTINCT</code>, <code>COUNT(DISTINCT)</code>, broader <code>MIN</code>/<code>MAX</code> types</td>
+</tr>
+<tr>
+<td>D3</td>
+<td>Outer joins, <code>UNION ALL</code> / <code>UNION</code></td>
+</tr>
+<tr>
+<td>D4</td>
+<td>Subqueries: <code>IN</code>, <code>EXISTS</code> (uncorrelated first)</td>
+</tr>
+<tr>
+<td>D5</td>
+<td><code>ORDER BY</code> / <code>LIMIT</code> with <code>GROUP BY</code></td>
+</tr>
+<tr>
+<td>D6</td>
+<td><code>DATE</code>/<code>TIMESTAMP</code>, <code>COALESCE</code>, <code>LIKE</code></td>
+</tr>
+</tbody>
+</table>
+<p><strong>Exit criteria:</strong> Programming Guide strict SQL section updated; <code>samples/sql/</code> grows per milestone.</p>
+<p><strong>Out of scope:</strong> Window functions (Phase E), nested struct/array types.</p>
+<h2 id="phase-e-advanced-analytics">15.16 Phase E — Advanced analytics</h2>
+<h3 id="e1.window-functions">E1. Window functions</h3>
+<p><code>ROW_NUMBER</code>, <code>RANK</code>, <code>SUM() OVER (PARTITION BY … ORDER BY …)</code> with default framing rules. Builds on sort infrastructure from Chapter 12.</p>
+<h3 id="e2.external-spill-real">E2. External spill (real)</h3>
+<p>Extend <code>ISpillWriter</code> beyond metrics JSON to partition and merge aggregate/join state under memory pressure.</p>
+<h3 id="e3.statistics">E3. Statistics</h3>
+<p><code>ANALYZE table</code>: row counts, NDV, min/max; optional histograms feeding Phase B heuristics.</p>
+<h3 id="e4.adaptive-execution-optional">E4. Adaptive execution (optional)</h3>
+<p>Runtime cardinality feedback to choose spill or join strategy — only after E2 and E3 exist.</p>
+<h2 id="phase-f-production-durability-and-concurrency">15.17 Phase F — Production durability and concurrency</h2>
+<h3 id="f1.wal-checkpoint">F1. WAL + checkpoint</h3>
+<p>Append-only log for batch/catalog changes; periodic checkpoint to segment files; recovery on open.</p>
+<h3 id="f2.mvcc-or-snapshot-reads">F2. MVCC or snapshot reads</h3>
+<p>Single-writer multi-reader is a reasonable first target for analytics workloads.</p>
+<h3 id="f3.observability">F3. Observability</h3>
+<ul>
+<li><code>ActivitySource</code> spans for compile and execute phases</li>
+<li>Slow-query threshold and structured plan logging</li>
+<li>Integration with .NET diagnostics (<code>dotnet-counters</code>, OpenTelemetry exporters)</li>
+</ul>
+<p>Sketch:</p>
+<pre><code class="language-csharp">// (planned) src/RainDB.Query/Runtime/QueryActivitySource.cs
+internal static class QueryActivitySource
+{
+    public static readonly ActivitySource Source = new(&quot;RainDB.Query&quot;, &quot;1.0.0&quot;);
+
+    public static Activity? StartCompile(string sql) =&gt;
+        Source.StartActivity(&quot;raindb.compile&quot;, ActivityKind.Internal);
+}
+</code></pre>
+<p><strong>Exit criteria:</strong> Crash during write recovers to last committed state; concurrency model documented.</p>
+<h2 id="phase-g-ecosystem">15.18 Phase G — Ecosystem</h2>
+<h3 id="g1.linq-provider-see-15.20">G1. LINQ provider (see §15.20)</h3>
+<h3 id="g2.ingest-and-interchange">G2. Ingest and interchange</h3>
+<p>CSV and Parquet load paths; optional Arrow IPC interop aligned with <code>Utf8ColumnChunk</code> layouts.</p>
+<h3 id="g3.api-stability">G3. API stability</h3>
+<p>Version physical plan and on-disk formats once logical IR stabilizes after Phase D; publish migration notes.</p>
+<h2 id="ispillwriter-today">15.19 ISpillWriter today</h2>
+<p>Spill is an execution hook, not a finished feature:</p>
+<pre><code class="language-csharp">// src/RainDB.Abstractions/Execution/ISpillWriter.cs
+public interface ISpillWriter
+{
+    bool IsEnabled { get; }
+    ValueTask SpillChunkAsync(ReadOnlyMemory&lt;byte&gt; chunk, CancellationToken cancellationToken = default);
+}
+
+public sealed class NoOpSpillWriter : ISpillWriter
+{
+    public static NoOpSpillWriter Instance { get; } = new();
+    public bool IsEnabled =&gt; false;
+    public ValueTask SpillChunkAsync(ReadOnlyMemory&lt;byte&gt; chunk, CancellationToken cancellationToken = default) =&gt;
+        ValueTask.CompletedTask;
+}
+</code></pre>
+<p><code>RainDbEngine</code> accepts optional <code>ISpillWriter</code>; default is <code>NoOpSpillWriter.Instance</code>:</p>
+<pre><code class="language-csharp">SpillWriter = spillWriter ?? NoOpSpillWriter.Instance;
+</code></pre>
+<p><code>IExecutionContext.SpillWriter</code> flows into operators. <code>HashAggregatePhysicalPlan</code> exposes <code>SpillPartialEntryThreshold</code>:</p>
+<pre><code class="language-csharp">/// When positive and IExecutionContext.SpillWriter is enabled, partial maps with at least this many
+/// groups invoke ISpillWriter.SpillChunkAsync with a UTF-8 metrics payload (operator still completes in-memory).
+public int SpillPartialEntryThreshold { get; }
+</code></pre>
+<p><code>HashAggregateEngine</code> emits JSON metrics when threshold exceeded:</p>
+<pre><code class="language-csharp">if (context.SpillWriter.IsEnabled &amp;&amp; plan.SpillPartialEntryThreshold &gt; 0)
+{
+    for (var i = 0; i &lt; n; i++)
+    {
+        if (partials[i].Count &gt;= plan.SpillPartialEntryThreshold)
+        {
+            var payload = Encoding.UTF8.GetBytes(
+                $&quot;{{\&quot;op\&quot;:\&quot;hash_agg_partial\&quot;,\&quot;batch\&quot;:{i},\&quot;entries\&quot;:{partials[i].Count}}}\n&quot;);
+            await context.SpillWriter.SpillChunkAsync(payload, ct).ConfigureAwait(false);
+        }
+    }
+}
+</code></pre>
+<p>Phase E2 will define a binary spill chunk format and external merge. Until then, custom <code>ISpillWriter</code> implementations can log, meter, or tee to files for experiments.</p>
+<h2 id="linq-compiler-stub">15.20 LINQ compiler stub</h2>
+<pre><code class="language-csharp">// src/RainDB.Linq/Compilation/DefaultLinqCompiler.cs
+public sealed class DefaultLinqCompiler : ILinqCompiler
+{
+    public ValueTask&lt;IPhysicalPlan&gt; CompileAsync(Expression expression, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(expression);
+        cancellationToken.ThrowIfCancellationRequested();
+        IPhysicalPlan plan = new ExplainOnlyPhysicalPlan($&quot;LINQ expression: {expression.NodeType}&quot;);
+        return ValueTask.FromResult(plan);
+    }
+}
+</code></pre>
+<p><code>ExplainOnlyPhysicalPlan</code> is a placeholder:</p>
+<pre><code class="language-csharp">// src/RainDB.Query/Plans/ExplainOnlyPhysicalPlan.cs
+public sealed class ExplainOnlyPhysicalPlan : IPhysicalPlan
+{
+    public ExplainOnlyPhysicalPlan(string label) =&gt; Label = label;
+    public string Label { get; }
+    public string Explain(string indent = &quot;&quot;) =&gt; $&quot;{indent}{Label}&quot;;
+}
+</code></pre>
+<h3 id="target-architecture">Target architecture</h3>
+<pre><code class="language-text">IQueryable&lt;T&gt;
+→ Expression tree (System.Linq.Expressions)
+→ RainDB logical IR (LogicalTableScan, LogicalInnerJoin, …)
+→ LogicalTableScanBinder / LogicalJoinBinder (reuse)
+→ IPhysicalPlan
+→ DefaultQueryExecutor
+</code></pre>
+<h3 id="implementation-sketch">Implementation sketch</h3>
+<ol>
+<li><strong>Provider root</strong> — <code>RainDbQueryable&lt;T&gt;</code> holds <code>RainDbEngine</code> + <code>ICatalog</code> + root expression</li>
+<li><strong>Visitor</strong> — translate <code>Where</code>, <code>Select</code>, <code>GroupBy</code>, <code>Join</code> method calls to logical nodes</li>
+<li><strong>Name resolution</strong> — map CLR property names to column names (attribute or convention)</li>
+<li><strong>Errors</strong> — <code>LinqCompileException</code> for unsupported expression shapes (mirroring <code>SqlCompileException</code>)</li>
+</ol>
+<h3 id="why-reuse-binders">Why reuse binders?</h3>
+<p>SQL and LINQ differ only at the front. Once logical IR is built, catalog binding and physical lowering are identical. Tests can share golden physical plans for equivalent SQL and LINQ queries.</p>
+<h2 id="plan-cache-design-notes">15.21 Plan cache design notes</h2>
+<p>No plan cache ships yet. Recommended design when implementing Phase B3:</p>
+<h3 id="cache-entry">Cache entry</h3>
+<pre><code class="language-csharp">// (illustrative)
+sealed class CachedPlan
+{
+    public required IPhysicalPlan Plan { get; init; }
+    public required IReadOnlyDictionary&lt;TableId, int&gt; SchemaVersionsAtCompile { get; init; }
+    public required string NormalizedSql { get; init; }
+}
+</code></pre>
+<h3 id="invalidation">Invalidation</h3>
+<p>On <code>SchemaVersionChanged</code>, drop entries referencing that <code>TableId</code>. On catalog unregister, drop entries referencing removed tables.</p>
+<h3 id="parameter-binding">Parameter binding</h3>
+<p>Physical plans store <code>ColumnCompareFilter</code> with literal bits at compile time. Prepared execution replaces <code>ImmediateBits</code> / <code>Utf8LiteralBytes</code> per execution without re-binding column indices.</p>
+<h3 id="thread-safety">Thread safety</h3>
+<p>Compiler cache should be concurrent dictionary with copy-on-write plan trees (plans are immutable after construction today).</p>
+<h2 id="column-encodings-roadmap">15.22 Column encodings roadmap</h2>
+<p>Encodings reduce disk and memory footprint for repetitive or low-cardinality data.</p>
+<h3 id="dictionary-encoding">Dictionary encoding</h3>
+<p>Store unique values once; column holds integer indices. Natural fit for UTF-8 region codes and enum-like fields.</p>
+<p>Scan options:</p>
+<ul>
+<li>Decode entire vector to pooled chunk per morsel (simpler)</li>
+<li>Compare in encoded space for equality filters (harder)</li>
+</ul>
+<h3 id="integer-compression">Integer compression</h3>
+<p>Bit-packing, delta encoding, or lightweight schemes (e.g., frame-of-reference) for sorted or clustered integer columns.</p>
+<h3 id="format-versioning">Format versioning</h3>
+<p>Bump <code>RainDbBatchBinaryCodec</code> format version when adding kinds. <code>RainDbCatalogDocument.formatVersion</code> may stay at 1 if batch files self-describe encoding.</p>
+<h3 id="interaction-with-mmap">Interaction with mmap</h3>
+<p>Encoded columns may not mmap to a simple <code>FixedWidthColumnChunk</code> layout. Either:</p>
+<ul>
+<li>mmap compressed payload + decode buffer per scan, or</li>
+<li>mmap decompressed column files written at checkpoint time</li>
+</ul>
+<h2 id="observability-roadmap">15.23 Observability roadmap</h2>
+<h3 id="compile-path">Compile path</h3>
+<p>Spans: <code>raindb.parse</code>, <code>raindb.bind</code>, <code>raindb.rewrite</code> (future). Tags: <code>sql.hash</code>, table names (careful with PII).</p>
+<h3 id="execute-path">Execute path</h3>
+<p>Per-operator activities: <code>VectorizedScan</code>, <code>HashAggregate</code>, <code>HashJoin</code>, <code>SortTopN</code>. Attributes: <code>table_id</code>, <code>row_count</code>, <code>dop</code>.</p>
+<h3 id="metrics-1">Metrics</h3>
+<p>Counters: queries compiled, cache hits/misses, spill bytes written, batches scanned.</p>
+<h3 id="slow-query-log-1">Slow query log</h3>
+<p>Engine-level threshold in <code>RainDbEngineOptions</code> (future): log SQL + <code>plan.Explain()</code> when execution exceeds N ms.</p>
+<h2 id="cross-cutting-tracks">15.24 Cross-cutting tracks</h2>
+<p>From the roadmap &quot;all phases&quot; table:</p>
+<table class="table">
+<thead>
+<tr>
+<th>Track</th>
+<th>Intent</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Testing</strong></td>
+<td>Golden SQL files, property tests for optimizer rules, spill and persistence integration tests</td>
+</tr>
+<tr>
+<td><strong>Documentation</strong></td>
+<td>Keep README, Implementation Status, RainDB-Internals, and this book aligned</td>
+</tr>
+<tr>
+<td><strong>Security</strong></td>
+<td>Fuzz SQL parser; bound work for hosted SQL scenarios</td>
+</tr>
+</tbody>
+</table>
+<h2 id="success-metrics-product-level">15.25 Success metrics (product-level)</h2>
+<table class="table">
+<thead>
+<tr>
+<th>Milestone</th>
+<th>Indicator</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Embedded analytics MVP</td>
+<td>Prepared SQL + top-N + mmap scans on 100M rows within RAM budget</td>
+</tr>
+<tr>
+<td>BI-shaped SQL</td>
+<td>Expressions, <code>HAVING</code>, outer joins, <code>UNION ALL</code> with tests</td>
+</tr>
+<tr>
+<td>Larger than RAM</td>
+<td>Spilling hash agg/join passes correctness suite</td>
+</tr>
+<tr>
+<td>Production embed</td>
+<td>WAL recovery + single-writer / multi-reader documented</td>
+</tr>
+</tbody>
+</table>
+<h2 id="mapping-original-implementation-phases">15.26 Mapping original implementation phases</h2>
+<p><code>docs/Implementation-Status.md</code> Phase 0–5 map to the lettered roadmap:</p>
+<table class="table">
+<thead>
+<tr>
+<th>Implementation phase</th>
+<th>Roadmap</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Phase 0–1 (foundations, read path)</td>
+<td>Complete; Phase A extends</td>
+</tr>
+<tr>
+<td>Phase 2 (agg, join, sort)</td>
+<td>Complete in-memory; A + E2 mature</td>
+</tr>
+<tr>
+<td>Phase 2b (directory persistence)</td>
+<td>MVP complete; C + F harden</td>
+</tr>
+<tr>
+<td>Phase 3 (planning &amp; SQL)</td>
+<td>B + D</td>
+</tr>
+<tr>
+<td>Phase 4 (LINQ)</td>
+<td>G1</td>
+</tr>
+<tr>
+<td>Phase 5 (durability &amp; stats)</td>
+<td>C4, E3, F</td>
+</tr>
+</tbody>
+</table>
+<h2 id="how-to-extend-this-book">15.27 How to extend this book</h2>
+<p>When a roadmap phase ships substantial code, add material without restructuring earlier chapters.</p>
+<h3 id="new-chapter-vs-appendix">New chapter vs appendix</h3>
+<table class="table">
+<thead>
+<tr>
+<th>Change size</th>
+<th>Book action</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>New operator (e.g., window)</td>
+<td>New chapter with <code>order</code> after 16, or appendix under <code>content/appendix/</code></td>
+</tr>
+<tr>
+<td>Incremental improvement (top-N heap)</td>
+<td>Expand existing chapter (e.g., 12)</td>
+</tr>
+<tr>
+<td>New storage layer (WAL)</td>
+<td>New chapter after persistence / mmap</td>
+</tr>
+<tr>
+<td>Stub → real feature</td>
+<td>Remove <strong>(planned)</strong> markers; add worked example</td>
+</tr>
+</tbody>
+</table>
+<p>MDWeb navigation uses front matter <code>order</code> field. Keep <code>order: 0</code> on <code>index.md</code>.</p>
+<h3 id="chapter-template">Chapter template</h3>
+<p>Each new chapter should include:</p>
+<ol>
+<li>Front matter (<code>title</code>, <code>order</code>)</li>
+<li>Part I problem statement (theory) + Part II RainDB implementation</li>
+<li>Architecture diagram or flow</li>
+<li>RainDB types and file paths (relative to repo root)</li>
+<li>Code walkthrough with real snippets</li>
+<li>Interaction with prior chapters</li>
+<li>Tests to read in <code>src/RainDB.Tests/</code></li>
+<li><strong>(planned)</strong> section only while feature is partial</li>
+</ol>
+<h3 id="suggested-future-chapters">Suggested future chapters</h3>
+<table class="table">
+<thead>
+<tr>
+<th>Topic</th>
+<th>Roadmap</th>
+<th>Builds on</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Spill and external sort</td>
+<td>E2</td>
+<td>Ch. 10, <code>ISpillWriter</code></td>
+</tr>
+<tr>
+<td>mmap storage integration</td>
+<td>C1</td>
+<td>Ch. 14, Ch. 16</td>
+</tr>
+<tr>
+<td>WAL and MVCC</td>
+<td>F</td>
+<td>Ch. 14</td>
+</tr>
+<tr>
+<td>LINQ provider</td>
+<td>G1</td>
+<td>Ch. 13</td>
+</tr>
+<tr>
+<td>Cost-based optimizer</td>
+<td>B2+</td>
+<td>Ch. 7, 13</td>
+</tr>
+<tr>
+<td>Window functions</td>
+<td>E1</td>
+<td>Ch. 12</td>
+</tr>
+<tr>
+<td>Column encodings</td>
+<td>C3</td>
+<td>Ch. 4, 14</td>
+</tr>
+<tr>
+<td>Observability</td>
+<td>F3</td>
+<td>Ch. 7</td>
+</tr>
+</tbody>
+</table>
+<h3 id="keeping-index.md-current">Keeping index.md current</h3>
+<p>Update the chapter table in <code>content/index.md</code> when adding chapters. Note the theory-first structure when a major expansion lands.</p>
+<h3 id="code-citation-convention">Code citation convention</h3>
+<p>Cite paths relative to RainDB repository root:</p>
+<pre><code class="language-text">src/RainDB.Core/IO/ColumnarFixedWidthMmapReader.cs
+</code></pre>
+<p>Not absolute machine paths. Match existing chapters 1–12 style.</p>
+<h2 id="contributing-a-roadmap-feature-checklist">15.28 Contributing a roadmap feature — checklist</h2>
+<ol>
+<li>Read <code>docs/Development-Roadmap.md</code> exit criteria for the phase</li>
+<li>Implement with tests first or in parallel</li>
+<li>Update <code>docs/Implementation-Status.md</code></li>
+<li>Add Programming Guide section if user-visible</li>
+<li>Extend this book (chapter or section)</li>
+<li>If on-disk format changes, bump version constants and document migration</li>
+</ol>
+<h2 id="what-not-to-do">15.29 What not to do</h2>
+<ul>
+<li>Do not add SQL syntax in Phase D without execution headroom from Phase A</li>
+<li>Do not implement real spill without defining merge correctness tests</li>
+<li>Do not fork physical plans for LINQ — use logical IR</li>
+<li>Do not break batch format version without decode fallback or export tool</li>
+</ul>
+<h2 id="summary">15.30 Summary</h2>
+<p><strong>Part I</strong> surveyed production OLAP requirements: cost-based optimization, statistics and histograms, spill algorithms, observability, format versioning, scheduling, and adaptive execution concepts. <strong>Part II</strong> mapped those ideas onto RainDB's phased roadmap — <code>ISpillWriter</code> and <code>SpillPartialEntryThreshold</code> wire telemetry today; <code>DefaultLinqCompiler</code> marks the LINQ insertion point; <code>MemoryTable.SchemaVersion</code> awaits a plan cache; Phases C and G add mmap, encodings, WAL, and host integration. When features land, extend this book using the chapter map in §15.27 — the narrative from OLAP fundamentals through SQL compilation and persistence remains the spine; new chapters attach at the leaves.</p>
+</div>
+          <footer class="doc-footer">
+            <p>Generated by <strong>hoihky</strong> with <strong>MDWeb</strong> and with assistance from <strong>AI</strong></p>
+
+          </footer>
+        </article>
+
+        
+                <aside class="toc" aria-label="On this page">
+                  <p class="toc-title">On this page</p>
+                  <ul>
+                    
+                        <li class="toc-h1">
+                          <a href="#chapter-15-future-extensions">Chapter 15: Future Extensions</a>
+                        </li>
+                        
+                        <li class="toc-h1">
+                          <a href="#part-i-concepts">Part I — Concepts</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#151-what-production-olap-engines-require">15.1 What production OLAP engines require</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#architectural-patterns-conceptual">Architectural patterns (conceptual)</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#152-cost-based-optimization-theory">15.2 Cost-based optimization theory</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#plan-space">Plan space</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#cost-model-ingredients">Cost model ingredients</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#statistics-dependency">Statistics dependency</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#153-statistics-and-histograms">15.3 Statistics and histograms</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#table-level-statistics">Table-level statistics</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#column-level-statistics">Column-level statistics</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#histogram-types">Histogram types</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#maintenance">Maintenance</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#154-spill-to-disk-algorithms">15.4 Spill to disk algorithms</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#hash-aggregation-spill">Hash aggregation spill</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#external-sort">External sort</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#spill-file-format">Spill file format</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#155-observability-in-databases">15.5 Observability in databases</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#tracing">Tracing</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#metrics">Metrics</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#slow-query-log">Slow query log</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#profiling">Profiling</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#156-format-versioning-strategy">15.6 Format versioning strategy</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#principles">Principles</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#compatibility-matrix-example">Compatibility matrix (example)</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#157-query-scheduling-and-resource-governance">15.7 Query scheduling and resource governance</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#workload-classes">Workload classes</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#admission-control">Admission control</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#cancellation">Cancellation</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#158-distributed-and-disaggregated-patterns-conceptual">15.8 Distributed and disaggregated patterns (conceptual)</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#shared-nothing-partitioning">Shared-nothing partitioning</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#disaggregated-storage">Disaggregated storage</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#why-embedded-engines-defer-distribution">Why embedded engines defer distribution</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#159-adaptive-and-feedback-driven-execution">15.9 Adaptive and feedback-driven execution</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1510-security-and-multi-tenancy-hooks">15.10 Security and multi-tenancy hooks</a>
+                        </li>
+                        
+                        <li class="toc-h1">
+                          <a href="#part-ii-raindb">Part II — RainDB</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1511-how-to-read-the-roadmap">15.11 How to read the roadmap</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1512-phase-a-execution-efficiency">15.12 Phase A — Execution efficiency</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#a1-vectorized-selection-and-projection-implemented">A1. Vectorized selection and projection — implemented</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#a2-true-top-n-and-sort-discipline-planned">A2. True top-N and sort discipline — planned</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#a3-join-and-grouped-join-memory-model-planned">A3. Join and grouped-join memory model — planned</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#a4-simd-and-native-boundaries-partial">A4. SIMD and native boundaries — partial</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#a5-micro-benchmarks-planned">A5. Micro-benchmarks — planned</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1513-phase-b-planning-and-compile-once">15.13 Phase B — Planning and compile-once</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#b1-logical-rewrite-rule-based-optimizer-v0">B1. Logical rewrite (rule-based optimizer v0)</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#b2-physical-choices-heuristics">B2. Physical choices (heuristics)</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#b3-prepared-execution-and-plan-cache">B3. Prepared execution and plan cache</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#b4-explain-and-introspection">B4. Explain and introspection</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1514-phase-c-storage-io-memory-budget">15.14 Phase C — Storage, I/O, memory budget</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#c1-mmap-first-column-segments-designed-partial-code">C1. mmap-first column segments — designed, partial code</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#c2-buffer-manager-v0">C2. Buffer manager v0</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#c3-column-encodings">C3. Column encodings</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#c4-durability-hardening-pre-wal">C4. Durability hardening (pre-WAL)</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1515-phase-d-sql-and-analytics-surface">15.15 Phase D — SQL and analytics surface</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1516-phase-e-advanced-analytics">15.16 Phase E — Advanced analytics</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#e1-window-functions">E1. Window functions</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#e2-external-spill-real">E2. External spill (real)</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#e3-statistics">E3. Statistics</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#e4-adaptive-execution-optional">E4. Adaptive execution (optional)</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1517-phase-f-production-durability-and-concurrency">15.17 Phase F — Production durability and concurrency</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#f1-wal-checkpoint">F1. WAL + checkpoint</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#f2-mvcc-or-snapshot-reads">F2. MVCC or snapshot reads</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#f3-observability">F3. Observability</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1518-phase-g-ecosystem">15.18 Phase G — Ecosystem</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#g1-linq-provider-see-1520">G1. LINQ provider (see §15.20)</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#g2-ingest-and-interchange">G2. Ingest and interchange</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#g3-api-stability">G3. API stability</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1519-ispillwriter-today">15.19 ISpillWriter today</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1520-linq-compiler-stub">15.20 LINQ compiler stub</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#target-architecture">Target architecture</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#implementation-sketch">Implementation sketch</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#why-reuse-binders">Why reuse binders?</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1521-plan-cache-design-notes">15.21 Plan cache design notes</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#cache-entry">Cache entry</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#invalidation">Invalidation</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#parameter-binding">Parameter binding</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#thread-safety">Thread safety</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1522-column-encodings-roadmap">15.22 Column encodings roadmap</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#dictionary-encoding">Dictionary encoding</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#integer-compression">Integer compression</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#format-versioning">Format versioning</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#interaction-with-mmap">Interaction with mmap</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1523-observability-roadmap">15.23 Observability roadmap</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#compile-path">Compile path</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#execute-path">Execute path</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#metrics">Metrics</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#slow-query-log">Slow query log</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1524-cross-cutting-tracks">15.24 Cross-cutting tracks</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1525-success-metrics-product-level">15.25 Success metrics (product-level)</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1526-mapping-original-implementation-phases">15.26 Mapping original implementation phases</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1527-how-to-extend-this-book">15.27 How to extend this book</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#new-chapter-vs-appendix">New chapter vs appendix</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#chapter-template">Chapter template</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#suggested-future-chapters">Suggested future chapters</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#keeping-indexmd-current">Keeping index.md current</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#code-citation-convention">Code citation convention</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1528-contributing-a-roadmap-feature-checklist">15.28 Contributing a roadmap feature — checklist</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1529-what-not-to-do">15.29 What not to do</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1530-summary">15.30 Summary</a>
+                        </li>
+                        
+                  </ul>
+                </aside>
+                
+      </main>
+    </div>
+  </div>
+  <script src="assets/vendor/mermaid.min.js"></script>
+  <script src="assets/vendor/highlight.min.js"></script>
+  <script src="assets/js/site.js"></script>
+</body>
+</html>

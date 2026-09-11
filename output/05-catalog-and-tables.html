@@ -1,0 +1,1407 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Chapter 5: Catalog and Tables · Building an OLAP Database Engine from Scratch with RainDB</title>
+  <meta name="description" content="Generated documentation site">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="assets/css/site.css">
+  <link rel="stylesheet" href="assets/vendor/atom-one-dark.min.css">
+</head>
+<body>
+  <div class="site">
+    <header class="topbar">
+      <button class="sidebar-toggle" id="sidebar-toggle" aria-label="Toggle navigation">☰</button>
+      <a href="index.html" class="brand">Building an OLAP Database Engine from Scratch with RainDB</a>
+      <div class="search-wrap">
+        <input type="search" id="search" placeholder="Search docs…" autocomplete="off">
+      </div>
+    </header>
+
+    <div class="layout">
+      <aside class="sidebar" id="sidebar">
+        <nav class="nav" aria-label="Documentation">
+          <ul class="nav-list">
+            
+                        <li class="nav-item depth-0">
+                          
+                            <a href="index.html" class="nav-link">Building an OLAP Database Engine from Scratch</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="01-olap-fundamentals.html" class="nav-link">Chapter 1: OLAP Fundamentals</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="02-architecture-and-modules.html" class="nav-link">Chapter 2: Architecture and Modules</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="03-columnar-storage-model.html" class="nav-link">Chapter 3: Columnar Storage Model</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="04-chunk-data-structures.html" class="nav-link">Chapter 4: Chunk Data Structures</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0 is-active">
+                          
+                            <a href="05-catalog-and-tables.html" class="nav-link">Chapter 5: Catalog and Tables</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="06-buffer-management.html" class="nav-link">Chapter 6: Buffer Management</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="07-execution-pipeline.html" class="nav-link">Chapter 7: Execution Pipeline</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="08-vectorized-scan-filter-project.html" class="nav-link">Chapter 8: Vectorized Scan, Filter, and Project</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="09-global-aggregates.html" class="nav-link">Chapter 9: Global Aggregates</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="10-hash-aggregation.html" class="nav-link">Chapter 10: Hash Aggregation</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="11-joins.html" class="nav-link">Chapter 11: Joins</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="12-sort-and-limit.html" class="nav-link">Chapter 12: Sort and Limit</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="13-sql-compilation.html" class="nav-link">Chapter 13: SQL Compilation</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="14-persistence.html" class="nav-link">Chapter 14: Persistence</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="15-future-extensions.html" class="nav-link">Chapter 15: Future Extensions</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="16-mmap-io.html" class="nav-link">Chapter 16: mmap I/O</a>
+                            
+                        </li>
+                        
+          </ul>
+        </nav>
+      </aside>
+
+      <main class="content">
+        <article class="doc">
+          <header class="doc-header">
+            <h1>Chapter 5: Catalog and Tables</h1>
+          </header>
+          <div class="doc-body"><h1 id="chapter-5-catalog-and-tables">Chapter 5: Catalog and Tables</h1>
+<p>Before any row can be read or written, the engine must answer two questions: <strong>what objects exist</strong>, and <strong>where their bytes live</strong>. The <strong>catalog</strong> — also called the system catalog, metadata layer, or data dictionary — is the authoritative registry of tables, views, columns, types, and related metadata. The <strong>table</strong> is the unit of storage and scan: a named collection of rows organized according to a <strong>schema</strong>.</p>
+<p>This chapter is split into two parts. <strong>Part I</strong> develops the conceptual foundation: how commercial databases structure catalogs, why stable table identity matters, how schemas function as contracts, and why analytical engines often favor append-only storage over in-place mutation. <strong>Part II</strong> maps those ideas onto RainDB's concrete types — <code>ICatalog</code>, <code>TableId</code>, <code>MemoryTable</code>, persistence hooks, and the ephemeral table wrapper used in grouped-join pipelines.</p>
+<hr />
+<h1 id="part-i-concepts-and-theory">Part I: Concepts and Theory</h1>
+<h2 id="what-is-a-database-catalog">5.1 What is a database catalog?</h2>
+<p>The catalog sits between SQL and storage. It records <strong>what objects exist</strong> and <strong>how to reach them</strong> — not the user rows themselves (except when system tables double as metadata). Its job is to hold <strong>descriptions</strong> and the mapping from logical names to physical locations.</p>
+<p>Every catalog needs at least:</p>
+<table class="table">
+<thead>
+<tr>
+<th>Metadata element</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Object name</td>
+<td>Human-readable identifier (<code>sales</code>, <code>customers</code>)</td>
+</tr>
+<tr>
+<td>Object kind</td>
+<td>Table, view, index, sequence, …</td>
+</tr>
+<tr>
+<td>Column definitions</td>
+<td>Name, logical type, nullability, defaults</td>
+</tr>
+<tr>
+<td>Storage location</td>
+<td>File path, segment id, partition key</td>
+</tr>
+<tr>
+<td>Access control</td>
+<td>Owner, grants (in multi-user systems)</td>
+</tr>
+<tr>
+<td>Statistics</td>
+<td>Row counts, distinct counts, min/max (for optimization)</td>
+</tr>
+</tbody>
+</table>
+<p>Consider <code>SELECT region FROM sales</code>. The engine looks up <code>sales</code> in the catalog, confirms <code>region</code> is a valid column, finds where batches live, and only then opens storage. Name resolution happens at compile time (<strong>binding</strong>); execution works from the resolved handle, not the string <code>sales</code>.</p>
+<h3 id="catalog-as-a-dependency-inversion-boundary">Catalog as a dependency-inversion boundary</h3>
+<p>Treat the catalog as a <strong>port</strong>: compilation and execution depend on an interface, not a concrete storage backend. That boundary separates <strong>what</strong> (table identity, schema) from <strong>how</strong> (in-memory list today, mmap file tomorrow). Scan code should not care which backend backs a handle as long as the handle shape is uniform.</p>
+<h3 id="pseudocode-minimal-catalog-contract">Pseudocode: minimal catalog contract</h3>
+<pre><code>interface Catalog {
+    names(): string[]
+    lookupByName(name: string) -&gt; TableHandle | NOT_FOUND
+    lookupById(id: ObjectId) -&gt; TableHandle | NOT_FOUND
+    register(table: TableHandle)
+}
+</code></pre>
+<p>RainDB's <code>ICatalog</code> mirrors this contract, substituting <code>TableId</code> for a generic <code>ObjectId</code>.</p>
+<hr />
+<h2 id="system-catalogs-in-sql-databases">5.2 System catalogs in SQL databases</h2>
+<p>Production SQL engines keep a <strong>system catalog</strong> — metadata about the database itself, usually hidden behind <code>INFORMATION_SCHEMA</code> or <code>pg_catalog</code>. You rarely <code>SELECT</code> from it directly, yet every DDL statement and planner decision flows through it.</p>
+<h3 id="postgresql">PostgreSQL</h3>
+<p>PostgreSQL persists catalog state in ordinary heap tables whose names start with <code>pg_</code>:</p>
+<table class="table">
+<thead>
+<tr>
+<th>System table</th>
+<th>Contents</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>pg_class</code></td>
+<td>Relations (tables, indexes, views); includes <code>relname</code>, <code>relkind</code>, <code>relfilenode</code></td>
+</tr>
+<tr>
+<td><code>pg_attribute</code></td>
+<td>Columns per relation; type oid, nullability, storage</td>
+</tr>
+<tr>
+<td><code>pg_type</code></td>
+<td>Data types</td>
+</tr>
+<tr>
+<td><code>pg_namespace</code></td>
+<td>Schemas (<code>public</code>, <code>pg_catalog</code>, …)</td>
+</tr>
+</tbody>
+</table>
+<p><code>CREATE TABLE foo (...)</code> inserts into <code>pg_class</code> and <code>pg_attribute</code>. The planner consults these relations during parse and plan. Each row in <code>pg_class</code> carries an <strong><code>oid</code></strong> — the canonical internal id for that relation.</p>
+<h3 id="sql-server">SQL Server</h3>
+<p>SQL Server surfaces the same information through <strong>catalog views</strong> (<code>sys.tables</code>, <code>sys.columns</code>, <code>sys.types</code>) backed by internal tables in <code>mssqlsystemresource</code>. The <code>object_id</code> column plays the same role as PostgreSQL's <code>oid</code>.</p>
+<h3 id="common-themes">Common themes</h3>
+<p>Different products, same architectural habits:</p>
+<ol>
+<li><strong>Dual access</strong> — human names for SQL, numeric ids for plans and on-disk layout.</li>
+<li><strong>Schema versioning</strong> — DDL bumps a generation counter or forces plan-cache eviction.</li>
+<li><strong>Bootstrap problem</strong> — system tables must exist before user tables can be registered.</li>
+<li><strong>Read-mostly during queries</strong> — OLAP sessions assume catalog entries stay stable for the query lifetime.</li>
+</ol>
+<p>RainDB's <code>InMemoryCatalog</code> is a stripped-down version of this idea: names, ids, and schemas only — no views, indexes, or ACLs yet.</p>
+<hr />
+<h2 id="table-identity-oid-versus-name">5.3 Table identity: OID versus name</h2>
+<p>SQL says <code>FROM sales</code>. Internally, the engine should not hash that string on every operator step. It needs a <strong>stable identity</strong> that survives <code>RENAME TABLE</code> and fits cheaply in plan nodes.</p>
+<h3 id="why-names-alone-are-insufficient">Why names alone are insufficient</h3>
+<table class="table">
+<thead>
+<tr>
+<th>Problem with names only</th>
+<th>Consequence</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>ALTER TABLE sales RENAME TO revenue</code></td>
+<td>Compiled plans storing <code>&quot;sales&quot;</code> become stale</td>
+</tr>
+<tr>
+<td>Case sensitivity (<code>Sales</code> vs <code>sales</code>)</td>
+<td>Ambiguity across platforms</td>
+</tr>
+<tr>
+<td>String comparison cost</td>
+<td>Every operator step would compare UTF-8 names</td>
+</tr>
+<tr>
+<td>Temporary / intermediate results</td>
+<td>No natural name in user namespace</td>
+</tr>
+</tbody>
+</table>
+<h3 id="object-identifiers-oids">Object identifiers (OIDs)</h3>
+<p>PostgreSQL stamps each catalog row with an <strong><code>oid</code></strong> (historically 32-bit; often wider now). Storage files and cached plans reference the oid, not <code>relname</code>. A rename changes only the name column; oid stays put, so prepared plans keep working.</p>
+<p>Comparable mechanisms elsewhere:</p>
+<table class="table">
+<thead>
+<tr>
+<th>System</th>
+<th>Stable id</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>PostgreSQL</td>
+<td><code>pg_class.oid</code></td>
+</tr>
+<tr>
+<td>SQL Server</td>
+<td><code>object_id</code></td>
+</tr>
+<tr>
+<td>Oracle</td>
+<td><code>DATA_OBJECT_ID</code> / rowid components</td>
+</tr>
+<tr>
+<td>DuckDB</td>
+<td>Internal table index in catalog</td>
+</tr>
+<tr>
+<td>RainDB</td>
+<td><code>TableId</code> (<code>Guid</code>)</td>
+</tr>
+</tbody>
+</table>
+<h3 id="name-as-alias-id-as-truth">Name as alias, id as truth</h3>
+<p>Hold this picture:</p>
+<pre><code>  User-facing layer          Engine-internal layer
+─────────────────          ─────────────────────
+&quot;sales&quot;  ──bind──►  TableId(3fa85f64-5717-...)
+                         │
+                         ├── physical plan
+                         ├── persistence directory
+                         └── statistics cache key
+</code></pre>
+<p><strong>Binding</strong> is a compile-time step: resolve <code>FROM sales</code> once, embed <code>TableId</code> in the plan. <strong>Execution</strong> never re-parses the name. A future rename updates the name index; plans and disk paths keyed by id stay valid.</p>
+<h3 id="pseudocode-binding-at-compile-time">Pseudocode: binding at compile time</h3>
+<pre><code>function compileFromClause(name: string, catalog: Catalog) -&gt; BoundTable {
+    handle = catalog.lookupByName(name)
+    if handle == NOT_FOUND:
+        throw &quot;table does not exist&quot;
+    return BoundTable(id = handle.id, schema = handle.schema)
+}
+
+function executeScan(plan: ScanPlan, catalog: Catalog) {
+    table = catalog.lookupById(plan.tableId)  // not by name
+    for batch in table.batches:
+        scan(batch)
+}
+</code></pre>
+<p>RainDB's binder produces <code>TableId</code> values that land in <code>VectorizedScanPhysicalPlan</code> and related plan records.</p>
+<hr />
+<h2 id="schema-as-contract">5.4 Schema as contract</h2>
+<p>A <strong>schema</strong> is the agreement between writers (ingest, ETL, <code>INSERT</code>) and readers (queries, joins, aggregates). It fixes <strong>which columns exist, in what order, with which types</strong>.</p>
+<h3 id="schema-components">Schema components</h3>
+<table class="table">
+<thead>
+<tr>
+<th>Component</th>
+<th>Contract role</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Column names</td>
+<td>Bind SQL identifiers (<code>SELECT amount</code>)</td>
+</tr>
+<tr>
+<td>Column types</td>
+<td>Determine operators, widths, comparison semantics</td>
+</tr>
+<tr>
+<td>Column order</td>
+<td>Defines physical index in columnar batches</td>
+</tr>
+<tr>
+<td>Nullability</td>
+<td>Three-valued logic in predicates (when enforced)</td>
+</tr>
+<tr>
+<td>Constraints</td>
+<td>PRIMARY KEY, CHECK, FOREIGN KEY (OLTP-heavy; optional in OLAP)</td>
+</tr>
+</tbody>
+</table>
+<h3 id="schema-as-versioned-contract">Schema as versioned contract</h3>
+<p>Schemas drift. New columns appear; types widen; labels change. Engines attach a <strong>generation counter</strong> so caches know when compiled artifacts are stale:</p>
+<pre><code>SchemaVersion = 1  →  plan cache entry valid
+ALTER ADD COLUMN   →  SchemaVersion = 2  →  invalidate plan cache
+</code></pre>
+<p>Without that signal, a cached plan might still assume three columns while the table now has four — a recipe for out-of-bounds reads or silent wrong answers.</p>
+<h3 id="validation-at-the-boundary">Validation at the boundary</h3>
+<p>Catch structural mismatches at <strong>ingest</strong>, before bad data enters storage:</p>
+<pre><code>function appendBatch(table, batch):
+if not table.schema.matches(batch):
+    throw &quot;schema mismatch&quot;
+table.segments.append(batch)
+</code></pre>
+<p><code>MatchesBatch</code> verifies column count, per-column row counts, and physical types. It does not enforce business rules like <code>amount &gt; 0</code> — that is policy. Shape checking is not optional.</p>
+<h3 id="logical-versus-physical-schema">Logical versus physical schema</h3>
+<table class="table">
+<thead>
+<tr>
+<th>Layer</th>
+<th>What it describes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Logical schema</td>
+<td>Names and types visible to SQL</td>
+</tr>
+<tr>
+<td>Physical schema</td>
+<td>Encoding (Arrow, length-prefixed UTF-8), compression, sort order</td>
+</tr>
+</tbody>
+</table>
+<p>RainDB stores the logical view in <code>TableSchema</code> (<code>ColumnDef</code> list). Physical layout is chosen when batches are built — <code>FixedWidthColumnChunk</code>, <code>Utf8ColumnChunk</code>, and so on.</p>
+<hr />
+<h2 id="append-only-table-design-in-analytics">5.5 Append-only table design in analytics</h2>
+<p>OLAP engines commonly model a table as an <strong>append-only chain of sealed segments</strong> instead of updatable row pages.</p>
+<h3 id="segment-model">Segment model</h3>
+<pre><code>Table &quot;events&quot;
+├── Segment 0  (batch / stripe / row group)  — immutable after seal
+├── Segment 1
+├── Segment 2
+└── ...
+</code></pre>
+<p><strong>Append</strong> seals a new segment at the tail. <strong>Read</strong> walks the chain in order, often in parallel. The naive design never mutates a sealed segment.</p>
+<h3 id="why-analytics-favors-append-only">Why analytics favors append-only</h3>
+<table class="table">
+<thead>
+<tr>
+<th>Benefit</th>
+<th>Explanation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Scan simplicity</td>
+<td>Iterators walk a list; no free-space map</td>
+</tr>
+<tr>
+<td>Parallelism</td>
+<td>Each segment is an independent <strong>morsel</strong></td>
+</tr>
+<tr>
+<td>Compression</td>
+<td>Immutable blobs compress better (no update holes)</td>
+</tr>
+<tr>
+<td>Durability</td>
+<td>Write-once segments map cleanly to files (<code>000000.batch</code>, <code>000001.batch</code>)</td>
+</tr>
+<tr>
+<td>Cache behavior</td>
+<td>Sequential reads through cold segments are predictable</td>
+</tr>
+</tbody>
+</table>
+<p>Parquet row groups, DuckDB segments, and ClickHouse parts all rhyme with this layout, even when SQL exposes <code>UPDATE</code>.</p>
+<p>RainDB Phase 1 stops at the simple case: <code>MemoryTable</code> is a <code>List&lt;IColumnarBatch&gt;</code> with append only — no update or delete API.</p>
+<h3 id="pseudocode-append-only-table">Pseudocode: append-only table</h3>
+<pre><code>class AppendOnlyTable {
+    schema: Schema
+    segments: List&lt;Batch&gt; = []
+
+    append(batch: Batch) {
+        assert schema.matches(batch)
+        segments.add(batch)   // never modify segments[i] in place
+    }
+
+    scan(): Iterator&lt;Batch&gt; {
+        return segments.iterator()
+    }
+}
+</code></pre>
+<hr />
+<h2 id="mvcc-versus-append-only-a-contrast">5.6 MVCC versus append-only: a contrast</h2>
+<p><strong>MVCC</strong> and <strong>append-only storage</strong> attack different problems. Seeing the split explains why RainDB's heap table is append-only and MVCC-free.</p>
+<h3 id="mvcc-oltp-oriented">MVCC (OLTP-oriented)</h3>
+<p>MVCC lets readers and writers overlap by keeping <strong>several row versions</strong> alive at once:</p>
+<pre><code>Row id=42:
+Version A  (xmin=100, xmax=150)  amount=50   ← visible to txn 101-149
+Version B  (xmin=150, xmax=∞)  amount=75   ← visible to txn 150+
+</code></pre>
+<p>PostgreSQL chains versions inside heap pages. Snapshots filter on transaction id. <code>UPDATE</code> appends a new version; <code>VACUUM</code> reclaims dead tuples.</p>
+<table class="table">
+<thead>
+<tr>
+<th>MVCC strength</th>
+<th>MVCC cost</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Concurrent read/write</td>
+<td>Version chains, bloat, vacuum overhead</td>
+</tr>
+<tr>
+<td>Row-level isolation</td>
+<td>Per-row metadata (xmin, xmax, ctid)</td>
+</tr>
+<tr>
+<td>Fine-grained locking</td>
+<td>Complex visibility rules</td>
+</tr>
+</tbody>
+</table>
+<h3 id="append-only-olap-oriented">Append-only (OLAP-oriented)</h3>
+<p>Append-only layouts skip per-row version chains:</p>
+<table class="table">
+<thead>
+<tr>
+<th>Append-only strength</th>
+<th>Append-only cost</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Simple scan loops</td>
+<td>No cheap single-row update</td>
+</tr>
+<tr>
+<td>Immutable segments</td>
+<td>Eventual compaction needed</td>
+</tr>
+<tr>
+<td>Excellent batch I/O</td>
+<td>Stale rows until compaction</td>
+</tr>
+</tbody>
+</table>
+<p>Many OLAP deployments are <strong>read-heavy</strong> during query windows. Appending new segments while readers scan the current list is far simpler than full MVCC — readers see the segment list at scan open; writers only extend the tail.</p>
+<h3 id="when-each-model-fits">When each model fits</h3>
+<table class="table">
+<thead>
+<tr>
+<th>Workload</th>
+<th>Favored model</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Bank transfers, inventory</td>
+<td>MVCC row store</td>
+</tr>
+<tr>
+<td>Log ingestion, metrics, fact tables</td>
+<td>Append-only columnar</td>
+</tr>
+<tr>
+<td>Mixed HTAP</td>
+<td>Hybrid (e.g., dual store, or Delta/Iceberg versioning)</td>
+</tr>
+</tbody>
+</table>
+<p>RainDB targets embedded OLAP: one process, analytics-heavy, append through <code>AppendBatch</code>. No txn ids, no row versions, no vacuum.</p>
+<h3 id="versioning-without-mvcc">Versioning without MVCC</h3>
+<p><strong>Schema version</strong> (<code>SchemaVersion</code>) is not MVCC — it invalidates plans on DDL, not on DML. Row visibility is simply <strong>every batch currently in the list</strong>; cross-writer snapshot isolation is not implemented yet.</p>
+<hr />
+<h2 id="table-handles-in-query-execution">5.7 Table handles in query execution</h2>
+<p>Once compilation finishes, operators stop caring about SQL names. They carry <strong>table handles</strong> — resolved catalog entries plus whatever metadata the operator needs locally.</p>
+<h3 id="handle-contents-conceptual">Handle contents (conceptual)</h3>
+<pre><code>TableHandle {
+    id: ObjectId
+    schema: Schema
+    schemaVersion: int
+    storage: StorageInterface   // batches, files, mmap region
+}
+</code></pre>
+<h3 id="resolution-pipeline">Resolution pipeline</h3>
+<pre><code>Compile time:
+  SQL &quot;FROM sales&quot;  →  BoundTable(id, schema snapshot)
+
+Execute time:
+  plan.tableId  →  catalog.lookupById  →  IColumnarTableSource
+                                              │
+                                              └── .Batches for scan
+</code></pre>
+<h3 id="handle-lifetime">Handle lifetime</h3>
+<table class="table">
+<thead>
+<tr>
+<th>Handle kind</th>
+<th>Lifetime</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Catalog-registered table</td>
+<td>Process / database lifetime</td>
+</tr>
+<tr>
+<td>Ephemeral intermediate</td>
+<td>Single query operator chain</td>
+</tr>
+<tr>
+<td>Prepared plan reference</td>
+<td>Until schema version invalidates</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Ephemeral</strong> handles let a join feed a hash aggregate without polluting the user namespace with <code>&quot;_temp_join_7&quot;</code>.</p>
+<h3 id="defense-in-depth">Defense in depth</h3>
+<p>Before scanning, execution checks <code>plan.tableId == resolvedTable.id</code>. That catches the case where lookup succeeded but the wrong <code>IColumnarTableSource</code> instance was passed downstream.</p>
+<h3 id="operator-interface-segregation">Operator interface segregation</h3>
+<p>Not every consumer needs batch pointers:</p>
+<table class="table">
+<thead>
+<tr>
+<th>Interface level</th>
+<th>Provides</th>
+<th>Consumer</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Metadata only</td>
+<td>id, name, schema</td>
+<td>Binder, EXPLAIN</td>
+</tr>
+<tr>
+<td>Columnar storage</td>
+<td>+ batch list</td>
+<td>Scan, aggregate, join</td>
+</tr>
+</tbody>
+</table>
+<p>RainDB separates <code>ITableSource</code> (metadata) from <code>IColumnarTableSource</code> (+ <code>Batches</code>). A row-oriented adapter could implement only the former; Phase 1 operators require columnar sources.</p>
+<hr />
+<h2 id="summary-part-i-checklist">5.8 Summary: Part I checklist</h2>
+<p>Before diving into RainDB source, you should be able to answer:</p>
+<ol>
+<li><strong>What does a catalog do?</strong> — Maps names and ids to metadata and storage locations.</li>
+<li><strong>Why both name and id?</strong> — Names for SQL; ids for stable plans and disk paths.</li>
+<li><strong>What is schema-as-contract?</strong> — Structural checks at ingest; generation bumps on DDL.</li>
+<li><strong>Why append-only in OLAP?</strong> — Cheap scans, easy parallelism, compression-friendly immutability.</li>
+<li><strong>How does MVCC differ?</strong> — Row-level versions for concurrent OLTP; OLAP often omits them.</li>
+<li><strong>What is a table handle?</strong> — The resolved catalog entry operators consume at runtime.</li>
+</ol>
+<hr />
+<h1 id="transition-to-part-ii-raindb-implementation">Transition to Part II: RainDB Implementation</h1>
+<p>Part II turns the abstractions above into RainDB types. The catalog port is <strong><code>ICatalog</code></strong>; the default registry is <strong><code>InMemoryCatalog</code></strong> with dual indexes. Tables are <strong><code>MemoryTable</code></strong> objects — append-only <strong><code>IColumnarBatch</code></strong> lists checked against <strong><code>TableSchema</code></strong>. Plans embed <strong><code>TableId</code></strong>, not display names. Durability hooks go through <strong><code>IRainDbBatchPersistence</code></strong>, with in-memory rollback if a write fails. Grouped joins wrap intermediate output in <strong><code>EphemeralColumnarTableSource</code></strong> so hash aggregation can run without a catalog entry.</p>
+<p>The following sections document every public type, registration rules, append paths, and how execution resolves tables — with paths relative to the RainDB repository root.</p>
+<hr />
+<h1 id="part-ii-raindb-implementation">Part II: RainDB Implementation</h1>
+<h2 id="why-two-identifiers-name-and-tableid">5.10 Why two identifiers: name and TableId</h2>
+<p>RainDB's storage surface is deliberately small: a <strong>catalog</strong> maps human-readable names to <strong>table sources</strong>, and the primary concrete source is <strong><code>MemoryTable</code></strong> — an append-only list of columnar batches. Nothing in this layer knows about SQL parsing, join algorithms, or SIMD kernels. That separation is intentional. The catalog is a <strong>dependency-inversion port</strong> (<code>ICatalog</code>) that execution resolves at runtime; physical plans carry stable <strong><code>TableId</code></strong> values so compiled operators do not depend on display names.</p>
+<p>SQL and application code refer to tables by <strong>name</strong> (<code>sales</code>, <code>customers</code>). Compiled physical plans, persistence directories, and cross-session identity need something that survives renames and avoids string comparisons on hot paths. RainDB assigns each table a <strong><code>TableId</code></strong> — a thin wrapper around <code>Guid</code>:</p>
+<pre><code class="language-csharp">// src/RainDB.Abstractions/Catalog/TableId.cs
+public readonly record struct TableId(Guid Value)
+{
+    public static TableId New() =&gt; new(Guid.NewGuid());
+    public static TableId From(Guid g) =&gt; new(g);
+    public override string ToString() =&gt; Value.ToString(&quot;N&quot;);
+}
+</code></pre>
+<p><strong>Design notes:</strong></p>
+<ul>
+<li><code>TableId</code> is a <code>readonly record struct</code>, so it is cheap to pass by value and usable as a dictionary key without heap allocation for the id itself.</li>
+<li><code>ToString()</code> uses the <code>&quot;N&quot;</code> format (32 hex digits, no dashes), which matches on-disk directory names under <code>tables/{tableId}/</code> in <code>RainDbFileDatabase</code>.</li>
+<li><code>TableId.New()</code> is called from <code>MemoryTable</code> when the caller does not supply an explicit id — typical for ad-hoc in-memory tables.</li>
+<li><code>TableId.From(Guid)</code> is used when <strong>hydrating</strong> from <code>catalog.json</code>, where the id was serialized at export time.</li>
+</ul>
+<p>Physical plans store <code>TableId</code>, not names. The SQL binder resolves <code>FROM sales</code> to a <code>TableId</code> once at compile time; <code>DefaultQueryExecutor</code> then calls <code>context.Catalog.TryGetTable(plan.TableId, ...)</code>. A future <code>ALTER TABLE ... RENAME</code> could update the name index while leaving plan identity intact.</p>
+<hr />
+<h2 id="the-table-source-interfaces">5.11 The table source interfaces</h2>
+<p>RainDB splits &quot;table metadata&quot; from &quot;columnar storage layout&quot; using the <strong>interface segregation principle</strong>:</p>
+<pre><code class="language-csharp">// src/RainDB.Abstractions/Catalog/ITableSource.cs
+public interface ITableSource
+{
+    TableId Id { get; }
+    string Name { get; }
+    TableSchema Schema { get; }
+    int SchemaVersion { get; }
+}
+</code></pre>
+<p>Every catalog entry exposes identity, logical schema, and a <strong>schema generation counter</strong>. Execution may cache plans or statistics keyed by <code>(TableId, SchemaVersion)</code>; when the logical schema changes, bumping the version signals invalidation without requiring a new <code>TableId</code>.</p>
+<p>Columnar scans need batch access:</p>
+<pre><code class="language-csharp">// src/RainDB.Abstractions/Catalog/IColumnarTableSource.cs
+public interface IColumnarTableSource : ITableSource
+{
+    IReadOnlyList&lt;IColumnarBatch&gt; Batches { get; }
+}
+</code></pre>
+<p>Not every future table implementation must be columnar (for example, a row-oriented adapter could implement only <code>ITableSource</code>). Scan, hash-aggregate, join, and sort operators require <code>IColumnarTableSource</code>; <code>DefaultQueryExecutor</code> throws if resolution yields a non-columnar source.</p>
+<hr />
+<h2 id="icatalog-the-registry-port">5.12 ICatalog: the registry port</h2>
+<pre><code class="language-csharp">// src/RainDB.Abstractions/Catalog/ICatalog.cs
+public interface ICatalog
+{
+    IReadOnlyCollection&lt;string&gt; TableNames { get; }
+    IReadOnlyCollection&lt;TableId&gt; TableIds { get; }
+    bool TryGetTable(string name, out ITableSource? table);
+    bool TryGetTable(TableId id, out ITableSource? table);
+    void Register(ITableSource table);
+}
+</code></pre>
+<p>The contract is intentionally minimal:</p>
+<ul>
+<li><strong>Dual lookup</strong> — by case-insensitive name (SQL) and by <code>TableId</code> (plans).</li>
+<li><strong>No unregister</strong> — tables live for the catalog lifetime; dropping tables is not yet a first-class API.</li>
+<li><strong>Read-only enumeration</strong> — <code>TableNames</code> and <code>TableIds</code> support tooling and export without exposing internal maps.</li>
+</ul>
+<p>SQL compilation receives <code>ICatalog</code> so the binder can resolve <code>FROM</code> clauses. Execution receives the same catalog through <code>IExecutionContext.Catalog</code>. Tests inject <code>InMemoryCatalog</code> directly; <code>RainDbEngine.CreateDefault()</code> constructs one at the composition root.</p>
+<hr />
+<h2 id="inmemorycatalog-concurrent-dual-indexing">5.13 InMemoryCatalog: concurrent dual indexing</h2>
+<p>The default implementation maintains two <code>ConcurrentDictionary</code> instances:</p>
+<pre><code class="language-csharp">// src/RainDB.Core/Catalog/InMemoryCatalog.cs
+public sealed class InMemoryCatalog : ICatalog
+{
+    private readonly ConcurrentDictionary&lt;string, ITableSource&gt; _byName =
+        new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary&lt;TableId, ITableSource&gt; _byId = new();
+
+    public IReadOnlyCollection&lt;string&gt; TableNames =&gt; _byName.Keys.ToArray();
+    public IReadOnlyCollection&lt;TableId&gt; TableIds =&gt; _byId.Keys.ToArray();
+
+    public bool TryGetTable(string name, out ITableSource? table) =&gt;
+        _byName.TryGetValue(name, out table);
+
+    public bool TryGetTable(TableId id, out ITableSource? table) =&gt;
+        _byId.TryGetValue(id, out table);
+
+    public void Register(ITableSource table)
+    {
+        ArgumentNullException.ThrowIfNull(table);
+        if (!_byName.TryAdd(table.Name, table))
+            throw new InvalidOperationException($&quot;Table name already registered: {table.Name}&quot;);
+        if (!_byId.TryAdd(table.Id, table))
+        {
+            _byName.TryRemove(table.Name, out _);
+            throw new InvalidOperationException($&quot;Table id already registered: {table.Id}&quot;);
+        }
+    }
+}
+</code></pre>
+<p><strong>Registration semantics:</strong></p>
+<ol>
+<li>Name insert first. If the name collides, registration fails immediately — no partial state.</li>
+<li>Id insert second. If the id collides (extremely rare unless misusing <code>TableId.From</code>), the name entry is <strong>rolled back</strong> via <code>TryRemove</code>. The catalog never exposes a table under one index without the other.</li>
+<li>Case-insensitive names match SQL's typical default behavior (<code>StringComparer.OrdinalIgnoreCase</code>).</li>
+</ol>
+<p><strong>Concurrency:</strong> <code>ConcurrentDictionary</code> allows concurrent reads during queries while another thread registers a table. RainDB does not yet support concurrent <code>AppendBatch</code> on the same <code>MemoryTable</code> from multiple writers; catalog concurrency covers read-heavy OLAP sessions with occasional DDL-like registration.</p>
+<p><strong>Snapshot cost:</strong> <code>TableNames</code> and <code>TableIds</code> allocate new arrays on every access (<code>Keys.ToArray()</code>). This is acceptable for catalog introspection, not for per-query hot paths.</p>
+<hr />
+<h2 id="tableschema-and-batch-validation">5.14 TableSchema and batch validation</h2>
+<p>Before a batch enters <code>MemoryTable</code>, <code>TableSchema.MatchesBatch</code> validates structural compatibility:</p>
+<pre><code class="language-csharp">// src/RainDB.Abstractions/Schema/TableSchema.cs
+public bool MatchesBatch(IColumnarBatch batch)
+{
+    ArgumentNullException.ThrowIfNull(batch);
+    if (batch.Columns.Count != Columns.Count || batch.RowCount &lt; 0)
+        return false;
+    if (batch.RowCount == 0)
+        return batch.Columns.All(c =&gt; c.RowCount == 0);
+    for (var i = 0; i &lt; Columns.Count; i++)
+    {
+        var col = batch.Columns[i];
+        if (col.RowCount != batch.RowCount)
+            return false;
+        if (col.PhysicalType != Columns[i].Type)
+            return false;
+    }
+    return true;
+}
+</code></pre>
+<p><code>MemoryTable.AppendCore</code> throws <code>ArgumentException</code> when <code>MatchesBatch</code> returns false. This catches:</p>
+<ul>
+<li>Wrong column count</li>
+<li>Per-chunk row count mismatch within a batch</li>
+<li>Physical type mismatch (e.g., <code>Int64</code> chunk in an <code>Int32</code> column)</li>
+</ul>
+<p><code>MatchesBatch</code> does <strong>not</strong> validate null bitmap correctness, UTF-8 offset monotonicity, or vector chunk sizing — those are the chunk implementation's responsibility. Strict row-count policy is optional via <code>MemoryTableOptions</code>.</p>
+<hr />
+<h2 id="memorytable-append-only-columnar-segments">5.15 MemoryTable: append-only columnar segments</h2>
+<p><code>MemoryTable</code> is the workhorse in-memory store:</p>
+<pre><code class="language-csharp">// src/RainDB.Core/Tables/MemoryTable.cs
+public sealed class MemoryTable : ITableSource, IColumnarTableSource
+{
+    private readonly List&lt;IColumnarBatch&gt; _batches = new();
+    private int _schemaVersion = 1;
+
+    public MemoryTable(string name, TableSchema schema, TableId? id = null,
+        MemoryTableOptions options = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(name);
+        Name = name;
+        Schema = schema;
+        Id = id ?? TableId.New();
+        Options = options;
+    }
+
+    public TableId Id { get; }
+    public string Name { get; }
+    public TableSchema Schema { get; }
+    public MemoryTableOptions Options { get; }
+    public int SchemaVersion =&gt; Volatile.Read(ref _schemaVersion);
+
+    public event EventHandler&lt;SchemaVersionChangedEventArgs&gt;? SchemaVersionChanged;
+
+    public IReadOnlyList&lt;IColumnarBatch&gt; Batches =&gt; _batches;
+
+    public long RowCount
+    {
+        get
+        {
+            long sum = 0;
+            foreach (var b in _batches)
+                sum += b.RowCount;
+            return sum;
+        }
+    }
+}
+</code></pre>
+<p><strong>Storage model:</strong></p>
+<ul>
+<li>Batches are stored in a <code>List&lt;IColumnarBatch&gt;</code> in <strong>insertion order</strong>. Scans iterate <code>table.Batches</code> sequentially; there is no automatic compaction or sorting at the storage layer.</li>
+<li><code>RowCount</code> is computed on demand by summing batch row counts — O(number of batches), not O(1).</li>
+<li>The table does not own chunk memory lifetimes beyond holding references; pooled chunks from queries are unrelated to table storage.</li>
+</ul>
+<hr />
+<h2 id="appendbatch-vs-appendhydratedbatch">5.16 AppendBatch vs AppendHydratedBatch</h2>
+<p>Two public/internal entry points share one implementation:</p>
+<pre><code class="language-csharp">public void AppendBatch(IColumnarBatch batch) =&gt;
+    AppendCore(batch, notifyPersistence: true);
+
+internal void AppendHydratedBatch(IColumnarBatch batch) =&gt;
+    AppendCore(batch, notifyPersistence: false);
+
+private void AppendCore(IColumnarBatch batch, bool notifyPersistence)
+{
+    ArgumentNullException.ThrowIfNull(batch);
+    if (!Schema.MatchesBatch(batch))
+        throw new ArgumentException(&quot;Batch does not match this table's schema.&quot;, nameof(batch));
+    VectorChunkLimits.ValidateRowCount(batch.RowCount, Options.StrictVectorChunkRows);
+    _batches.Add(batch);
+    if (notifyPersistence &amp;&amp; Options.BatchPersistence is { } persistence)
+    {
+        try
+        {
+            persistence.OnBatchAppended(Id, Name, _batches.Count - 1, batch);
+        }
+        catch
+        {
+            _batches.RemoveAt(_batches.Count - 1);
+            throw;
+        }
+    }
+}
+</code></pre>
+<h3 id="user-append-path-appendbatch">User append path (<code>AppendBatch</code>)</h3>
+<p>Application code and ingest pipelines call <code>AppendBatch</code>. The sequence is:</p>
+<ol>
+<li>Null-check the batch</li>
+<li>Schema validation</li>
+<li>Optional strict vector sizing (see §5.18)</li>
+<li>Add to <code>_batches</code></li>
+<li>If <code>Options.BatchPersistence</code> is set, invoke <code>OnBatchAppended</code></li>
+</ol>
+<h3 id="hydration-path-appendhydratedbatch">Hydration path (<code>AppendHydratedBatch</code>)</h3>
+<p>When loading from disk, the batch <strong>already exists</strong> on storage. Calling the persistence hook would write the same bytes twice (or create duplicate files). <code>RainDbFileDatabase.LoadBatchesIntoTable</code> decodes each <code>.batch</code> file and calls <code>AppendHydratedBatch</code>:</p>
+<pre><code class="language-csharp">// src/RainDB.Core/Persistence/RainDbFileDatabase.cs (excerpt)
+foreach (var file in Directory.GetFiles(dir, &quot;*.batch&quot;).OrderBy(f =&gt; f, StringComparer.Ordinal))
+{
+    var bytes = File.ReadAllBytes(file);
+    var batch = RainDbBatchBinaryCodec.DecodeBatch(bytes);
+    table.AppendHydratedBatch(batch);
+}
+</code></pre>
+<p>Hydration uses <code>ImportCatalog</code> tables without persistence hooks; <code>Open</code> wires <code>BatchPersistence: this</code> so subsequent user appends persist.</p>
+<hr />
+<h2 id="persistence-hook-rollback">5.17 Persistence hook rollback</h2>
+<p>The persistence integration follows a <strong>two-phase append</strong> pattern: memory first, then durable mirror. If the mirror fails, memory state is rolled back.</p>
+<pre><code class="language-csharp">// src/RainDB.Abstractions/Persistence/IRainDbBatchPersistence.cs
+public interface IRainDbBatchPersistence
+{
+    void OnBatchAppended(TableId tableId, string tableName,
+        int zeroBasedBatchIndex, IColumnarBatch batch);
+}
+</code></pre>
+<p><code>RainDbFileDatabase</code> implements this interface:</p>
+<pre><code class="language-csharp">void IRainDbBatchPersistence.OnBatchAppended(
+    TableId tableId, string tableName, int zeroBasedBatchIndex, IColumnarBatch batch)
+{
+    var path = GetBatchPath(tableId, zeroBasedBatchIndex);
+    lock (_ioLock)
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        WriteBatchFile(path, batch);
+    }
+}
+</code></pre>
+<p><strong>Rollback behavior</strong> is verified in tests:</p>
+<pre><code class="language-csharp">// tests/RainDB.Tests/RobustnessAndEdgeCaseTests.cs (conceptual)
+var table = new MemoryTable(&quot;t&quot;, schema,
+    options: new MemoryTableOptions(BatchPersistence: new ThrowingPersistence()));
+Assert.Throws&lt;IOException&gt;(() =&gt; table.AppendBatch(batch));
+Assert.Equal(0, table.RowCount);
+Assert.Empty(table.Batches);
+</code></pre>
+<p>If <code>OnBatchAppended</code> throws <strong>any</strong> exception, <code>AppendCore</code> removes the batch just added (<code>RemoveAt(_batches.Count - 1)</code>) and rethrows. Invariants after failure:</p>
+<ul>
+<li><code>RowCount</code> unchanged</li>
+<li><code>Batches</code> empty (for first append) or same as before</li>
+<li>No orphan batch file (write failed before completion, or never started)</li>
+</ul>
+<p>This is not a full transactional log — catalog.json is flushed separately on <code>CreateMemoryTable</code> — but <strong>in-memory and per-batch file state stay consistent</strong> for the append that failed.</p>
+<p><strong>Ordering:</strong> <code>zeroBasedBatchIndex</code> is <code>_batches.Count - 1</code> after the add, so file names <code>000000.batch</code>, <code>000001.batch</code>, … align with list indices.</p>
+<hr />
+<h2 id="memorytableoptions-and-vector-chunk-policy">5.18 MemoryTableOptions and vector chunk policy</h2>
+<pre><code class="language-csharp">// src/RainDB.Core/Tables/MemoryTableOptions.cs
+public readonly record struct MemoryTableOptions(
+    bool StrictVectorChunkRows = false,
+    IRainDbBatchPersistence? BatchPersistence = null)
+{
+    public static MemoryTableOptions Default =&gt; default;
+}
+</code></pre>
+<table class="table">
+<thead>
+<tr>
+<th>Flag</th>
+<th>Default</th>
+<th>Effect</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>StrictVectorChunkRows</code></td>
+<td><code>false</code></td>
+<td>When <code>true</code>, enforces DuckDB-style batch sizes</td>
+</tr>
+<tr>
+<td><code>BatchPersistence</code></td>
+<td><code>null</code></td>
+<td>Optional hook after successful in-memory append</td>
+</tr>
+</tbody>
+</table>
+<p>Strict sizing delegates to <code>VectorChunkLimits</code>:</p>
+<pre><code class="language-csharp">// src/RainDB.Core/Columnar/VectorChunkLimits.cs
+public const int MinRows = 64 * 1024;   // 65,536
+public const int MaxRows = 1024 * 1024; // 1,048,576
+
+public static void ValidateRowCount(int rowCount, bool enforce)
+{
+    if (!enforce) return;
+    if (rowCount == 0) return;
+    if (rowCount &lt; MinRows || rowCount &gt; MaxRows)
+        throw new ArgumentOutOfRangeException(...);
+}
+</code></pre>
+<p>Tests confirm: a 2-row batch fails under strict mode; a 64K-row batch succeeds. Production ingest pipelines should enable strict mode for cache-friendly vector widths; unit tests leave it off for small fixtures.</p>
+<p><code>RainDbFileDatabase.CreateMemoryTable</code> passes <code>new MemoryTableOptions(strictVectorChunkRows, BatchPersistence: this)</code>.</p>
+<hr />
+<h2 id="schema-version-and-cache-invalidation">5.19 Schema version and cache invalidation</h2>
+<pre><code class="language-csharp">public int BumpSchemaVersion()
+{
+    var v = Interlocked.Increment(ref _schemaVersion);
+    SchemaVersionChanged?.Invoke(this, new SchemaVersionChangedEventArgs(v));
+    return v;
+}
+</code></pre>
+<ul>
+<li>Initial version is <strong>1</strong> (not 0), so &quot;never bumped&quot; is distinguishable from &quot;bumped once to 2&quot;.</li>
+<li><code>SchemaVersion</code> is read with <code>Volatile.Read</code> for cross-thread visibility without locking.</li>
+<li><code>BumpSchemaVersion</code> is reserved for future <code>ALTER TABLE</code> / migration workflows; the current SQL subset does not call it automatically.</li>
+<li><code>SchemaVersionChangedEventArgs</code> carries <code>NewVersion</code> for external caches (plan cache, statistics).</li>
+</ul>
+<p><strong>Interaction with plans:</strong> Physical plans capture <code>TableId</code> at compile time. They do not embed <code>SchemaVersion</code> today. A production plan cache should validate <code>(TableId, SchemaVersion)</code> before reuse. <code>EphemeralColumnarTableSource</code> hardcodes <code>SchemaVersion =&gt; 0</code> because ephemeral results are single-query intermediates.</p>
+<hr />
+<h2 id="ephemeralcolumnartablesource">5.20 EphemeralColumnarTableSource</h2>
+<p>Grouped join queries execute a join, then aggregate over the join output without registering a catalog table:</p>
+<pre><code class="language-csharp">// src/RainDB.Query/Execution/EphemeralColumnarTableSource.cs
+internal sealed class EphemeralColumnarTableSource : IColumnarTableSource
+{
+    public EphemeralColumnarTableSource(
+        TableId id, string name, TableSchema schema,
+        IReadOnlyList&lt;IColumnarBatch&gt; batches)
+    {
+        Id = id;
+        Name = name;
+        Schema = schema;
+        Batches = batches;
+    }
+
+    public TableId Id { get; }
+    public string Name { get; }
+    public TableSchema Schema { get; }
+    public int SchemaVersion =&gt; 0;
+    public IReadOnlyList&lt;IColumnarBatch&gt; Batches { get; }
+}
+</code></pre>
+<p><code>DefaultQueryExecutor</code> uses it in the <code>GroupedJoinPhysicalPlan</code> branch:</p>
+<pre><code class="language-csharp">var joinResult = await JoinExecutionEngine.ExecuteAsync(...);
+var ephemeral = new EphemeralColumnarTableSource(
+    grouped.Aggregate.TableId,
+    &quot;_grouped_join_&quot;,
+    grouped.Join.OutputSchema,
+    colResult.Batches);
+return await HashAggregateEngine.ExecuteAsync(grouped.Aggregate, ephemeral, context);
+</code></pre>
+<p><strong>Why this exists:</strong></p>
+<ul>
+<li><code>HashAggregateEngine</code> expects an <code>IColumnarTableSource</code>, not a raw <code>IQueryResult</code>.</li>
+<li>The join output schema (<code>Join.OutputSchema</code>) defines column indices for group keys and aggregates.</li>
+<li>The ephemeral id comes from <code>grouped.Aggregate.TableId</code> — a synthetic id assigned at plan construction, not registered in <code>ICatalog</code>.</li>
+<li><code>Name</code> is <code>&quot;_grouped_join_&quot;</code> for debugging only; SQL never references it.</li>
+</ul>
+<p><strong>Lifetime:</strong> Join result batches are borrowed until hash aggregate completes. The executor disposes <code>joinResult</code> in a <code>finally</code> block after aggregation starts — callers must not retain join batches past the grouped-join operation.</p>
+<hr />
+<h2 id="end-to-end-catalog-flows">5.21 End-to-end catalog flows</h2>
+<h3 id="in-memory-engine-bootstrap">In-memory engine bootstrap</h3>
+<pre><code class="language-csharp">// src/RainDB.Driver/RainDbEngine.cs
+public static RainDbEngine CreateDefault()
+{
+    var catalog = new InMemoryCatalog();
+    var buffers = new HybridBufferPool();
+    return new RainDbEngine(catalog, buffers, buffers,
+        new DefaultQueryExecutor(), ...);
+}
+</code></pre>
+<p>Register a table, append data, query:</p>
+<pre><code class="language-csharp">var schema = new TableSchema([new ColumnDef(&quot;region&quot;, RainDbType.Utf8)]);
+var table = new MemoryTable(&quot;sales&quot;, schema);
+catalog.Register(table);
+table.AppendBatch(myBatch);
+// SQL: SELECT ... FROM sales  → binder resolves &quot;sales&quot; → table.Id → VectorizedScanPhysicalPlan
+</code></pre>
+<h3 id="persistent-open-hydrate-append">Persistent open / hydrate / append</h3>
+<pre><code class="language-csharp">var engine = RainDbEngine.OpenPersistent(&quot;/data/mydb&quot;);
+// Hydrates catalog.json + *.batch files via AppendHydratedBatch
+var table = engine.FileDatabase!.CreateMemoryTable(&quot;events&quot;, schema);
+table.AppendBatch(batch); // → OnBatchAppended → tables/{id}/000000.batch
+</code></pre>
+<h3 id="export-import-without-persistence-hook">Export / import without persistence hook</h3>
+<p><code>RainDbFileDatabase.ExportCatalog</code> / <code>ImportCatalog</code> copy catalog metadata and batch files; imported tables have no <code>BatchPersistence</code> until re-wired to a file database.</p>
+<hr />
+<h2 id="catalog-resolution-in-execution">5.22 Catalog resolution in execution</h2>
+<p>Every physical operator that reads a table follows the same resolution pattern:</p>
+<pre><code class="language-csharp">if (!context.Catalog.TryGetTable(plan.TableId, out var ts)
+|| ts is not IColumnarTableSource cols)
+throw new InvalidOperationException(
+    $&quot;Columnar table {plan.TableId} was not found in the catalog.&quot;);
+</code></pre>
+<p>Failures mean:</p>
+<ul>
+<li>Table was never registered</li>
+<li>Table was registered but is not columnar</li>
+<li>Plan references a stale <code>TableId</code> from a different catalog instance</li>
+</ul>
+<p><code>VectorizedScanEngine.ValidatePlan</code> additionally asserts <code>plan.TableId == table.Id</code> when the executor passes the resolved source — defense in depth against caller bugs.</p>
+<hr />
+<h2 id="testing-patterns">5.23 Testing patterns</h2>
+<p><code>ColumnarAndCatalogTests</code> verifies dual lookup by name and id, schema version events, persistence rollback, and strict chunk policy (<code>RobustnessAndEdgeCaseTests</code>, <code>RainDbPersistenceTests</code>).</p>
+<hr />
+<h2 id="design-trade-offs-and-future-directions">5.24 Design trade-offs and future directions</h2>
+<table class="table">
+<thead>
+<tr>
+<th>Decision</th>
+<th>Rationale</th>
+<th>Limitation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Append-only batches</td>
+<td>Simple scans, easy persistence</td>
+<td>No in-place updates or deletes</td>
+</tr>
+<tr>
+<td>Dual dictionary catalog</td>
+<td>Fast name and id lookup</td>
+<td>Registration rollback on id collision</td>
+</tr>
+<tr>
+<td>Synchronous persistence hook</td>
+<td>Simple error model</td>
+<td>Append latency tied to disk</td>
+</tr>
+<tr>
+<td><code>SchemaVersion</code> event</td>
+<td>Extensibility for plan cache</td>
+<td>Not yet enforced by compiler</td>
+</tr>
+<tr>
+<td><code>EphemeralColumnarTableSource</code></td>
+<td>Reuses hash aggregate engine</td>
+<td>Extra materialization for grouped joins</td>
+</tr>
+</tbody>
+</table>
+<p>Plausible extensions: <code>UnregisterTable</code>, weak-reference plan cache keyed by schema version, asynchronous WAL with memory-table staging, and catalog entries that are views rather than physical <code>MemoryTable</code> instances.</p>
+<hr />
+<h2 id="mental-model">5.25 Mental model</h2>
+<pre><code>  SQL / API                    Physical plan
+    │                              │
+    ▼                              ▼
+ICatalog.TryGetTable(name)    TableId in plan
+    │                              │
+    └──────────┬───────────────────┘
+               ▼
+       IColumnarTableSource
+               │
+               ▼
+    MemoryTable.Batches[i]
+               │
+               ▼
+    VectorizedScanEngine / Join / Aggregate ...
+</code></pre>
+<p>The catalog answers <strong>what</strong> and <strong>where</strong>; <code>MemoryTable</code> answers <strong>how rows are stored</strong>; <code>TableId</code> and <code>SchemaVersion</code> answer <strong>whether a compiled plan still applies</strong>. Persistence hooks and hydration paths ensure the in-memory story matches on-disk segments without double-writing during load.</p>
+<hr />
+<h2 id="quick-reference">5.26 Quick reference</h2>
+<table class="table">
+<thead>
+<tr>
+<th>Type</th>
+<th>Location</th>
+<th>Role</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>TableId</code></td>
+<td><code>src/RainDB.Abstractions/Catalog/TableId.cs</code></td>
+<td>Stable table identity</td>
+</tr>
+<tr>
+<td><code>ICatalog</code></td>
+<td><code>src/RainDB.Abstractions/Catalog/ICatalog.cs</code></td>
+<td>Registry port</td>
+</tr>
+<tr>
+<td><code>InMemoryCatalog</code></td>
+<td><code>src/RainDB.Core/Catalog/InMemoryCatalog.cs</code></td>
+<td>Default registry</td>
+</tr>
+<tr>
+<td><code>ITableSource</code></td>
+<td><code>src/RainDB.Abstractions/Catalog/ITableSource.cs</code></td>
+<td>Metadata surface</td>
+</tr>
+<tr>
+<td><code>IColumnarTableSource</code></td>
+<td><code>src/RainDB.Abstractions/Catalog/IColumnarTableSource.cs</code></td>
+<td>Batch storage surface</td>
+</tr>
+<tr>
+<td><code>MemoryTable</code></td>
+<td><code>src/RainDB.Core/Tables/MemoryTable.cs</code></td>
+<td>Columnar heap table</td>
+</tr>
+<tr>
+<td><code>MemoryTableOptions</code></td>
+<td><code>src/RainDB.Core/Tables/MemoryTableOptions.cs</code></td>
+<td>Strict sizing + persistence</td>
+</tr>
+<tr>
+<td><code>IRainDbBatchPersistence</code></td>
+<td><code>src/RainDB.Abstractions/Persistence/IRainDbBatchPersistence.cs</code></td>
+<td>Append hook</td>
+</tr>
+<tr>
+<td><code>EphemeralColumnarTableSource</code></td>
+<td><code>src/RainDB.Query/Execution/EphemeralColumnarTableSource.cs</code></td>
+<td>Join→aggregate bridge</td>
+</tr>
+</tbody>
+</table>
+<p>Understanding this layer is prerequisite for execution (Chapter 7) and vectorized scan (Chapter 8): every read path ultimately enumerates <code>IColumnarTableSource.Batches</code> resolved through <code>ICatalog</code>.</p>
+</div>
+          <footer class="doc-footer">
+            <p>Generated by <strong>hoihky</strong> with <strong>MDWeb</strong> and with assistance from <strong>AI</strong></p>
+
+          </footer>
+        </article>
+
+        
+                <aside class="toc" aria-label="On this page">
+                  <p class="toc-title">On this page</p>
+                  <ul>
+                    
+                        <li class="toc-h1">
+                          <a href="#chapter-5-catalog-and-tables">Chapter 5: Catalog and Tables</a>
+                        </li>
+                        
+                        <li class="toc-h1">
+                          <a href="#part-i-concepts-and-theory">Part I: Concepts and Theory</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#51-what-is-a-database-catalog">5.1 What is a database catalog?</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#catalog-as-a-dependency-inversion-boundary">Catalog as a dependency-inversion boundary</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#pseudocode-minimal-catalog-contract">Pseudocode: minimal catalog contract</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#52-system-catalogs-in-sql-databases">5.2 System catalogs in SQL databases</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#postgresql">PostgreSQL</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#sql-server">SQL Server</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#common-themes">Common themes</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#53-table-identity-oid-versus-name">5.3 Table identity: OID versus name</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#why-names-alone-are-insufficient">Why names alone are insufficient</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#object-identifiers-oids">Object identifiers (OIDs)</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#name-as-alias-id-as-truth">Name as alias, id as truth</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#pseudocode-binding-at-compile-time">Pseudocode: binding at compile time</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#54-schema-as-contract">5.4 Schema as contract</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#schema-components">Schema components</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#schema-as-versioned-contract">Schema as versioned contract</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#validation-at-the-boundary">Validation at the boundary</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#logical-versus-physical-schema">Logical versus physical schema</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#55-append-only-table-design-in-analytics">5.5 Append-only table design in analytics</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#segment-model">Segment model</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#why-analytics-favors-append-only">Why analytics favors append-only</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#pseudocode-append-only-table">Pseudocode: append-only table</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#56-mvcc-versus-append-only-a-contrast">5.6 MVCC versus append-only: a contrast</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#mvcc-oltp-oriented">MVCC (OLTP-oriented)</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#append-only-olap-oriented">Append-only (OLAP-oriented)</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#when-each-model-fits">When each model fits</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#versioning-without-mvcc">Versioning without MVCC</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#57-table-handles-in-query-execution">5.7 Table handles in query execution</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#handle-contents-conceptual">Handle contents (conceptual)</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#resolution-pipeline">Resolution pipeline</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#handle-lifetime">Handle lifetime</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#defense-in-depth">Defense in depth</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#operator-interface-segregation">Operator interface segregation</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#58-summary-part-i-checklist">5.8 Summary: Part I checklist</a>
+                        </li>
+                        
+                        <li class="toc-h1">
+                          <a href="#transition-to-part-ii-raindb-implementation">Transition to Part II: RainDB Implementation</a>
+                        </li>
+                        
+                        <li class="toc-h1">
+                          <a href="#part-ii-raindb-implementation">Part II: RainDB Implementation</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#510-why-two-identifiers-name-and-tableid">5.10 Why two identifiers: name and TableId</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#511-the-table-source-interfaces">5.11 The table source interfaces</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#512-icatalog-the-registry-port">5.12 ICatalog: the registry port</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#513-inmemorycatalog-concurrent-dual-indexing">5.13 InMemoryCatalog: concurrent dual indexing</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#514-tableschema-and-batch-validation">5.14 TableSchema and batch validation</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#515-memorytable-append-only-columnar-segments">5.15 MemoryTable: append-only columnar segments</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#516-appendbatch-vs-appendhydratedbatch">5.16 AppendBatch vs AppendHydratedBatch</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#user-append-path">User append path ()</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#hydration-path">Hydration path ()</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#517-persistence-hook-rollback">5.17 Persistence hook rollback</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#518-memorytableoptions-and-vector-chunk-policy">5.18 MemoryTableOptions and vector chunk policy</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#519-schema-version-and-cache-invalidation">5.19 Schema version and cache invalidation</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#520-ephemeralcolumnartablesource">5.20 EphemeralColumnarTableSource</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#521-end-to-end-catalog-flows">5.21 End-to-end catalog flows</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#in-memory-engine-bootstrap">In-memory engine bootstrap</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#persistent-open-hydrate-append">Persistent open / hydrate / append</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#export-import-without-persistence-hook">Export / import without persistence hook</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#522-catalog-resolution-in-execution">5.22 Catalog resolution in execution</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#523-testing-patterns">5.23 Testing patterns</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#524-design-trade-offs-and-future-directions">5.24 Design trade-offs and future directions</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#525-mental-model">5.25 Mental model</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#526-quick-reference">5.26 Quick reference</a>
+                        </li>
+                        
+                  </ul>
+                </aside>
+                
+      </main>
+    </div>
+  </div>
+  <script src="assets/vendor/mermaid.min.js"></script>
+  <script src="assets/vendor/highlight.min.js"></script>
+  <script src="assets/js/site.js"></script>
+</body>
+</html>
