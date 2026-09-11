@@ -537,7 +537,8 @@ if (context.SpillWriter.IsEnabled && plan.SpillPartialEntryThreshold > 0)
         if (partials[i].Count >= plan.SpillPartialEntryThreshold)
         {
             var payload = Encoding.UTF8.GetBytes(
-                $"{{\"op\":\"hash_agg_partial\",\"batch\":{i},\"entries\":{partials[i].Count}}}\n");
+                "{\"op\":\"hash_agg_partial\",\"batch\":" + i +
+                ",\"entries\":" + partials[i].Count + "}\n");
             await context.SpillWriter.SpillChunkAsync(payload, ct).ConfigureAwait(false);
         }
     }

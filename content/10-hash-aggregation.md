@@ -635,6 +635,8 @@ if (spec.Kind == AggregateKind.Count)
 
 ## 10.17 Spill hook
 
+RainDB's source uses C# interpolated strings where a literal opening brace in the JSON is emitted by doubling the brace in the format string. The listing uses concatenation so the payload shape is readable and so static site generators that run Liquid before Markdown (for example GitHub Pages) do not mis-parse brace-heavy format strings.
+
 ```csharp
 if (context.SpillWriter.IsEnabled && plan.SpillPartialEntryThreshold > 0)
 {
@@ -643,7 +645,8 @@ if (context.SpillWriter.IsEnabled && plan.SpillPartialEntryThreshold > 0)
         if (partials[i].Count >= plan.SpillPartialEntryThreshold)
         {
             var payload = Encoding.UTF8.GetBytes(
-                $"{{\"op\":\"hash_agg_partial\",\"batch\":{i},\"entries\":{partials[i].Count}}}\n");
+                "{\"op\":\"hash_agg_partial\",\"batch\":" + i +
+                ",\"entries\":" + partials[i].Count + "}\n");
             await context.SpillWriter.SpillChunkAsync(payload, ct).ConfigureAwait(false);
         }
     }
