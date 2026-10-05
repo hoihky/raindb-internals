@@ -786,26 +786,28 @@ internal sealed class EphemeralColumnarTableSource : IColumnarTableSource
 }
 ```
 
-`DefaultQueryExecutor` uses it in the `GroupedJoinPhysicalPlan` branch:
+`DefaultQueryExecutor` still uses ephemerals where a second operator needs a table-shaped input:
+
+- **`DerivedTableScanPhysicalPlan`** — materialize the subquery, wrap batches in `EphemeralColumnarTableSource`, register it through **`OverlayCatalog`** on a scoped session, then run the outer plan.
+- **`GroupedSortTopNPhysicalPlan` / grouped sort after join** — aggregate output is wrapped temporarily so `SortTopNOperator` can run over a uniform `IColumnarTableSource`.
+
+**Grouped join without a giant intermediate table:** `GroupedJoinOperator` (see Chapter 11) streams join output batches into hash aggregation instead of building one full join result and re-wrapping it as a table. The older join-then-ephemeral-then-agg pattern remains a useful mental model for derived tables, not for the default grouped-join fast path.
 
 ```csharp
-var joinResult = await JoinExecutionEngine.ExecuteAsync(...);
-var ephemeral = new EphemeralColumnarTableSource(
-    grouped.Aggregate.TableId,
-    "_grouped_join_",
-    grouped.Join.OutputSchema,
-    colResult.Batches);
-return await HashAggregateEngine.ExecuteAsync(grouped.Aggregate, ephemeral, context);
+// src/RainDB.Core/Catalog/OverlayCatalog.cs — overlay wins on name/id lookup
+public bool TryGetTable(string name, out ITableSource? table)
+{
+    if (_byName.TryGetValue(name, out table))
+        return true;
+    return _base.TryGetTable(name, out table);
+}
 ```
 
 **Why this exists:**
 
-- `HashAggregateEngine` expects an `IColumnarTableSource`, not a raw `IQueryResult`.
-- The join output schema (`Join.OutputSchema`) defines column indices for group keys and aggregates.
-- The ephemeral id comes from `grouped.Aggregate.TableId` — a synthetic id assigned at plan construction, not registered in `ICatalog`.
-- `Name` is `"_grouped_join_"` for debugging only; SQL never references it.
-
-**Lifetime:** Join result batches are borrowed until hash aggregate completes. The executor disposes `joinResult` in a `finally` block after aggregation starts — callers must not retain join batches past the grouped-join operation.
+- Hash and sort operators expect an `IColumnarTableSource`, not a raw `IQueryResult`.
+- Derived-table aliases must resolve in the catalog for the outer `FROM` clause without persisting data.
+- `SchemaVersion => 0` on ephemerals signals that plan caches should not treat them like durable tables.
 
 ---
 
@@ -883,8 +885,9 @@ Failures mean:
 | Append-only batches | Simple scans, easy persistence | No in-place updates or deletes |
 | Dual dictionary catalog | Fast name and id lookup | Registration rollback on id collision |
 | Synchronous persistence hook | Simple error model | Append latency tied to disk |
-| `SchemaVersion` event | Extensibility for plan cache | Not yet enforced by compiler |
-| `EphemeralColumnarTableSource` | Reuses hash aggregate engine | Extra materialization for grouped joins |
+| `SchemaVersion` event | Extensibility for plan cache | Compiler cache uses catalog fingerprint today |
+| `EphemeralColumnarTableSource` | Derived tables, grouped sort | Grouped join often streams without holding full join rowset |
+| `OverlayCatalog` | Scoped derived-table names | Extra catalog layer per derived-table query |
 
 Plausible extensions: `UnregisterTable`, weak-reference plan cache keyed by schema version, asynchronous WAL with memory-table staging, and catalog entries that are views rather than physical `MemoryTable` instances.
 

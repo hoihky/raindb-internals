@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Building an OLAP Database Engine from Scratch · Building an OLAP Database Engine from Scratch with RainDB</title>
-  <meta name="description" content="Theory-first deep guide to OLAP engine design and RainDB internals">
+  <meta name="description" content="Generated documentation site">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -128,6 +128,12 @@
                             
                         </li>
                         
+                        <li class="nav-item depth-0">
+                          
+                            <a href="17-advanced-sql-and-analytics.html" class="nav-link">Chapter 17: Advanced SQL and Analytics</a>
+                            
+                        </li>
+                        
           </ul>
         </nav>
       </aside>
@@ -139,7 +145,7 @@
           </header>
           <div class="doc-body"><h1 id="building-an-olap-database-engine-from-scratch">Building an OLAP Database Engine from Scratch</h1>
 <p><strong>Using RainDB as a working example</strong></p>
-<p>This book teaches you how to design and implement an embedded columnar OLAP database engine step by step. RainDB is an experimental .NET engine that stores data in columnar batches, executes queries with vectorized operators, and compiles a strict SQL subset into physical plans. Every chapter walks through one layer of the stack.</p>
+<p>This book teaches you how to design and implement an embedded columnar OLAP database engine step by step. RainDB is an experimental .NET engine that stores data in columnar batches, runs vectorized operators through a pluggable operator suite, and compiles a growing SQL surface (aggregates, joins, subqueries, prepared statements, and EXPLAIN) into physical plans. Every chapter walks through one layer of the stack.</p>
 <h2 id="theory-first-structure">Theory-first structure</h2>
 <p>Each chapter follows the same two-part layout:</p>
 <table class="table">
@@ -300,8 +306,24 @@
 <td><code>RNBFCOL1</code> column files</td>
 <td>Virtual memory, page cache, zero-copy, mmap vs read</td>
 </tr>
+<tr>
+<td><a href="17-advanced-sql-and-analytics.html">17. Advanced SQL and Analytics</a></td>
+<td>DISTINCT, subqueries, UNION, EXPLAIN</td>
+<td>Prepared plans, rule-based rewrite, correlation, outer joins, overlay catalogs</td>
+</tr>
 </tbody>
 </table>
+<h2 id="what-raindb-does-today">What RainDB does today</h2>
+<p>This book is aligned with the RainDB codebase and <code>docs/Implementation-Status.md</code> as of the latest Phase D analytics batch. At a glance:</p>
+<ul>
+<li><strong>Storage</strong> — Columnar batches (<code>MemoryTable</code>), fixed-width and UTF-8 chunks, optional Int32 dictionary encoding on durable batch write, directory-backed <code>catalog.json</code> plus <code>######.batch</code> segments (not a WAL).</li>
+<li><strong>Execution</strong> — Vectorized scan/filter/project, morsel parallelism, global and hash <code>GROUP BY</code>, hash and sort-merge equi-joins (inner and outer), sort/top-N, hash aggregation with optional spill <strong>metrics</strong> via <code>ISpillWriter</code>.</li>
+<li><strong>SQL</strong> — Strict subset: expressions in <code>WHERE</code>/<code>SELECT</code>/<code>ORDER BY</code>, <code>HAVING</code>, <code>LEFT</code>/<code>RIGHT</code>/<code>FULL</code> joins, <code>UNION ALL</code> and deduplicating <code>UNION</code>, <code>SELECT DISTINCT</code> and <code>COUNT(DISTINCT)</code>, uncorrelated and scan-correlated <code>IN</code>/<code>EXISTS</code>, derived tables, <code>GROUP BY</code> with <code>ORDER BY</code>/<code>LIMIT</code>, <code>@param</code> prepared statements, and <code>EXPLAIN</code> / <code>EXPLAIN LOGICAL</code> / <code>EXPLAIN PHYSICAL</code>.</li>
+<li><strong>Planning</strong> — <code>LogicalRewritePipeline</code> (predicate partition, projection pruning), <code>HeuristicJoinAlgorithmSelector</code>, <code>CompiledSqlCache</code> with schema-version invalidation.</li>
+<li><strong>I/O</strong> — mmap batch hydration with optional mapped-memory budget and LRU eviction (Chapter 16).</li>
+<li><strong>Not yet</strong> — WAL and MVCC, cost-based optimization and statistics, <code>EXPLAIN ANALYZE</code> timers, LINQ translation beyond <code>ExplainOnlyPhysicalPlan</code>, real spill merge, window functions, and correlated subqueries whose outer context is a join row.</li>
+</ul>
+<p>Chapter 15 tracks roadmap gaps; Chapter 17 documents the implemented analytics and planning surface in depth.</p>
 <h2 id="how-to-read-this-book">How to read this book</h2>
 <p>Read chapters in order for the full build narrative. Later chapters assume earlier concepts.</p>
 <ul>
@@ -309,7 +331,7 @@
 <li><strong>Part II in every chapter</strong> walks through RainDB's current implementation with source references.</li>
 <li><strong>Chapter 15</strong> is best read after 13–16 when you want the full roadmap map, not just today's code.</li>
 </ul>
-<p>RainDB is actively developed. Sections marked <strong>(planned)</strong> describe interfaces or stubs that exist today but are not fully implemented. Chapter 15 collects extension points; Chapter 16 documents mmap code that is implemented but not yet wired into default persistence hydration.</p>
+<p>RainDB is actively developed. Sections marked <strong>(planned)</strong> describe interfaces or stubs that exist today but are not fully implemented. Chapter 15 collects extension points; Chapters 16–17 reflect persistence mmap integration and the current Phase B/D SQL surface. When Implementation Status moves, update this index and the affected chapters together.</p>
 <h2 id="a-minimal-end-to-end-example">A minimal end-to-end example</h2>
 <p>Before diving into internals, here is the public surface the engine exposes after all layers are wired:</p>
 <pre><code class="language-csharp">using RainDB;
@@ -362,6 +384,10 @@ await using var rows = await engine.ExecuteSqlAsync(
                         
                         <li class="toc-h2">
                           <a href="#chapter-map">Chapter map</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#what-raindb-does-today">What RainDB does today</a>
                         </li>
                         
                         <li class="toc-h2">

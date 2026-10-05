@@ -5,9 +5,9 @@ order: 10
 
 # Chapter 10: Hash Aggregation
 
-When a query includes `GROUP BY`, RainDB cannot fold all rows into a single scalar. Instead, `HashAggregateEngine` builds a hash map from **group keys** to **aggregate accumulators**, processes each source batch in parallel to produce partial maps, merges them into a global map, sorts keys for deterministic output, and materializes columnar result batches.
+When a query includes `GROUP BY`, RainDB builds a hash map from **group keys** to **aggregate accumulators**, processes each source batch in parallel to produce partial maps, merges them into a global map, sorts keys for deterministic output, optionally applies **HAVING**, and materializes columnar result batches.
 
-This chapter is split into two parts. **Part I** covers hash-table-based grouping theory: open vs closed addressing, hash aggregation vs sort aggregation, memory bounds and spill, multi-column keys, variable-length keys, and GROUP BY output ordering. **Part II** traces RainDB's implementation — `HashAggregatePhysicalPlan`, `GroupKey`, `CompositeJoinKey`, `MergePartials`, `AggregateRowOps`, and the spill instrumentation hook.
+This chapter is split into two parts. **Part I** covers hash-table-based grouping theory. **Part II** traces RainDB's `HashAggregateOperator`, `GroupHavingEvaluator`, extended `MIN`/`MAX` support, the streaming grouped-join merge path, and the metrics-only spill hook.
 
 ---
 
@@ -15,20 +15,13 @@ This chapter is split into two parts. **Part I** covers hash-table-based groupin
 
 ## 10.1 Hash table based grouping
 
-`GROUP BY` asks a simple question: "which rows belong together?" The answer is a **group key** — the tuple of values from the grouping columns. A hash map is the standard index from key to running totals:
+`GROUP BY` asks: which rows belong together? The answer is a **group key** — the tuple of values from the grouping columns. A hash map indexes key → running totals:
 
 ```
 key  →  accumulator state (SUM, COUNT, MIN, ...)
 ```
 
-Per input row:
-
-1. Read the key columns.
-2. Hash the key and probe the table.
-3. Insert a fresh accumulator if this key is new.
-4. Feed measure columns into the accumulator slot(s).
-
-When the scan finishes, each distinct key becomes one output row with finalized aggregates.
+Per input row: read key columns, hash and probe, insert fresh accumulator on first sight, update measures for every aggregate in the SELECT list.
 
 ### Multiset semantics
 
@@ -36,143 +29,45 @@ Input is a **bag**: duplicate keys are expected. Ten rows with `region = 'us'` c
 
 ### Hash function requirements
 
-`h(key)` should spread keys evenly, stay deterministic across runs, and mix every component of a composite key. Skewed hash functions create **hot buckets** — long chains and worst-case O(n) behavior inside an otherwise O(1) structure.
+`h(key)` should spread keys evenly, stay deterministic, and mix every component of a composite key. Skew creates hot buckets and long chains.
 
 ## 10.2 Open addressing vs closed addressing
 
-Collision resolution splits into two families.
+**Closed addressing** (separate chaining) — each bucket points at a chain of entries. .NET `Dictionary<K,V>` uses this model.
 
-### Closed addressing (separate chaining)
+**Open addressing** — all entries in one array; probe on collision. Often more cache-friendly at high load factors.
 
-Each bucket points at a chain (or tree) of entries that share the same bucket index. .NET `Dictionary<K,V>` is in this camp.
-
-| Pros | Cons |
-|------|------|
-| Simple deletion | Pointer chasing, cache misses |
-| Load factor can exceed 1 | Extra allocation per entry |
-| Tolerates clustering | Memory overhead for small maps |
-
-### Open addressing
-
-All entries sit in one array. On collision, probe forward (linear, quadratic, or double hashing) until an empty slot appears.
-
-| Pros | Cons |
-|------|------|
-| Cache-friendly contiguous memory | Clustering (linear probing) |
-| No per-entry pointers | Deletion needs tombstones |
-| Good for SIMD-friendly layouts | Load factor must stay below ~0.7 |
-
-### Engine choice
-
-High-performance analytical engines often build custom open-addressing tables with power-of-two sizing (bitmask instead of modulo). RainDB Phase 1 uses `Dictionary<GroupKey, AggregateAccumulator[]>` — BCL closed addressing — for speed of implementation. A future columnar open-addressing table with inline accumulators is a natural upgrade path.
+RainDB Phase 1 uses `Dictionary<GroupKey, AggregateAccumulator[]>` (and `CompositeJoinKey` for UTF-8 keys) for implementation speed.
 
 ## 10.3 Hash aggregation vs sort aggregation
 
-Two physical recipes implement the same logical `GROUP BY`.
+**Hash aggregation:** scan → hash into map → (optional) sort keys → emit. Best when many distinct keys fit in memory.
 
-### Hash aggregation
+**Sort aggregation:** scan → sort by group key → scan runs → accumulate. Best when input is already ordered on keys or external sort is acceptable.
 
-```
-Scan rows → hash into map → (optional) sort keys → emit
-```
-
-- **Best when:** many distinct keys, no helpful input order, one pass is enough
-- **Memory:** O(distinct groups)
-- **Time:** O(n) average insert per row
-
-### Sort aggregation
-
-```
-Scan rows → sort by group key → scan sorted runs → accumulate per run → emit
-```
-
-- **Best when:** data already sorted on group keys, or hash memory is impossible but external sort is acceptable
-- **Memory:** O(n) for the sort buffer (or disk-backed runs)
-- **Time:** O(n log n) for the sort
-
-### Hybrid decisions
-
-| Factor | Favors hash | Favors sort |
-|--------|-------------|-------------|
-| Pre-sorted input on group keys | | ✓ |
-| Low cardinality (few groups) | ✓ | |
-| Memory budget tight | | ✓ (external sort) |
-| Multiple aggregates | ✓ (one pass) | ✓ (one pass after sort) |
-| Need ordered output | sort phase either way | natural after sort-agg |
-
-RainDB groups with **hash aggregation** (`HashAggregateEngine`), then **sorts keys** for deterministic output. It does not use sort-aggregation as the primary grouping strategy.
+RainDB groups with **hash aggregation**, then **sorts keys** for deterministic output. It does not use sort-aggregation as the primary grouping strategy.
 
 ## 10.4 Memory bounds and spill
 
-Memory scales with **distinct groups** × (key footprint + accumulator state). Exceed `work_mem` or the operator budget and something has to give.
+Memory scales with distinct groups × (key footprint + accumulator state). **Grace hash aggregation** partitions by `hash(key) mod P`, processes one partition at a time, and merges partition outputs.
 
-### Grace hash aggregation (spill to disk)
-
-1. Partition rows by `hash(key) mod P` into P temp files.
-2. Process one partition at a time — each fits in RAM.
-3. Write partition results to temp storage.
-4. Merge partition outputs.
-
-### Partial spill strategies
-
-- Flush the whole table and start fresh when a threshold trips
-- **Metrics-only hooks** (RainDB today) — log that a threshold was crossed without actually spilling
-
-`SpillPartialEntryThreshold` on `HashAggregatePhysicalPlan` calls `ISpillWriter.SpillChunkAsync` with a JSON metrics blob when a partial dictionary grows large. The operator **still finishes in memory**; this is scaffolding for real spill later.
-
-### Memory estimation
-
-```
-memory ≈ |G| × (key_bytes + agg_state_bytes + hash_overhead)
-```
-
-High-cardinality UTF-8 `GROUP BY` hurts: RainDB copies each distinct string into `CompositeJoinKey` owned payloads.
+RainDB's `SpillPartialEntryThreshold` on `HashAggregatePhysicalPlan` can call `ISpillWriter.SpillChunkAsync` with a JSON metrics blob when a partial dictionary grows large. The operator **still finishes in memory** — instrumentation for profiling and future real spill.
 
 ## 10.5 Multi-column group keys
 
-A composite key is `(k₁, k₂, …, kₙ)`. Hash and equality must consider every component:
+Composite keys `(k₁, k₂, …)` need combined hash and equality. **Grouping** treats NULL as a real group value — `(NULL, 1)` groups with `(NULL, 1)`. That differs from **join** semantics where `NULL = NULL` is unknown.
 
-```
-hash = H( H(k₁) ⊕ H(k₂) ⊕ … ⊕ H(kₙ) )
-```
+RainDB packs fixed-width components into `ulong[] Parts` with `uint NullMask` — bit `i` set when column `i` is SQL NULL.
 
-Equality walks components left to right. **Grouping** treats NULL as a real group value — `(NULL, 1)` groups with `(NULL, 1)`. That differs from **join** semantics, where `NULL = NULL` is unknown.
+## 10.6 Variable-length keys
 
-RainDB packs fixed-width components into `ulong[] Parts` with a `uint NullMask` — bit `i` set when column `i` is SQL NULL.
-
-### Lexicographic ordering
-
-Sorted output compares:
-
-1. `NullMask` (which columns are null)
-2. Component 0 with type-specific rules
-3. Component 1, and so on
-
-Deterministic for tests; full SQL `ORDER BY` null placement may differ.
-
-## 10.6 Handling variable-length keys
-
-`Int32`, `Float64`, and `Boolean` fit in machine words — cheap hash, cheap compare.
-
-Strings need a strategy:
-
-| Approach | Description |
-|----------|-------------|
-| **Copy-on-insert** | Store payload bytes in the key object (RainDB) |
-| **String interning / dictionary** | Map payload to integer id, hash the id |
-| **Prefix hash** | Hash first N bytes + length (collision risk) |
-
-`CompositeJoinKey` keeps `byte[]?[] Utf8Payloads` — owned copies from `CompositeJoinKeyBuilder`. Equality is `SequenceEqual` on byte spans.
-
-**Trade-off:** correct, stable dictionary keys versus memory amplification when cardinality is high.
+Strings use **copy-on-insert** in `CompositeJoinKey.Utf8Payloads` via `CompositeJoinKeyBuilder`. Equality is byte `SequenceEqual`. High-cardinality UTF-8 `GROUP BY` amplifies memory.
 
 ## 10.7 Output ordering of GROUP BY
 
-The SQL standard does **not** promise sorted `GROUP BY` output. Engines sort anyway for regression tests, merge-join consumers, and predictable CLI behavior.
+SQL does not require sorted `GROUP BY` output. RainDB sorts after merge with `GroupKeyComparer` / `CompositeJoinKeyComparer` before materialization — policy for tests and predictable CLI behavior.
 
-RainDB sorts after merge with `Array.Sort` and `GroupKeyComparer` / `CompositeJoinKeyComparer` before `MaterializeOutput`. That is **policy**, not spec.
-
-User `ORDER BY` on grouped results would today route through `SortTopNEngine` (Chapter 12) as a separate step — not a fused hash+sort operator yet.
+User `ORDER BY` on grouped results can fuse into `GroupedSortTopNPhysicalPlan` (Chapter 12) instead of a separate sort over a bare hash-aggregate result.
 
 ---
 
@@ -184,565 +79,151 @@ User `ORDER BY` on grouped results would today route through `SortTopNEngine` (C
 // src/RainDB.Query/Plans/HashAggregatePhysicalPlan.cs
 public sealed class HashAggregatePhysicalPlan : IPhysicalPlan
 {
-    public TableId TableId { get; }
     public int[] GroupKeyColumnIndices { get; }
     public AggregateSpec[] Aggregates { get; }
     public HashAggregateOutputSlot[] OutputColumns { get; }
     public ColumnCompareFilter[]? Filters { get; }
+    public GroupOutputCompareFilter[]? HavingFilters { get; }
     public VectorizedScanExecutionOptions Options { get; }
     public int SpillPartialEntryThreshold { get; }
 }
 ```
 
-Construction constraints:
+`HavingFilters` carries post-aggregate predicates bound from SQL `HAVING`. `OutputColumns` reorder keys and aggregates to match the `SELECT` list.
 
-- At least one group key column and one aggregate
-- `OutputColumns` defaults to keys first, then aggregates (or explicit reorder for `SELECT` list)
-- `SpillPartialEntryThreshold` defaults to `0` (spill hook disabled)
+## 10.9 HashAggregateOperator entry
 
-`Explain()` example:
+`HashAggregateOperator` (`src/RainDB.Query/Execution/HashAggregateEngine.cs`) implements `IHashAggregateOperator` and `IHashAggregateGroupingSupport`.
 
-```
-HashAggregate(table=...) KEYS[0,1] AGGS[Sum(2),Count(*)] FILTER[col3>5]
-```
+Flow:
 
-### Output slot layout
+1. Validate plan against table schema.
+2. Resolve uncorrelated `IN` / `EXISTS` subquery filters when present.
+3. Branch to fixed-width `GroupKey` path or `CompositeJoinKey` path when any group key column is `Utf8`.
+4. Parallel `AccumulateBatch` per source batch → `MergePartials`.
+5. Optional spill **metrics** when threshold exceeded.
+6. `SortKeys` → `MaterializeOutput` → **`ApplyHavingIfNeeded`**.
 
-```csharp
-public enum HashAggregateOutputColumnKind { GroupKey, Aggregate }
+Empty grouped input returns a zero-row batch (unlike global `COUNT(*)` which returns one row with `0`).
 
-public readonly record struct HashAggregateOutputSlot(
-    HashAggregateOutputColumnKind Kind, int Ordinal);
-```
+## 10.10 GroupKey encoding
 
-`Ordinal` indexes into `GroupKeyColumnIndices` or `Aggregates` depending on `Kind`. Supports `SELECT k, SUM(v), k` reordering without changing accumulation.
+`GroupKey` (`src/RainDB.Query/Execution/FixedWidthGroupKey.cs`) owns `ulong[] Parts` and `uint NullMask`. `FixedWidthGroupKeyBuilder.BuildKey` sets null bits and copies physical little-endian bits into scratch, then into an owned array for dictionary stability.
 
-`AggregateSpec` (from `VectorizedScanPhysicalPlan.cs`):
+`PhysicalValueToULong` supports `Int32`, `Int64`, `Float64`, and `Boolean`. Float keys compare by IEEE bit pattern via `FixedWidthKeyCompare`.
 
-```csharp
-public readonly record struct AggregateSpec(int SourceColumnIndex, AggregateKind Kind);
-```
+## 10.11 AccumulateBatch and parallelism
 
-## 10.9 Engine entry and dual code paths
+Each parallel worker owns an isolated `Dictionary`. Cross-batch duplicate keys merge in `MergePartials` with `AggregateRowOps.Combine` per aggregate slot.
 
-```csharp
-// src/RainDB.Query/Execution/HashAggregateEngine.cs
-public static async ValueTask<IQueryResult> ExecuteAsync(
-    HashAggregatePhysicalPlan plan,
-    IColumnarTableSource table,
-    IExecutionContext context)
-{
-    ValidatePlan(plan, table);
-
-    if (AnyUtf8GroupKey(plan, table.Schema))
-        return await ExecuteWithCompositeKeysAsync(plan, table, context).ConfigureAwait(false);
-
-    var batches = table.Batches;
-    var n = batches.Count;
-    // ...
-    var partials = new Dictionary<GroupKey, AggregateAccumulator[]>[n];
-    // parallel AccumulateBatch per batch index
-    var global = MergePartials(partials, plan.Aggregates);
-    var sortedKeys = SortKeys(global.Keys, schema, plan.GroupKeyColumnIndices);
-    var outBatch = MaterializeOutput(sortedKeys, global, plan, schema);
-    return new ColumnarMaterializedQueryResult([outBatch]);
-}
-```
-
-`AnyUtf8GroupKey` scans `GroupKeyColumnIndices` — any `RainDbType.Utf8` column routes to `CompositeJoinKey` path (shared with join infrastructure). Mixed fixed-width and UTF-8 keys in one `GROUP BY` use the composite path.
-
-### Empty table
-
-```csharp
-if (n == 0)
-{
-    var emptyCols = MaterializeEmptyOutput(plan, schema);
-    return new ColumnarMaterializedQueryResult([new ColumnarBatch(0, emptyCols)]);
-}
-```
-
-Empty grouped query: **zero output rows** (unlike global `COUNT(*)` which returns one row with `0`).
-
-## 10.10 GroupKey and FixedWidthGroupKeyBuilder
-
-```csharp
-// src/RainDB.Query/Execution/FixedWidthGroupKey.cs
-internal sealed class GroupKey : IEquatable<GroupKey>
-{
-    public GroupKey(ulong[] parts, uint nullMask)
-    {
-        Parts = parts;
-        NullMask = nullMask;
-    }
-
-    public ulong[] Parts { get; }
-    public uint NullMask { get; }
-}
-```
-
-| Field | Role |
-|-------|------|
-| `Parts` | One `ulong` per key column, raw little-endian bits |
-| `NullMask` | Bit `i` set when key column `i` is SQL NULL |
-
-`Equals` compares `NullMask` then `Parts` element-wise. `GetHashCode` mixes both. SQL NULL group keys are **valid** — NULL groups with NULL.
-
-### BuildKey from a row
-
-```csharp
-internal static class FixedWidthGroupKeyBuilder
-{
-    public static GroupKey BuildKey(
-        IColumnarBatch batch, int row, int[] keyIndices, ulong[] scratch)
-    {
-        uint mask = 0;
-        for (var i = 0; i < keyIndices.Length; i++)
-        {
-            var col = batch.Columns[keyIndices[i]];
-            var nb = col.HasNulls ? col.NullBitmap.Span : ReadOnlySpan<byte>.Empty;
-            if (SelectionEvaluator.IsNull(nb, row, col.HasNulls))
-            {
-                mask |= 1u << i;
-                scratch[i] = 0;
-                continue;
-            }
-            scratch[i] = PhysicalValueToULong(col, row);
-        }
-
-        var owned = new ulong[keyIndices.Length];
-        scratch.AsSpan(0, keyIndices.Length).CopyTo(owned);
-        return new GroupKey(owned, mask);
-    }
-}
-```
-
-**Scratch reuse:** `AccumulateBatch` rents `ulong[]` from `ArrayPool` per batch. Each `GroupKey` **owns** copied `ulong[]` for dictionary stability.
-
-### PhysicalValueToULong
-
-```csharp
-public static ulong PhysicalValueToULong(IColumnChunk col, int row)
-{
-    var values = col.Values.Span;
-    return col.PhysicalType switch
-    {
-        RainDbType.Int32 => (ulong)(uint)BinaryPrimitives.ReadInt32LittleEndian(
-            values.Slice(row * sizeof(int), sizeof(int))),
-        RainDbType.Int64 => (ulong)BinaryPrimitives.ReadInt64LittleEndian(
-            values.Slice(row * sizeof(long), sizeof(long))),
-        RainDbType.Float64 => (ulong)BinaryPrimitives.ReadInt64LittleEndian(
-            values.Slice(row * sizeof(double), sizeof(double))),
-        RainDbType.Boolean => values[row] != 0 ? 1UL : 0UL,
-        _ => throw new InvalidOperationException($"Unexpected key physical type {col.PhysicalType}."),
-    };
-}
-```
-
-Float keys compare by IEEE-754 bit pattern via `FixedWidthKeyCompare` — not numeric tolerance.
-
-## 10.11 AccumulateBatch (fixed-width path)
-
-```csharp
-private static Dictionary<GroupKey, AggregateAccumulator[]> AccumulateBatch(
-    IColumnarBatch batch,
-    HashAggregatePhysicalPlan plan,
-    CancellationToken cancellationToken)
-{
-    var specs = plan.Aggregates;
-    var aggCount = specs.Length;
-    var dict = new Dictionary<GroupKey, AggregateAccumulator[]>();
-    var rent = ArrayPool<int>.Shared.Rent(batch.RowCount);
-    try
-    {
-        // filter → selection buffer
-        var scratch = ArrayPool<ulong>.Shared.Rent(plan.GroupKeyColumnIndices.Length);
-        try
-        {
-            for (var i = 0; i < k; i++)
-            {
-                var row = sel.IsEmpty ? i : sel[i];
-                var key = FixedWidthGroupKeyBuilder.BuildKey(
-                    batch, row, plan.GroupKeyColumnIndices, scratch);
-                if (!dict.TryGetValue(key, out var accs))
-                {
-                    accs = new AggregateAccumulator[aggCount];
-                    dict[key] = accs;
-                }
-                for (var a = 0; a < aggCount; a++)
-                {
-                    ref var slot = ref accs[a];
-                    var spec = specs[a];
-                    if (spec.Kind == AggregateKind.Count && spec.SourceColumnIndex < 0)
-                        AggregateRowOps.AddCountStar(ref slot);
-                    else if (spec.Kind == AggregateKind.Count)
-                        AggregateRowOps.AddCountColumn(ref slot, batch.Columns[spec.SourceColumnIndex], row);
-                    else
-                        AggregateRowOps.AddRow(ref slot, batch.Columns[spec.SourceColumnIndex], spec.Kind, row);
-                }
-            }
-        }
-        finally { ArrayPool<ulong>.Shared.Return(scratch); }
-        return dict;
-    }
-    finally { ArrayPool<int>.Shared.Return(rent); }
-}
-```
-
-Parallel workers each own a `Dictionary` — no cross-thread contention. Cross-batch duplicate keys merge in `MergePartials`.
+Three scheduling modes match the scan operator: sequential, `Parallel.For`, or channel scheduler via `RunChannelMorselsAsync`.
 
 ## 10.12 CompositeJoinKey UTF-8 path
 
-```csharp
-// src/RainDB.Query/Execution/JoinCompositeKey.cs
-internal sealed class CompositeJoinKey : IEquatable<CompositeJoinKey>
-{
-    public CompositeJoinKey(uint nullMask, ulong[] numericParts, byte[]?[] utf8Payloads)
-    {
-        NullMask = nullMask;
-        NumericParts = numericParts;
-        Utf8Payloads = utf8Payloads;
-    }
+When `AnyUtf8GroupKey` is true, `ExecuteWithCompositeKeysAsync` mirrors the fixed-width flow with `AccumulateBatchComposite`, `MergePartialsComposite`, `SortCompositeKeys`, and `MaterializeOutputComposite`. `DeepClone` on merge prevents shared mutable key payloads.
 
-    public uint NullMask { get; }
-    public ulong[] NumericParts { get; }
-    public byte[]?[] Utf8Payloads { get; }
-}
-```
+## 10.13 AggregateRowOps and MIN/MAX types
 
-Per key column index `i`:
+`AggregateAccumulator` (`src/RainDB.Query/Execution/HashAggregateEngine.cs`, nested `AggregateRowOps`) extends the global `PartialAgg` shape with:
 
-- Fixed-width → `NumericParts[i]`, `Utf8Payloads[i]` null
-- `Utf8` → copied payload in `Utf8Payloads[i]`
-- NULL → `NullMask` bit set
+- Integer min/max: `Int32Min`/`Int32Max`, `Int64Min`/`Int64Max`
+- Float min/max: `FloatMin`/`FloatMax` with `HasMin`/`HasMax`
+- UTF-8 min/max: `Utf8MinBytes` / `Utf8MaxBytes` with lexicographic `Utf8Compare`
 
-`CompositeJoinKeyBuilder.Build` in the same file handles `Utf8ColumnChunk` and `Utf8LengthPrefixedColumnChunk`.
+`AddRow` skips null measure cells via the shared `SelectionEvaluator`. `Combine` merges partials associatively; `CombineMinMax` for integers and UTF-8 follows the same identity rules as float extrema.
 
-### DeepClone on merge
+Plan validation allows `Min`/`Max` when the source column type is `Int32`, `Int64`, `Float64`, or `Utf8`:
 
 ```csharp
-global[kv.Key.DeepClone()] = merged;
+// Validate excerpt — materialize switch
+case AggregateKind.Min or AggregateKind.Max when columnType is RainDbType.Float64 or RainDbType.Int32 or RainDbType.Int64 or RainDbType.Utf8:
 ```
 
-Prevents shared mutable key arrays between partial and global dictionaries.
+`MaterializeUtf8AggregateColumn` emits length-prefixed UTF-8 blobs for per-group `MIN`/`MAX` on string measures. `ShouldEmitAggregateNull` sets aggregate null bits when no non-null inputs contributed (`ContributingRows == 0` for sum, `!HasMin` / `!HasMax` for extrema, never for `COUNT`).
 
-`ExecuteWithCompositeKeysAsync` mirrors fixed-width flow: parallel `AccumulateBatchComposite`, `MergePartialsComposite`, `SortCompositeKeys`, `MaterializeOutputComposite`.
+### Grouped null semantics (output)
 
-## 10.13 MergePartials
+| Aggregate | All measure values NULL in group |
+|-----------|----------------------------------|
+| `SUM` | NULL bit set |
+| `MIN` / `MAX` | NULL bit set |
+| `COUNT(col)` | `0`, not null |
+| `COUNT(*)` | row count in group, not null |
 
-```csharp
-private static Dictionary<GroupKey, AggregateAccumulator[]> MergePartials(
-    Dictionary<GroupKey, AggregateAccumulator[]>[] partials,
-    AggregateSpec[] specs)
-{
-    var aggCount = specs.Length;
-    var global = new Dictionary<GroupKey, AggregateAccumulator[]>();
-    for (var bi = 0; bi < partials.Length; bi++)
-    {
-        foreach (var kv in partials[bi])
-        {
-            if (!global.TryGetValue(kv.Key, out var merged))
-            {
-                merged = new AggregateAccumulator[aggCount];
-                for (var j = 0; j < aggCount; j++)
-                    merged[j] = kv.Value[j];
-                global[new GroupKey(kv.Key.Parts.ToArray(), kv.Key.NullMask)] = merged;
-            }
-            else
-            {
-                for (var j = 0; j < aggCount; j++)
-                    merged[j] = AggregateRowOps.Combine(merged[j], kv.Value[j], specs[j].Kind);
-            }
-        }
-    }
-    return global;
-}
-```
+This matches global `IAggregateQueryResult.ValueIsNull` rules, but encoded as column null bitmaps in a `ColumnarBatch`.
 
-**Key copying:** `Parts.ToArray()` on insert — defensive copy.
+## 10.14 HAVING: GroupHavingEvaluator
 
-**Per-slot combine:** each `AggregateSpec` at index `j` uses its own `Kind`.
+After materialization, `ApplyHavingIfNeeded` invokes `GroupHavingEvaluator.Apply` (`src/RainDB.Query/Vectorized/GroupHavingEvaluator.cs`) when `HavingFilters` is non-empty.
 
-Complexity: O(total entries in partial maps) ≤ O(batches × distinct groups).
+The evaluator scans each output row and tests `GroupOutputCompareFilter` conjuncts against **post-aggregate output columns** (indices refer to the grouped result schema, not source table columns). Supported comparisons:
 
-## 10.14 AggregateRowOps
+- Fixed-width: `Int32`, `Int64`, `Float64` with `ScalarCompareOp` and immediate operands
+- `Utf8`: equality / inequality against a literal byte span
 
-```csharp
-internal struct AggregateAccumulator
-{
-    public long ContributingRows;
-    public long Count;
-    public double FloatSum;
-    public double FloatMin;
-    public double FloatMax;
-    public long IntSum;
-    public bool HasMin;
-    public bool HasMax;
-}
-```
+Rows that fail any predicate are dropped. Survivors are gathered into a new `ColumnarBatch` via `ProjectGather` with an explicit row selection — no re-hash of source data.
 
-Parallel to `PartialAgg` (Chapter 9) with `Count` instead of `CountAgg`.
+SQL binding (`GroupedHavingBinder` in the SQL compilation layer) produces `HavingFilters` from `HAVING` clauses on grouped queries.
 
-### AddCountStar / AddCountColumn
+## 10.15 Spill hook (metrics only)
 
-```csharp
-public static void AddCountStar(ref AggregateAccumulator acc) => acc.Count++;
+When `context.SpillWriter.IsEnabled`, `SpillPartialEntryThreshold > 0`, and a partial dictionary entry count crosses the threshold, the operator writes a small UTF-8 JSON line describing `hash_agg_partial` (or `hash_agg_partial_utf8` on the composite path). Execution still completes in memory.
 
-public static void AddCountColumn(ref AggregateAccumulator acc, IColumnChunk col, int row)
-{
-    var nb = col.HasNulls ? col.NullBitmap.Span : ReadOnlySpan<byte>.Empty;
-    if (!SelectionEvaluator.IsNull(nb, row, col.HasNulls))
-        acc.Count++;
-}
-```
+## 10.16 GroupedJoinOperator: streaming merge
 
-### AddRow
+`GroupedJoinPhysicalPlan` no longer materializes the full join into an ephemeral table before grouping. `GroupedJoinOperator` (`src/RainDB.Query/Execution/GroupedJoinOperator.cs`) pipelines join output directly into hash aggregation:
 
-```csharp
-public static void AddRow(ref AggregateAccumulator acc, IColumnChunk col, AggregateKind kind, int row)
-{
-    var nb = col.HasNulls ? col.NullBitmap.Span : ReadOnlySpan<byte>.Empty;
-    if (SelectionEvaluator.IsNull(nb, row, col.HasNulls))
-        return;
+1. Allocate a global `Dictionary<GroupKey, AggregateAccumulator[]>` (or composite variant).
+2. Call `JoinOperator.ExecuteStreaming` with a callback that receives each join output `ColumnarBatch`.
+3. For each batch: `AccumulateBatchForGrouped` → `MergePartialIntoGlobal`.
+4. `MaterializeFromGlobalAsync` produces the final grouped result.
 
-    var values = col.Values.Span;
-    switch (kind)
-    {
-        case AggregateKind.Sum when col.PhysicalType == RainDbType.Float64:
-            // acc.FloatSum += v; acc.ContributingRows++
-        case AggregateKind.Sum when col.PhysicalType == RainDbType.Int32:
-            // acc.IntSum += i32
-        case AggregateKind.Min when col.PhysicalType == RainDbType.Float64:
-            // HasMin / FloatMin tracking
-        // ...
-    }
-}
-```
+`ExecuteStreaming` uses `JoinMatchChunkEmitter.DefaultChunkRowCount` (**8192** rows) so peak memory stays bounded by chunk size rather than a monolithic match list (Chapter 11).
 
-### Combine
+Fixed-width and UTF-8 group keys pick `ExecuteFixedWidthAsync` vs `ExecuteCompositeAsync` based on `IHashAggregateGroupingSupport.UsesCompositeGroupKeys`.
 
-```csharp
-public static AggregateAccumulator Combine(AggregateAccumulator a, AggregateAccumulator b, AggregateKind kind) =>
-    kind switch
-    {
-        AggregateKind.Count => new AggregateAccumulator { Count = a.Count + b.Count },
-        AggregateKind.Sum => new AggregateAccumulator
-        {
-            ContributingRows = a.ContributingRows + b.ContributingRows,
-            FloatSum = a.FloatSum + b.FloatSum,
-            IntSum = a.IntSum + b.IntSum,
-        },
-        AggregateKind.Min => CombineMinMax(a, b, isMin: true),
-        AggregateKind.Max => CombineMinMax(a, b, isMin: false),
-        _ => throw new ArgumentOutOfRangeException(nameof(kind), kind, null),
-    };
-```
+## 10.17 Integration with executor
 
-`CombineMinMax` matches `PartialAgg.CombineMinMax` — identity for empty sides.
+`DefaultQueryExecutor` dispatches `HashAggregatePhysicalPlan` to `_operators.HashAggregate` and `GroupedJoinPhysicalPlan` to `_operators.GroupedJoin`.
 
-## 10.15 Sorting group keys
+`GroupedSortTopNPhysicalPlan` runs hash aggregate first, then sorts the grouped batch through a second `SortTopNPhysicalPlan` over an ephemeral table (Chapter 12).
 
-```csharp
-private static GroupKey[] SortKeys(
-    Dictionary<GroupKey, AggregateAccumulator[]>.KeyCollection keys,
-    TableSchema schema,
-    int[] keyIndices)
-{
-    var arr = new GroupKey[keys.Count];
-    keys.CopyTo(arr, 0);
-    Array.Sort(arr, new GroupKeyComparer(schema, keyIndices));
-    return arr;
-}
-```
-
-`GroupKeyComparer`:
-
-```csharp
-public int Compare(GroupKey? x, GroupKey? y)
-{
-    var c = x.NullMask.CompareTo(y.NullMask);
-    if (c != 0) return c;
-
-    for (var i = 0; i < _keyIndices.Length; i++)
-    {
-        var t = _schema.Columns[_keyIndices[i]].Type;
-        c = ComparePart(t, x.Parts[i], y.Parts[i]);
-        if (c != 0) return c;
-    }
-    return 0;
-}
-```
-
-`ComparePart` delegates to `FixedWidthKeyCompare.ComparePart` — shared with join ordering.
-
-`CompositeJoinKeyComparer` adds UTF-8 `SequenceCompareTo` on payload bytes.
-
-## 10.16 MaterializeOutput
-
-```csharp
-private static ColumnarBatch MaterializeOutput(
-    GroupKey[] sortedKeys,
-    Dictionary<GroupKey, AggregateAccumulator[]> global,
-    HashAggregatePhysicalPlan plan,
-    TableSchema schema)
-{
-    var rowCount = sortedKeys.Length;
-    var cols = new List<IColumnChunk>();
-    foreach (var outSlot in plan.OutputColumns)
-    {
-        switch (outSlot.Kind)
-        {
-            case HashAggregateOutputColumnKind.GroupKey:
-                var schemaCol = schema.Columns[plan.GroupKeyColumnIndices[outSlot.Ordinal]];
-                cols.Add(MaterializeKeyColumn(sortedKeys, outSlot.Ordinal, schemaCol.Type, rowCount));
-                break;
-            case HashAggregateOutputColumnKind.Aggregate:
-                var spec = plan.Aggregates[outSlot.Ordinal];
-                cols.Add(MaterializeAggregateColumn(sortedKeys, global, outSlot.Ordinal, spec, schema, rowCount));
-                break;
-        }
-    }
-    return new ColumnarBatch(rowCount, cols);
-}
-```
-
-### MaterializeKeyColumn
-
-Walks sorted keys, sets null bits from `NullMask`, writes physical bytes via `WritePhysical` (little-endian). UTF-8 uses `MaterializeUtf8KeyColumn` — offset array + contiguous blob.
-
-### ShouldEmitAggregateNull
-
-```csharp
-private static bool ShouldEmitAggregateNull(AggregateSpec spec, AggregateAccumulator acc)
-{
-    return spec.Kind switch
-    {
-        AggregateKind.Sum => acc.ContributingRows == 0,
-        AggregateKind.Min => !acc.HasMin,
-        AggregateKind.Max => !acc.HasMax,
-        AggregateKind.Count => false,
-        _ => false,
-    };
-}
-```
-
-For a group where all measure values are null: `SUM` → null bit; `COUNT(col)` → `0` without null; `COUNT(*)` → row count.
-
-```csharp
-var hasNulls = anyNull;
-if (spec.Kind == AggregateKind.Count)
-    hasNulls = false;
-```
-
-## 10.17 Spill hook
-
-RainDB's source uses C# interpolated strings where a literal opening brace in the JSON is emitted by doubling the brace in the format string. The listing uses concatenation so the payload shape is readable and so static site generators that run Liquid before Markdown (for example GitHub Pages) do not mis-parse brace-heavy format strings.
-
-```csharp
-if (context.SpillWriter.IsEnabled && plan.SpillPartialEntryThreshold > 0)
-{
-    for (var i = 0; i < n; i++)
-    {
-        if (partials[i].Count >= plan.SpillPartialEntryThreshold)
-        {
-            var payload = Encoding.UTF8.GetBytes(
-                "{\"op\":\"hash_agg_partial\",\"batch\":" + i +
-                ",\"entries\":" + partials[i].Count + "}\n");
-            await context.SpillWriter.SpillChunkAsync(payload, ct).ConfigureAwait(false);
-        }
-    }
-}
-```
-
-UTF-8 path emits `hash_agg_partial_utf8`. Conditions:
-
-1. `IExecutionContext.SpillWriter.IsEnabled`
-2. `SpillPartialEntryThreshold > 0`
-3. Partial dictionary entry count ≥ threshold
-
-Operator still completes in memory — instrumentation for profiling and future spill.
-
-`ISpillWriter` defined in `src/RainDB.Abstractions/Execution/ISpillWriter.cs`.
-
-## 10.18 Validation and parallelism
-
-`ValidatePlan` checks:
-
-- Table id match
-- Key types: fixed-width or `Utf8` only
-- Filter column indices in range
-- Aggregate type rules (`Min`/`Max` on `Float64` only; `Sum` on `Int32`/`Int64`/`Float64`)
-
-Parallelism: same three modes as `VectorizedScanEngine` — sequential, `Parallel.For`, channel scheduler via `RunChannelMorselsAsync`. Merge and materialize are sequential.
-
-## 10.19 GroupedJoinPhysicalPlan integration
-
-`DefaultQueryExecutor` handles `GroupedJoinPhysicalPlan`:
-
-```csharp
-// src/RainDB.Query/Execution/DefaultQueryExecutor.cs
-var joinResult = await JoinExecutionEngine.ExecuteAsync(grouped.Join, probeCols2, buildCols2, context);
-var ephemeral = new EphemeralColumnarTableSource(
-    grouped.Aggregate.TableId, "_grouped_join_", grouped.Join.OutputSchema, colResult.Batches);
-return await HashAggregateEngine.ExecuteAsync(grouped.Aggregate, ephemeral, context);
-```
-
-Join output becomes input to hash aggregation — `GROUP BY` on joined columns without persisting intermediate results.
-
-## 10.20 FixedWidthKeyCompare
-
-```csharp
-// src/RainDB.Query/Execution/FixedWidthKeyCompare.cs
-internal static int ComparePart(RainDbType type, ulong xa, ulong xb) =>
-    type switch
-    {
-        RainDbType.Int32 => ((int)(uint)xa).CompareTo((int)(uint)xb),
-        RainDbType.Int64 => ((long)xa).CompareTo((long)xb),
-        RainDbType.Float64 => CompareFloat64Bits(xa, xb),
-        RainDbType.Boolean => ((xa != 0) ? 1 : 0).CompareTo(xb != 0 ? 1 : 0),
-        _ => xa.CompareTo(xb),
-    };
-```
-
-Shared across hash aggregate sort, join sort-merge, and composite key compare.
-
-## 10.21 Example trace
+## 10.18 Example trace
 
 ```sql
-SELECT region, SUM(amount), COUNT(*)
+SELECT region, SUM(amount), MIN(score), MAX(name)
 FROM sales
 WHERE active = 1
-GROUP BY region;
+GROUP BY region
+HAVING SUM(amount) > 100;
 ```
 
 ```
-ExecuteAsync
-  batch 0: partial map { "us" → [sum=100, count=5], "eu" → [sum=200, count=3] }
-  batch 1: partial map { "us" → [sum=50, count=2], "ap" → [sum=80, count=1] }
-  MergePartials → global { us: [150, 7], eu: [200, 3], ap: [80, 1] }
-  SortKeys → [ap, eu, us] (lexicographic on region column)
-  MaterializeOutput → ColumnarBatch(3 rows, [region, sum, count])
+HashAggregateOperator.ExecuteAsync
+  parallel partial maps per batch
+  MergePartials → SortKeys → MaterializeOutput
+  GroupHavingEvaluator.Apply on SUM(amount) > 100
 ```
 
-## 10.22 Tests and limitations
+## 10.19 Limitations
 
-Tests: `HashAggregatePhysicalTests`, `SqlGroupByTests` in `tests/RainDB.Tests/`.
+| Topic | Notes |
+|-------|-------|
+| In-memory grouping | Spill hook is metrics-only |
+| Sort-aggregation | Hash-only primary path |
+| SIMD grouped sums | Per-row `AggregateRowOps`, no AVX2 in hash agg |
+| HAVING | Compares materialized aggregate columns; not arbitrary expressions on every SQL feature |
 
-| Limitation | Notes |
-|------------|-------|
-| No `DISTINCT` aggregates | `COUNT(DISTINCT x)` not supported |
-| No `AVG` builtin | Use `SUM/COUNT` |
-| In-memory only | Spill hook is metrics-only |
-| No sort-aggregation | Hash-only grouping |
-| SIMD | Per-row `AggregateRowOps`, no AVX2 grouped sum |
+## 10.20 Summary
 
-## 10.23 Summary
+Hash aggregation in RainDB:
 
-Hash aggregation in RainDB follows a classic partial-aggregate pattern:
+1. **Encode** keys as `GroupKey` or `CompositeJoinKey`
+2. **Accumulate** per batch in isolated hash maps
+3. **Merge** with associative `AggregateRowOps.Combine`
+4. **Sort** keys for deterministic order
+5. **Materialize** with SQL-correct null bits on aggregates, including `MIN`/`MAX` on integers, floats, and UTF-8
+6. **Filter** with `GroupHavingEvaluator` when `HAVING` is present
+7. **Stream** from joins via `GroupedJoinOperator` without retaining the full join rowset
 
-1. **Encode** row keys as `GroupKey` or `CompositeJoinKey`
-2. **Accumulate** per batch in isolated hash maps using `AggregateRowOps`
-3. **Merge** partials with associative `Combine`
-4. **Sort** keys for deterministic output order
-5. **Materialize** column chunks with SQL-correct null bits on aggregates
-
-The UTF-8 path reuses join key infrastructure (`CompositeJoinKey`, `CompositeJoinKeyBuilder`, `CompositeJoinKeyComparer`), keeping equality semantics consistent across `GROUP BY` and `JOIN` operators.
+UTF-8 keys reuse join infrastructure (`CompositeJoinKey`, `CompositeJoinKeyBuilder`, `CompositeJoinKeyComparer`) so equality semantics stay aligned across `GROUP BY` and `JOIN`.

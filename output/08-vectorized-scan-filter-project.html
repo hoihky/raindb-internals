@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Chapter 8: Vectorized Scan, Filter, and Project · Building an OLAP Database Engine from Scratch with RainDB</title>
-  <meta name="description" content="Theory-first deep guide to OLAP engine design and RainDB internals">
+  <meta name="description" content="Generated documentation site">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -125,6 +125,12 @@
                         <li class="nav-item depth-0">
                           
                             <a href="16-mmap-io.html" class="nav-link">Chapter 16: mmap I/O</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="17-advanced-sql-and-analytics.html" class="nav-link">Chapter 17: Advanced SQL and Analytics</a>
                             
                         </li>
                         
@@ -407,17 +413,15 @@ total = sum(partials[0..n-1])   // ordered combine
 <hr />
 <h1 id="part-ii-raindb-implementation">Part II: RainDB Implementation</h1>
 <h2 id="entry-point-and-control-flow">8.11 Entry point and control flow</h2>
+<p>The scan operator is <strong><code>VectorizedScanOperator</code></strong> in <code>src/RainDB.Query/Execution/VectorizedScanEngine.cs</code> (historical file name). <strong><code>DefaultQueryOperatorSuite</code></strong> exposes it as <strong><code>IVectorizedScanOperator.Scan</code></strong>.</p>
 <pre><code class="language-csharp">// src/RainDB.Query/Execution/VectorizedScanEngine.cs
-public static class VectorizedScanEngine
+public sealed class VectorizedScanOperator : IVectorizedScanOperator
 {
-    public static async ValueTask&lt;IQueryResult&gt; ExecuteAsync(
+    public async ValueTask&lt;IQueryResult&gt; ExecuteAsync(
         VectorizedScanPhysicalPlan plan,
         IColumnarTableSource table,
         IExecutionContext context)
     {
-        ArgumentNullException.ThrowIfNull(plan);
-        ArgumentNullException.ThrowIfNull(table);
-        ArgumentNullException.ThrowIfNull(context);
         ValidatePlan(plan, table);
 
         if (plan.Aggregate is { } agg)

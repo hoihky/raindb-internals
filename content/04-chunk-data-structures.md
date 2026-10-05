@@ -101,7 +101,7 @@ RLE:        expand runs → SIMD sum on expanded buffer
 
 Some engines implement **encoded execution** — operating directly on dictionary indices without full decode (e.g., comparing two dictionary-encoded columns by comparing indices).
 
-RainDB Phase 1 stores plain bytes. Future phases may add dictionary and RLE encodings per column without changing the batch abstraction.
+RainDB stores plain fixed-width bytes in memory for most types. On disk, `RainDbBatchBinaryCodec` may rewrite `Int32` columns as dictionary-encoded kind `4` when a heuristic saves space. RLE and broader encoded execution remain future work; the batch abstraction stays the same.
 
 ---
 
@@ -1128,14 +1128,99 @@ Trace `PooledFixedWidthColumnChunk.Dispose` — what happens to `IMemoryOwner`?
 
 ---
 
-## 4.22 Chapter summary
+## 4.23 DictionaryEncodedInt32ColumnChunk — lazy materialization
+
+Low-cardinality `Int32` columns often persist as **dictionary + indices** (kind `4` in batch files). In memory, `DictionaryEncodedInt32ColumnChunk` implements `IColumnChunk` while keeping dictionary and index bytes separate from a fully expanded value array.
+
+```csharp
+// src/RainDB.Core/Columnar/DictionaryEncodedInt32ColumnChunk.cs
+public sealed class DictionaryEncodedInt32ColumnChunk : IColumnChunk
+{
+    public RainDbType PhysicalType => RainDbType.Int32;
+    public ReadOnlyMemory<int> Dictionary { get; }
+    public ReadOnlyMemory<byte> Indices { get; }
+    public byte IndexWidthBytes { get; }  // 1, 2, or 4 bytes per row index
+
+    public ReadOnlyMemory<byte> Values
+    {
+        get
+        {
+            if (_materializedValues.IsEmpty)
+                _materializedValues = MaterializeValues();
+            return _materializedValues;
+        }
+    }
+}
+```
+
+### Layout and validation
+
+| Piece | Role |
+|-------|------|
+| `Dictionary` | Distinct `Int32` values, ordinals `0 .. dict.Length-1` |
+| `Indices` | `rowCount * indexWidthBytes` packed little-endian ordinals |
+| `NullBitmap` | Same RainDB convention as other chunks (optional) |
+| `_materializedValues` | Cached `rowCount * 4` plain bytes; empty until first `Values` access |
+
+Constructor checks `indices.Length == rowCount * indexWidthBytes` and `indexWidthBytes` is 1, 2, or 4. `MaterializeValues` walks each row, reads an ordinal via `ReadIndex`, bounds-checks against the dictionary, and writes little-endian `Int32` into a newly allocated buffer. Out-of-range ordinals throw `InvalidDataException`.
+
+### Why lazy `Values`?
+
+Kernels and plans that only need `IColumnChunk` often call `Values` immediately — behavior matches `FixedWidthColumnChunk`. Code that understands dictionary form can read `Dictionary` and `Indices` without expanding. **First `Values` access pays the decode cost** and retains the materialized array for later reads on the same chunk instance.
+
+`Materialize()` always builds a `FixedWidthColumnChunk` with the same null metadata — useful after eviction from mmap budget (Chapter 14) when the table holds a fully heap-backed batch.
+
+### Write path coupling
+
+`Int32DictionaryColumnEncoder.TryEncode` decides whether to replace a plain `FixedWidthColumnChunk` at persistence time (minimum four rows, at most 65535 distinct non-null values, encoded size strictly smaller than raw). `RainDbBatchBinaryCodec.WriteColumn` also accepts an already-encoded `DictionaryEncodedInt32ColumnChunk`. See Chapter 14 for `EnableInt32DictionaryEncoding` and on-disk kind `4` layout.
+
+---
+
+## 4.24 Mapped fixed-width columns from batch mmap
+
+Chapter 16 describes two mmap paths. **Batch-level** hydration maps an entire `######.batch` file (`RNBATCH1`) and slices fixed-width payload bytes out of the mapping — no separate `RNBFCOL1` file per column.
+
+`RainDbBatchMmapReader.Open` returns `MappedColumnarBatch`, which pairs:
+
+- `Batch` — a `ColumnarBatch` whose fixed-width columns use `ReadOnlyMemory<byte>` slices into the map
+- An internal `IDisposable` that releases the `MemoryMappedFile`, view accessor, and `MemoryManager<byte>`
+
+For **kind 1 (fixed-width)** columns, `ReadMappedFixed` constructs a normal `FixedWidthColumnChunk` whose `Values` (and null bitmap, if present) point into mapped memory:
+
+```csharp
+var valuesMem = data.Slice(o, valuesLen);
+// ...
+return new FixedWidthColumnChunk(phys, rowCount, valuesMem, nbMem, hasNulls);
+```
+
+Scan kernels see the same `IColumnChunk` surface as heap chunks; `MemoryMarshal.Cast` over `Values.Span` reads file-backed pages after page faults.
+
+### Lifetime rules
+
+The `ColumnarBatch` inside a hydrated table is **not** self-owning. `MemoryTable.AttachMappedBatch` stores the `MappedColumnarBatch` handle per batch index. `RainDbMappedBatchMemoryManager` registers segments, enforces an optional byte budget, and disposes the map on LRU eviction (replacing the batch with a decoded copy). **Do not dispose the reader while any scan still holds spans** — eviction and table replacement coordinate lifetime.
+
+### What stays copied
+
+Within the same mmap reader, **UTF-8** (kinds 2 and 3) and **dictionary Int32** (kind 4) still copy index/dictionary/blob bytes into managed arrays at hydrate time. Only plain fixed-width value regions (and in-map null bitmaps for kind 1) avoid a userspace copy on load.
+
+| Chunk after batch mmap | Values backing |
+|------------------------|----------------|
+| Kind 1 fixed-width | Mapped slice |
+| Kind 2 / 3 UTF-8 | Copied `byte[]` (+ offsets array for Arrow) |
+| Kind 4 dict Int32 | Copied dictionary + indices; `Values` lazy materializes |
+
+---
+
+## 4.25 Chapter summary
 
 | Type | Role |
 |------|------|
 | `FixedWidthColumnChunk` | Validated immutable storage for numeric/bool columns |
+| `DictionaryEncodedInt32ColumnChunk` | Int32 dictionary + indices; materializes on `Values` |
 | `Utf8ColumnChunk` | Offset-indexed UTF-8 blob (Arrow-style) |
 | `Utf8LengthPrefixedColumnChunk` | Parse-on-construct length-prefixed serialization |
 | `PooledFixedWidthColumnChunk` | Rented buffers for query output; must dispose |
+| Mapped kind-1 via `RainDbBatchMmapReader` | `FixedWidthColumnChunk` slices into `.batch` mmap |
 | `MemoryMarshal.Cast` | Zero-copy typed spans for kernels |
 
 You can now construct batches from raw bytes, validate chunk invariants, and understand how execution reuses pooled chunks. Chapter 5 covers catalog registration and table lifecycle in the broader engine context.

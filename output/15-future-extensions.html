@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Chapter 15: Future Extensions · Building an OLAP Database Engine from Scratch with RainDB</title>
-  <meta name="description" content="Theory-first deep guide to OLAP engine design and RainDB internals">
+  <meta name="description" content="Generated documentation site">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -128,6 +128,12 @@
                             
                         </li>
                         
+                        <li class="nav-item depth-0">
+                          
+                            <a href="17-advanced-sql-and-analytics.html" class="nav-link">Chapter 17: Advanced SQL and Analytics</a>
+                            
+                        </li>
+                        
           </ul>
         </nav>
       </aside>
@@ -198,7 +204,7 @@ cost(sort) ≈ n log n × comparison_cost  (or spill-aware variant)
 <li>Min/max for range filters</li>
 <li>Histograms where distributions skew</li>
 </ul>
-<p>RainDB has no CBO yet — <code>DefaultSqlCompiler</code> always picks hash join. Phase B introduces heuristics; Phase E feeds statistics into better choices.</p>
+<p>RainDB has no CBO yet — <code>HeuristicJoinAlgorithmSelector</code> picks hash versus sort-merge from row-count ratio, but there are no histograms or join-order search. Phase E statistics would feed a future cost model; <strong>WAL</strong>, full <strong>LINQ</strong> translation, and <strong>EXPLAIN ANALYZE</strong> timers remain on the roadmap. <strong>Correlated subqueries</strong> work on single-table scan outers; correlated predicates with join outer context are still unsupported.</p>
 <h2 id="statistics-and-histograms">15.3 Statistics and histograms</h2>
 <h3 id="table-level-statistics">Table-level statistics</h3>
 <ul>
@@ -368,7 +374,7 @@ cost(sort) ≈ n log n × comparison_cost  (or spill-aware variant)
 <p>These concerns span the roadmap's security track. They need not block core engine milestones but must be designed before exposing arbitrary SQL endpoints.</p>
 <hr />
 <h1 id="part-ii-raindb">Part II — RainDB</h1>
-<p>RainDB is an actively developed embedded OLAP prototype. Much of the execution stack is real — columnar storage, vectorized scan, hash aggregation, inner joins, sort/limit, strict SQL compilation, and directory-backed persistence. Other surfaces are <strong>interfaces and stubs</strong> that document where the engine is headed without pretending the feature ships today.</p>
+<p>RainDB is an actively developed embedded OLAP prototype. The execution stack is real — columnar storage, vectorized scan, hash aggregation, joins (inner and outer), sort/limit, rule-based logical rewrites, prepared SQL, <code>EXPLAIN</code>, scalar expressions, <code>HAVING</code>, <code>UNION</code>/<code>UNION ALL</code>, subqueries, <code>DISTINCT</code>, mmap batch hydration with an optional memory budget, and partial Int32 dictionary encoding on write. <strong>Interfaces and stubs</strong> remain for WAL, cost-based optimization, LINQ lowering, real spill merge, and <code>EXPLAIN ANALYZE</code> timing.</p>
 <p>This part collects those extension points: the phased development roadmap, spill infrastructure, the LINQ compiler stub, plan-cache hooks, column encodings, observability plans, and a practical guide for extending this book when new phases land.</p>
 <h2 id="how-to-read-the-roadmap">15.11 How to read the roadmap</h2>
 <p><code>docs/Development-Roadmap.md</code> sequences work by <strong>dependency</strong>, not calendar quarters. Phases are labeled A through G:</p>
@@ -452,21 +458,18 @@ Phase G (LINQ + formats + API stability)
 <p><strong>Phase A out of scope:</strong> New SQL constructs, WAL, Parquet, cost-based optimizer.</p>
 <h2 id="phase-b-planning-and-compile-once">15.13 Phase B — Planning and compile-once</h2>
 <p><strong>Goal:</strong> Reduce per-query overhead without a full cost-based optimizer.</p>
-<h3 id="b1.logical-rewrite-rule-based-optimizer-v0">B1. Logical rewrite (rule-based optimizer v0)</h3>
-<p>Single pass over logical IR:</p>
+<h3 id="b1.logical-rewrite-rule-based-optimizer-v0-implemented">B1. Logical rewrite (rule-based optimizer v0) — <strong>IMPLEMENTED</strong></h3>
+<p>Single pass over logical IR (<code>LogicalRewritePipeline</code> in <code>SqlCompilationService</code>):</p>
 <ul>
 <li>Predicate pushdown to scan/join sides</li>
 <li>Projection pruning (drop unread columns early)</li>
 <li>Limit pushdown where legal</li>
 </ul>
 <p>Keep rules testable with golden logical plans before/after rewrite.</p>
-<h3 id="b2.physical-choices-heuristics">B2. Physical choices (heuristics)</h3>
-<p>Today <code>DefaultSqlCompiler</code> hard-codes hash join:</p>
-<pre><code class="language-csharp">LogicalInnerJoin j =&gt; LogicalJoinBinder.BindAndLower(j, catalog, PhysicalJoinAlgorithm.Hash, _defaultScanOptions),
-</code></pre>
-<p>Future: choose hash vs sort-merge using sorted-input hints or row-count estimates. <code>IPhysicalPlan.Explain()</code> must show the choice.</p>
-<h3 id="b3.prepared-execution-and-plan-cache">B3. Prepared execution and plan cache</h3>
-<p><strong>Compile once:</strong> parse + bind + optional rewrite → cached <code>IPhysicalPlan</code>.</p>
+<h3 id="b2.physical-choices-heuristics-implemented">B2. Physical choices (heuristics) — <strong>IMPLEMENTED</strong></h3>
+<p><code>HeuristicJoinAlgorithmSelector</code> chooses hash versus sort-merge from probe/build row-count ratio at physical bind time. <code>JoinPhysicalPlan.Explain()</code> includes the selected algorithm. Future CBO would replace ratio heuristics with statistics-driven costs.</p>
+<h3 id="b3.prepared-execution-and-plan-cache-implemented">B3. Prepared execution and plan cache — <strong>IMPLEMENTED</strong></h3>
+<p><strong>Compile once:</strong> parse + bind + rewrite → cached <code>IPhysicalPlan</code> via <code>ISqlCompiler.PrepareAsync</code> and <code>CompiledSqlCache</code> keyed by SQL + <code>CatalogSchemaFingerprint</code>.</p>
 <p>Cache key candidates:</p>
 <ul>
 <li>Normalized SQL text</li>
@@ -486,19 +489,10 @@ public int BumpSchemaVersion()
     return v;
 }
 </code></pre>
-<p>Prepared statement API sketch (not implemented):</p>
-<pre><code class="language-csharp">// (planned) src/RainDB.Sql/Compilation/PreparedStatement.cs
-public sealed class PreparedStatement
-{
-    public IPhysicalPlan Plan { get; }
-    public int CompiledAtSchemaVersion { get; }
-    public void BindParameters(IReadOnlyDictionary&lt;string, object&gt; values);
-}
-</code></pre>
-<p>Second execution of the same prepared statement should skip <code>SqlParser.Parse</code> and binder work; only parameter slots in <code>ColumnCompareFilter</code> change.</p>
-<h3 id="b4.explain-and-introspection">B4. Explain and introspection</h3>
-<p>Structured <code>EXPLAIN</code> returning logical + physical text. <code>LogicalTableScan.Explain()</code> and <code>HashAggregatePhysicalPlan.Explain()</code> already produce strings — SQL <code>EXPLAIN</code> would surface them.</p>
-<p>Optional <code>EXPLAIN ANALYZE</code> with operator timers (can start as no-op stubs).</p>
+<p><code>IPreparedSqlStatement</code> binds <code>@param</code> values through <code>LogicalParameterBinder</code> before execution. Cache invalidation follows <code>MemoryTable.SchemaVersion</code> on referenced tables. Second execution skips parse and full bind when the cache hits.</p>
+<h3 id="b4.explain-and-introspection-implemented">B4. Explain and introspection — <strong>IMPLEMENTED</strong></h3>
+<p>SQL <code>EXPLAIN</code>, <code>EXPLAIN LOGICAL</code>, and <code>EXPLAIN PHYSICAL</code> compile to <code>ExplainBundlePhysicalPlan</code> and return <code>ExplainTextQueryResult</code> with formatted logical and physical plan text.</p>
+<p><strong>Not implemented:</strong> <code>EXPLAIN ANALYZE</code> with per-operator timers (roadmap / Phase F observability).</p>
 <p><strong>Phase B out of scope:</strong> Histogram join ordering, adaptive mid-query re-optimization.</p>
 <h2 id="phase-c-storage-io-memory-budget">15.14 Phase C — Storage, I/O, memory budget</h2>
 <p><strong>Goal:</strong> Stop treating durability as &quot;load everything into <code>MemoryTable</code> byte arrays.&quot;</p>
@@ -508,10 +502,10 @@ public sealed class PreparedStatement
 <li>Hydration maps batch files instead of <code>File.ReadAllBytes</code> where format allows</li>
 <li>Scan engine reads through mapped spans without extra copy</li>
 </ul>
-<h3 id="c2.buffer-manager-v0">C2. Buffer manager v0</h3>
-<p>Central policy for mapped regions, pin/unpin, configurable memory cap, naive LRU eviction per table.</p>
-<h3 id="c3.column-encodings">C3. Column encodings</h3>
-<p>Dictionary encoding and lightweight integer compression on write; transparent decode in scan.</p>
+<h3 id="c2.buffer-manager-v0-implemented">C2. Buffer manager v0 — <strong>IMPLEMENTED</strong></h3>
+<p><code>RainDbMappedBatchMemoryManager</code> tracks resident mmap bytes; <code>RainDbFileDatabaseOptions.MappedBatchMemoryBudgetBytes</code> with <code>EvictColdBatches</code> or <code>Fail</code>. Scans notify LRU via <code>IMappedBatchScanObserver</code> on <code>RainDbExecutionContext</code>. See Chapter 16.</p>
+<h3 id="c3.column-encodings-partial-implemented-for-int32-dictionary-on-write">C3. Column encodings — <strong>partial (IMPLEMENTED for Int32 dictionary on write)</strong></h3>
+<p>Batch kind <code>KindDictInt32</code>: dictionary plus narrow indices for low-cardinality <code>Int32</code> columns when smaller than raw; <code>DictionaryEncodedInt32ColumnChunk</code> materializes on <code>Values</code> access. Toggle with <code>EnableInt32DictionaryEncoding</code>. Broader UTF-8 dictionary and integer compression remain future work.</p>
 <p>Extension requirements:</p>
 <table class="table">
 <thead>
@@ -553,37 +547,44 @@ public sealed class PreparedStatement
 <tr>
 <th>Slice</th>
 <th>Features</th>
+<th>Status</th>
 </tr>
 </thead>
 <tbody>
 <tr>
 <td>D1</td>
-<td>Scalar expressions: arithmetic, <code>CASE</code>, casts</td>
+<td>Scalar expressions: arithmetic, <code>CASE</code>, casts in <code>WHERE</code>/<code>SELECT</code>/<code>ORDER BY</code></td>
+<td><strong>IMPLEMENTED</strong> — Chapter 17</td>
 </tr>
 <tr>
 <td>D2</td>
-<td><code>HAVING</code>, <code>DISTINCT</code>, <code>COUNT(DISTINCT)</code>, broader <code>MIN</code>/<code>MAX</code> types</td>
+<td><code>HAVING</code>, broader <code>MIN</code>/<code>MAX</code> types</td>
+<td><strong>IMPLEMENTED</strong></td>
 </tr>
 <tr>
 <td>D3</td>
-<td>Outer joins, <code>UNION ALL</code> / <code>UNION</code></td>
+<td>Outer joins (<code>LEFT</code>/<code>RIGHT</code>/<code>FULL</code>), <code>UNION ALL</code></td>
+<td><strong>IMPLEMENTED</strong></td>
 </tr>
 <tr>
 <td>D4</td>
-<td>Subqueries: <code>IN</code>, <code>EXISTS</code> (uncorrelated first)</td>
+<td>Uncorrelated <code>IN</code>/<code>EXISTS</code>, derived tables <code>FROM (SELECT …)</code></td>
+<td><strong>IMPLEMENTED</strong></td>
 </tr>
 <tr>
 <td>D5</td>
-<td><code>ORDER BY</code> / <code>LIMIT</code> with <code>GROUP BY</code></td>
+<td><code>SELECT DISTINCT</code>, <code>COUNT(DISTINCT)</code>, dedup <code>UNION</code>, correlated <code>EXISTS</code>/<code>IN</code> on scans, <code>GROUP BY</code> + <code>ORDER BY</code>/<code>LIMIT</code></td>
+<td><strong>IMPLEMENTED</strong> (correlated on join outers <strong>not</strong> supported)</td>
 </tr>
 <tr>
 <td>D6</td>
 <td><code>DATE</code>/<code>TIMESTAMP</code>, <code>COALESCE</code>, <code>LIKE</code></td>
+<td>planned</td>
 </tr>
 </tbody>
 </table>
-<p><strong>Exit criteria:</strong> Programming Guide strict SQL section updated; <code>samples/sql/</code> grows per milestone.</p>
-<p><strong>Out of scope:</strong> Window functions (Phase E), nested struct/array types.</p>
+<p><strong>Exit criteria:</strong> Programming Guide strict SQL section updated; <code>samples/sql/</code> grows per milestone (through <code>22_*.sql</code> for current analytics batch).</p>
+<p><strong>Out of scope:</strong> Window functions (Phase E), nested struct/array types, correlated subqueries referencing join outer rows as a unit.</p>
 <h2 id="phase-e-advanced-analytics">15.16 Phase E — Advanced analytics</h2>
 <h3 id="e1.window-functions">E1. Window functions</h3>
 <p><code>ROW_NUMBER</code>, <code>RANK</code>, <code>SUM() OVER (PARTITION BY … ORDER BY …)</code> with default framing rules. Builds on sort infrastructure from Chapter 12.</p>
@@ -702,7 +703,7 @@ public sealed class ExplainOnlyPhysicalPlan : IPhysicalPlan
 <h3 id="why-reuse-binders">Why reuse binders?</h3>
 <p>SQL and LINQ differ only at the front. Once logical IR is built, catalog binding and physical lowering are identical. Tests can share golden physical plans for equivalent SQL and LINQ queries.</p>
 <h2 id="plan-cache-design-notes">15.21 Plan cache design notes</h2>
-<p>No plan cache ships yet. Recommended design when implementing Phase B3:</p>
+<p><code>CompiledSqlCache</code> ships with Phase B3. Design notes for extensions:</p>
 <h3 id="cache-entry">Cache entry</h3>
 <pre><code class="language-csharp">// (illustrative)
 sealed class CachedPlan
@@ -785,7 +786,7 @@ sealed class CachedPlan
 </tr>
 <tr>
 <td>BI-shaped SQL</td>
-<td>Expressions, <code>HAVING</code>, outer joins, <code>UNION ALL</code> with tests</td>
+<td>Expressions, <code>HAVING</code>, outer joins, <code>UNION</code>/<code>UNION ALL</code>, subqueries — <strong>largely met</strong> (Phase D); correlated join outers still open</td>
 </tr>
 <tr>
 <td>Larger than RAM</td>
@@ -821,7 +822,7 @@ sealed class CachedPlan
 </tr>
 <tr>
 <td>Phase 3 (planning &amp; SQL)</td>
-<td>B + D</td>
+<td>B + D (<strong>B1–B4, D1–D5 implemented</strong>; D6 and CBO timers remain)</td>
 </tr>
 <tr>
 <td>Phase 4 (LINQ)</td>
@@ -846,7 +847,7 @@ sealed class CachedPlan
 <tbody>
 <tr>
 <td>New operator (e.g., window)</td>
-<td>New chapter with <code>order</code> after 16, or appendix under <code>content/appendix/</code></td>
+<td>New chapter with <code>order</code> after 17, or appendix under <code>content/appendix/</code></td>
 </tr>
 <tr>
 <td>Incremental improvement (top-N heap)</td>
@@ -906,9 +907,14 @@ sealed class CachedPlan
 <td>Ch. 13</td>
 </tr>
 <tr>
+<td>Advanced SQL (DISTINCT, subqueries)</td>
+<td>D</td>
+<td>Ch. 17</td>
+</tr>
+<tr>
 <td>Cost-based optimizer</td>
-<td>B2+</td>
-<td>Ch. 7, 13</td>
+<td>E3+</td>
+<td>Ch. 7, 13, 15</td>
 </tr>
 <tr>
 <td>Window functions</td>
@@ -951,7 +957,7 @@ sealed class CachedPlan
 <li>Do not break batch format version without decode fallback or export tool</li>
 </ul>
 <h2 id="summary">15.30 Summary</h2>
-<p><strong>Part I</strong> surveyed production OLAP requirements: cost-based optimization, statistics and histograms, spill algorithms, observability, format versioning, scheduling, and adaptive execution concepts. <strong>Part II</strong> mapped those ideas onto RainDB's phased roadmap — <code>ISpillWriter</code> and <code>SpillPartialEntryThreshold</code> wire telemetry today; <code>DefaultLinqCompiler</code> marks the LINQ insertion point; <code>MemoryTable.SchemaVersion</code> awaits a plan cache; Phases C and G add mmap, encodings, WAL, and host integration. When features land, extend this book using the chapter map in §15.27 — the narrative from OLAP fundamentals through SQL compilation and persistence remains the spine; new chapters attach at the leaves.</p>
+<p><strong>Part I</strong> surveyed production OLAP requirements: cost-based optimization, statistics and histograms, spill algorithms, observability, format versioning, scheduling, and adaptive execution concepts — with RainDB still targeting <strong>WAL</strong>, <strong>CBO</strong>, <strong>LINQ</strong>, and <strong>EXPLAIN ANALYZE</strong> timers rather than claiming they ship. <strong>Part II</strong> mapped those ideas onto RainDB's phased roadmap: Phase <strong>B1–B4</strong> and <strong>D1–D5</strong> are implemented (see Chapter 17); <strong>C2</strong> and partial <strong>C3</strong> harden mmap and Int32 dictionary encoding; <code>ISpillWriter</code> remains a telemetry hook; <code>DefaultLinqCompiler</code> marks the LINQ insertion point. When features land, extend this book using the chapter map in §15.27 — the narrative from OLAP fundamentals through SQL compilation, persistence, and analytics SQL remains the spine; new chapters attach at the leaves.</p>
 </div>
           <footer class="doc-footer">
             <p>Generated by <strong>hoihky</strong> with <strong>MDWeb</strong> and with assistance from <strong>AI</strong></p>
@@ -1141,19 +1147,19 @@ sealed class CachedPlan
                         </li>
                         
                         <li class="toc-h3">
-                          <a href="#b1-logical-rewrite-rule-based-optimizer-v0">B1. Logical rewrite (rule-based optimizer v0)</a>
+                          <a href="#b1-logical-rewrite-rule-based-optimizer-v0-implemented">B1. Logical rewrite (rule-based optimizer v0) — IMPLEMENTED</a>
                         </li>
                         
                         <li class="toc-h3">
-                          <a href="#b2-physical-choices-heuristics">B2. Physical choices (heuristics)</a>
+                          <a href="#b2-physical-choices-heuristics-implemented">B2. Physical choices (heuristics) — IMPLEMENTED</a>
                         </li>
                         
                         <li class="toc-h3">
-                          <a href="#b3-prepared-execution-and-plan-cache">B3. Prepared execution and plan cache</a>
+                          <a href="#b3-prepared-execution-and-plan-cache-implemented">B3. Prepared execution and plan cache — IMPLEMENTED</a>
                         </li>
                         
                         <li class="toc-h3">
-                          <a href="#b4-explain-and-introspection">B4. Explain and introspection</a>
+                          <a href="#b4-explain-and-introspection-implemented">B4. Explain and introspection — IMPLEMENTED</a>
                         </li>
                         
                         <li class="toc-h2">
@@ -1165,11 +1171,11 @@ sealed class CachedPlan
                         </li>
                         
                         <li class="toc-h3">
-                          <a href="#c2-buffer-manager-v0">C2. Buffer manager v0</a>
+                          <a href="#c2-buffer-manager-v0-implemented">C2. Buffer manager v0 — IMPLEMENTED</a>
                         </li>
                         
                         <li class="toc-h3">
-                          <a href="#c3-column-encodings">C3. Column encodings</a>
+                          <a href="#c3-column-encodings-partial-implemented-for-int32-dictionary-on-write">C3. Column encodings — partial (IMPLEMENTED for Int32 dictionary on write)</a>
                         </li>
                         
                         <li class="toc-h3">

@@ -1,0 +1,495 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Chapter 17: Advanced SQL and Analytics · Building an OLAP Database Engine from Scratch with RainDB</title>
+  <meta name="description" content="Generated documentation site">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="assets/css/site.css">
+  <link rel="stylesheet" href="assets/vendor/atom-one-dark.min.css">
+</head>
+<body>
+  <div class="site">
+    <header class="topbar">
+      <button class="sidebar-toggle" id="sidebar-toggle" aria-label="Toggle navigation">☰</button>
+      <a href="index.html" class="brand">Building an OLAP Database Engine from Scratch with RainDB</a>
+      <div class="search-wrap">
+        <input type="search" id="search" placeholder="Search docs…" autocomplete="off">
+      </div>
+    </header>
+
+    <div class="layout">
+      <aside class="sidebar" id="sidebar">
+        <nav class="nav" aria-label="Documentation">
+          <ul class="nav-list">
+            
+                        <li class="nav-item depth-0">
+                          
+                            <a href="index.html" class="nav-link">Building an OLAP Database Engine from Scratch</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="01-olap-fundamentals.html" class="nav-link">Chapter 1: OLAP Fundamentals</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="02-architecture-and-modules.html" class="nav-link">Chapter 2: Architecture and Modules</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="03-columnar-storage-model.html" class="nav-link">Chapter 3: Columnar Storage Model</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="04-chunk-data-structures.html" class="nav-link">Chapter 4: Chunk Data Structures</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="05-catalog-and-tables.html" class="nav-link">Chapter 5: Catalog and Tables</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="06-buffer-management.html" class="nav-link">Chapter 6: Buffer Management</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="07-execution-pipeline.html" class="nav-link">Chapter 7: Execution Pipeline</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="08-vectorized-scan-filter-project.html" class="nav-link">Chapter 8: Vectorized Scan, Filter, and Project</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="09-global-aggregates.html" class="nav-link">Chapter 9: Global Aggregates</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="10-hash-aggregation.html" class="nav-link">Chapter 10: Hash Aggregation</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="11-joins.html" class="nav-link">Chapter 11: Joins</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="12-sort-and-limit.html" class="nav-link">Chapter 12: Sort and Limit</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="13-sql-compilation.html" class="nav-link">Chapter 13: SQL Compilation</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="14-persistence.html" class="nav-link">Chapter 14: Persistence</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="15-future-extensions.html" class="nav-link">Chapter 15: Future Extensions</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="16-mmap-io.html" class="nav-link">Chapter 16: mmap I/O</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0 is-active">
+                          
+                            <a href="17-advanced-sql-and-analytics.html" class="nav-link">Chapter 17: Advanced SQL and Analytics</a>
+                            
+                        </li>
+                        
+          </ul>
+        </nav>
+      </aside>
+
+      <main class="content">
+        <article class="doc">
+          <header class="doc-header">
+            <h1>Chapter 17: Advanced SQL and Analytics</h1>
+          </header>
+          <div class="doc-body"><h1 id="chapter-17-advanced-sql-and-analytics">Chapter 17: Advanced SQL and Analytics</h1>
+<p>Beyond scans, joins, and simple aggregates, analytical SQL adds expression evaluation, set operations, subqueries, and deduplication. These features interact with the compiler (binding and rewriting), the catalog (name resolution across nested scopes), and the executor (materialization versus per-row apply). This chapter explains the relational ideas first, then shows how RainDB implements Phase B planning hooks and Phase D analytics SQL on top of the vectorized stack from earlier chapters.</p>
+<hr />
+<h1 id="part-i-concepts">Part I — Concepts</h1>
+<h2 id="prepared-statements-and-plan-reuse">17.1 Prepared statements and plan reuse</h2>
+<p>Every ad hoc query pays the full compile cost: tokenize, parse, bind to the catalog, rewrite the logical plan, and lower to physical operators. <strong>Prepared statements</strong> amortize that work. The client sends SQL once with <strong>parameter placeholders</strong>; the engine stores a compiled plan keyed by normalized text and a <strong>catalog fingerprint</strong> (schema versions of referenced tables). Later executions only bind new literal values into slots already carved out in the physical plan.</p>
+<p>Invalidation is catalog-driven: when a table bumps <code>SchemaVersion</code>, any cached entry that referenced that <code>TableId</code> must be dropped so column ordinals and types stay consistent. Parameters in RainDB appear as <code>@name</code> in <code>WHERE</code> predicates today; the binder replaces them before execution without re-parsing the statement.</p>
+<p>Prepared execution is not a separate runtime — it is the same <code>IPhysicalPlan</code> tree the executor already understands, plus a cache and a parameter-binding pass.</p>
+<h2 id="rule-based-optimization-without-a-cost-model">17.2 Rule-based optimization (without a cost model)</h2>
+<p>A <strong>cost-based optimizer</strong> ranks plans using statistics. A <strong>rule-based optimizer</strong> applies deterministic rewrite rules that preserve semantics but shrink work: push filters toward scans, drop unused columns from intermediate results, validate that <code>LIMIT</code> is legal on the shaped plan, and partition join predicates into equi-join keys versus residual filters.</p>
+<p>Rules run in a fixed order over <strong>logical IR</strong>, before physical algorithm selection. Each rule is small and testable: given a logical subtree, emit an equivalent subtree. RainDB's pipeline does not yet estimate cardinalities; join hash versus sort-merge is chosen by <strong>heuristics</strong> (row-count ratio), not by a cost formula. That split — rewrite at the logical layer, heuristics at physical bind — is a common stepping stone toward full CBO.</p>
+<h2 id="subqueries-correlated-and-uncorrelated">17.3 Subqueries: correlated and uncorrelated</h2>
+<p>A <strong>subquery</strong> is a nested <code>SELECT</code> used as a value, a table source, or a boolean filter.</p>
+<p><strong>Uncorrelated</strong> subqueries do not reference columns from an outer query. The engine can evaluate them once, materialize the result (often a single column or an empty/non-empty flag), and reuse that snapshot for every outer row. <code>WHERE col IN (SELECT …)</code> and <code>WHERE EXISTS (SELECT …)</code> are classic uncorrelated forms when the inner query is self-contained.</p>
+<p><strong>Correlated</strong> subqueries reference outer row values (e.g. <code>WHERE EXISTS (SELECT 1 FROM orders o WHERE o.customer_id = c.id)</code>). Semantically the inner query must be re-evaluated <strong>per outer row</strong> (or per join match), because the correlation predicate changes with each outer binding. Engines implement this with nested-loop <strong>apply</strong>: for each outer row, run the inner plan with extra equality filters wired from outer cells.</p>
+<p>Correlated evaluation is expensive; uncorrelated forms should be detected and <strong>decorrelated</strong> or executed once when possible. RainDB resolves uncorrelated <code>IN</code>/<code>EXISTS</code> before the main scan; correlated forms on single-table scans use per-row apply. Correlated subqueries that must see both sides of a join as outer context remain a documented gap.</p>
+<h2 id="union-versus-union-all">17.4 UNION versus UNION ALL</h2>
+<p><code>UNION ALL</code> <strong>concatenates</strong> result sets from two or more branches with compatible column types and names. Duplicate rows from different branches are all retained; no global deduplication runs.</p>
+<p><code>UNION</code> (without <code>ALL</code>) asks for the <strong>set union</strong>: duplicate rows across the combined stream appear once. Implementations typically concatenate branches (<code>UNION ALL</code>) and then run a <strong>distinct</strong> operator on the full row shape, or use hash-based deduplication while merging.</p>
+<p>Schema checks at compile time ensure branch outputs align column count and types; runtime concatenation preserves batch order from each branch in sequence.</p>
+<h2 id="distinct-and-countdistinct">17.5 DISTINCT and COUNT(DISTINCT)</h2>
+<p><code>SELECT DISTINCT</code> removes duplicate <strong>rows</strong> from the projection — equality is defined on all selected columns, including null handling per type.</p>
+<p><code>COUNT(DISTINCT col)</code> counts unique non-null values of one column within each aggregation group (or globally). Hash aggregation can maintain a per-group set or a single global set for one distinct column; multi-column <code>COUNT(DISTINCT …)</code> generalizes to composite keys.</p>
+<p>Full-row <code>DISTINCT</code> after large joins can be memory-heavy because it materializes unique signatures; OLAP engines often prefer grouping keys explicitly when the user knows the grain.</p>
+<h2 id="outer-join-semantics">17.6 Outer join semantics</h2>
+<p><strong>Inner join</strong> keeps only matching row pairs. <strong>Outer joins</strong> retain non-matching rows from one or both sides, padding missing columns with <strong>NULL</strong>.</p>
+<ul>
+<li><strong>LEFT OUTER</strong>: all probe-side rows; unmatched build columns are null.</li>
+<li><strong>RIGHT OUTER</strong>: symmetric to left; many engines normalize RIGHT to LEFT by swapping inputs.</li>
+<li><strong>FULL OUTER</strong>: probe-only rows, build-only rows, and matches — with null padding on the opposite side when a key appears on only one input.</li>
+</ul>
+<p>Equi-join predicates (equality on key columns) drive hash or sort-merge match logic; outer semantics add <strong>null-extended</strong> output rows for keys with no partner. Full outer join is implemented as the union of left-outer probe rows, left-outer build rows (after swap), and inner matches, with careful deduplication of the pure match set where algorithms overlap.</p>
+<h2 id="overlay-catalogs-and-derived-tables">17.7 Overlay catalogs and derived tables</h2>
+<p><code>FROM (SELECT …) AS alias</code> introduces a <strong>derived table</strong>: a transient relation with its own column list. The compiler must:</p>
+<ol>
+<li>Compile the subquery to a physical plan.</li>
+<li><strong>Materialize</strong> its batches at runtime.</li>
+<li>Register the result under a stable <strong>ephemeral</strong> <code>TableId</code> and alias.</li>
+<li>Re-bind the outer <code>FROM</code> clause against a catalog that <strong>overlays</strong> the ephemeral table on the base catalog.</li>
+</ol>
+<p>An <strong>overlay catalog</strong> delegates lookups: ephemeral names and ids resolve locally; everything else falls through to the persistent catalog. Outer plans (joins, filters, sorts on the derived table) then use the same scan and join binders as base tables. This avoids special-case &quot;subquery scan&quot; operators in every binder while keeping name resolution uniform.</p>
+<hr />
+<h1 id="part-ii-raindb">Part II — RainDB</h1>
+<p>Phase D (analytics SQL) and Phase B (planning) extend the pipeline described in Chapter 13. Compilation still flows through <code>SqlCompilationService</code>: parse → <code>LogicalRewritePipeline</code> → physical bind with <code>HeuristicJoinAlgorithmSelector</code> → <code>DefaultQueryExecutor</code>. New logical nodes (<code>LogicalUnionAll</code>, <code>LogicalDerivedTableScan</code>, scalar expressions in filters and projections) lower to physical plans executed by dedicated engines or executor branches.</p>
+<h2 id="scalar-expressions-phase-d1">17.8 Scalar expressions (Phase D1)</h2>
+<p><code>ScalarExpressionBindingPipeline</code> binds arithmetic on <code>Int32</code> and <code>Float64</code>, <code>CAST</code>, <code>CASE</code>, and comparisons. Bound expressions appear in:</p>
+<ul>
+<li><code>WHERE</code> — combined with existing column compare filters and <code>AND</code> chains.</li>
+<li><code>SELECT</code> — computed output columns gathered after scan or join.</li>
+<li><code>ORDER BY</code> — sort keys that are expressions, not only column ordinals.</li>
+</ul>
+<p>The binder produces physical evaluators reused by <code>SelectionEvaluator</code>, projection gather paths, and sort comparators. Unsupported types or shapes fail at compile time with <code>SqlCompileException</code>.</p>
+<p>Example scripts in the repository's <code>samples/sql</code> folder (<code>08_select_expressions.sql</code>, <code>09_case_expression.sql</code>) exercise projection and conditional logic.</p>
+<h2 id="having-and-broader-minmax-phase-d2">17.9 HAVING and broader MIN/MAX (Phase D2)</h2>
+<p>Post-aggregate filtering uses <code>GroupedHavingBinder</code> and <code>GroupHavingEvaluator</code> on hash aggregation output. <code>MIN</code> and <code>MAX</code> extend to <code>Int32</code>, <code>Int64</code>, <code>Float64</code>, and <code>Utf8</code> group aggregates, not only <code>Float64</code> globals.</p>
+<p>Samples: <code>10_having_aggregate_filter.sql</code>, <code>11_min_max_by_type.sql</code>. Automated tests live in <code>PhaseD1D2Tests.cs</code>.</p>
+<h2 id="left-join-and-union-all-phase-d3">17.10 LEFT JOIN and UNION ALL (Phase D3)</h2>
+<p><code>LogicalJoinSemantics</code> on equi-joins marks inner, left, right, or full outer behavior. Hash and sort-merge join engines null-pad the non-preserved side when a key has no match. RIGHT outer joins are normalized to LEFT with swapped inputs during planning.</p>
+<p><code>LogicalUnionAll</code> lowers through <code>LogicalUnionAllBinder</code> to <code>UnionAllPhysicalPlan</code>, which requires at least two child plans and identical output schemas:</p>
+<pre><code class="language-csharp">// src/RainDB.Query/Plans/UnionAllPhysicalPlan.cs
+public sealed class UnionAllPhysicalPlan : IPhysicalPlan
+{
+    public UnionAllPhysicalPlan(IPhysicalPlan[] inputs, TableSchema outputSchema) { ... }
+    public IPhysicalPlan[] Inputs { get; }
+    public TableSchema OutputSchema { get; }
+}
+</code></pre>
+<p><code>DefaultQueryExecutor</code> runs each branch, appends all batches into one <code>ColumnarMaterializedQueryResult</code>, and preserves branch order.</p>
+<p>Samples: <code>12_left_join.sql</code>, <code>13_union_all.sql</code>. Tests: <code>PhaseD3Tests.cs</code>.</p>
+<h2 id="uncorrelated-subqueries-and-derived-tables-phase-d4">17.11 Uncorrelated subqueries and derived tables (Phase D4)</h2>
+<h3 id="subqueryfilterresolver">SubqueryFilterResolver</h3>
+<p><code>WHERE</code> predicates <code>IN</code>, <code>NOT IN</code>, <code>EXISTS</code>, and <code>NOT EXISTS</code> attach <strong>physical specs</strong> to scan, join, aggregate, and sort plans. Before the main operator runs, <code>SubqueryFilterResolver</code>:</p>
+<ul>
+<li>Detects <strong>uncorrelated</strong> specs (empty correlation list).</li>
+<li>Executes the nested plan once via the nested executor.</li>
+<li>For <code>IN</code>, builds a <code>ScalarValueSet</code> and replaces the spec with a <code>ColumnInSetFilter</code> on the outer column.</li>
+<li>For <code>EXISTS</code>, if the inner result is empty (respecting <code>NOT EXISTS</code>), short-circuits the whole query to no rows when appropriate.</li>
+</ul>
+<p>Correlated specs are left in the plan for per-row handling (Phase D5 on scans).</p>
+<pre><code class="language-text">Compile:  VectorizedScanPhysicalPlan + InSubqueries / ExistsSubqueries
+Execute:  SubqueryFilterResolver.ResolveAsync → resolved IN sets + leftover correlated specs
+          → VectorizedScanEngine applies column filters and correlated apply
+</code></pre>
+<p>Uncorrelated subqueries work on <strong>table scans and joins</strong> (join resolver mirrors the scan path). Samples: <code>14_subquery_in_exists.sql</code>.</p>
+<h3 id="derivedtablescanphysicalplan-and-overlaycatalog">DerivedTableScanPhysicalPlan and OverlayCatalog</h3>
+<p><code>FROM (SELECT …) alias</code> becomes <code>LogicalDerivedTableScan</code> → <code>DerivedTableScanPhysicalPlan</code>:</p>
+<pre><code class="language-csharp">// src/RainDB.Query/Plans/DerivedTableScanPhysicalPlan.cs
+public sealed class DerivedTableScanPhysicalPlan : IPhysicalPlan
+{
+    public IPhysicalPlan Subquery { get; }
+    public TableId EphemeralTableId { get; }
+    public string Alias { get; }
+    public TableSchema DerivedSchema { get; }
+    public IPhysicalPlan OuterPlan { get; }
+}
+</code></pre>
+<p>Execution in <code>DefaultQueryExecutor.ExecuteDerivedTableAsync</code>:</p>
+<ol>
+<li>Run <code>Subquery</code> and collect batches.</li>
+<li>Wrap them in <code>EphemeralColumnarTableSource</code> with a fresh <code>TableId</code>.</li>
+<li>Build <code>OverlayCatalog</code> over <code>context.Catalog</code> so <code>TryGetTable</code> resolves the alias.</li>
+<li>Run <code>OuterPlan</code> under a scoped <code>RainDbExecutionContext</code> pointing at the overlay.</li>
+</ol>
+<p><code>OverlayCatalog</code> in <code>RainDB.Core/Catalog/OverlayCatalog.cs</code> shadows names and ids from overlays, then delegates to the base catalog. <code>Register</code> still mutates the base catalog only — derived tables are never persisted.</p>
+<p>Sample: <code>15_derived_table.sql</code>. Tests: <code>PhaseD4Tests.cs</code>.</p>
+<h2 id="distinct-union-outer-joins-correlated-apply-grouped-sort-phase-d5">17.12 DISTINCT, UNION, outer joins, correlated apply, grouped sort (Phase D5)</h2>
+<h3 id="distinctphysicalplan-and-distinctengine">DistinctPhysicalPlan and DistinctEngine</h3>
+<p><code>SELECT DISTINCT</code> and <code>UNION</code> (deduplicating) wrap a child plan in <code>DistinctPhysicalPlan</code>. <code>DistinctOperator</code> materializes the child, walks every row, and tracks <strong>row signatures</strong> in a <code>HashSet</code>. Unseen signatures are buffered and emitted as new columnar batches.</p>
+<pre><code class="language-csharp">// src/RainDB.Query/Plans/DistinctPhysicalPlan.cs
+public sealed class DistinctPhysicalPlan : IPhysicalPlan
+{
+    public IPhysicalPlan Input { get; }
+    public TableSchema OutputSchema { get; }
+    public string Explain(string indent = &quot;&quot;) =&gt;
+        $&quot;{indent}Distinct\n{Input.Explain(indent + &quot;  &quot;)}&quot;;
+}
+</code></pre>
+<p><code>LogicalUnionAllBinder</code> stacks <code>UnionAllPhysicalPlan</code> and optionally wraps <code>DistinctPhysicalPlan</code> when the SQL keyword is <code>UNION</code> without <code>ALL</code>.</p>
+<p><code>COUNT(DISTINCT col)</code> is handled in hash aggregation via distinct counting on the aggregate column. Samples: <code>19_select_distinct_region.sql</code>, <code>17_union_distinct.sql</code>, <code>20_count_distinct_group.sql</code>.</p>
+<h3 id="full-outer-and-right-joins">FULL OUTER and RIGHT joins</h3>
+<p>RIGHT and FULL equi-joins extend the same join engines with semantics described in §17.6. Sample: <code>18_full_outer_join.sql</code>.</p>
+<h3 id="correlatedsubqueryexecutor">CorrelatedSubqueryExecutor</h3>
+<p>When correlation bindings are present, <code>SubqueryFilterResolver</code> does not materialize the inner query globally. Instead <code>CorrelatedSubqueryExecutor</code> runs an <strong>apply</strong> loop:</p>
+<ul>
+<li>For each outer row (or join match), merge correlation equalities into a copy of the inner <code>VectorizedScanPhysicalPlan</code> filters.</li>
+<li>Execute the inner scan; for <code>EXISTS</code>, any row suffices; for <code>IN</code>, build a value set and test membership of the outer column.</li>
+</ul>
+<p>Inner plans for correlated subqueries are currently restricted to <strong>single-table scans</strong> — nested joins inside the correlated subquery are not supported. Join outer rows pass probe/build batch coordinates through <code>CorrelatedOuterRow</code>.</p>
+<p>Correlated <code>EXISTS</code> / <code>IN</code> on <strong>joins</strong> as outer context is still unsupported; only single-table scan outers and join-match paths wired in <code>JoinExecutionEngine</code> are implemented.</p>
+<p>Sample: <code>21_correlated_not_exists.sql</code>, <code>16_d5_analytics.sql</code>. Tests: <code>PhaseD5Tests.cs</code>.</p>
+<h3 id="group-by-with-order-by-and-limit">GROUP BY with ORDER BY and LIMIT</h3>
+<p><code>GroupedSortTopNPhysicalPlan</code> runs hash aggregation, materializes grouped output into an ephemeral table (again via <code>OverlayCatalog</code>), then applies <code>SortTopNPhysicalPlan</code> on the grouped result. This reuses sort infrastructure from Chapter 12 without duplicating grouped sort logic inside the aggregate engine.</p>
+<h2 id="planning-and-introspection-phase-b1b4">17.13 Planning and introspection (Phase B1–B4)</h2>
+<h3 id="b1-logicalrewritepipeline">B1 — LogicalRewritePipeline</h3>
+<p><code>SqlCompilationService.Optimize</code> runs <code>LogicalRewritePipeline</code> with default rules: join predicate partition, projection pruning on scans and joins, limit validation. Rules implement <code>ILogicalRewriteRule</code> and apply in order (single pass today).</p>
+<h3 id="b2-heuristicjoinalgorithmselector">B2 — HeuristicJoinAlgorithmSelector</h3>
+<p>When lowering <code>LogicalInnerJoin</code>, <code>HeuristicJoinAlgorithmSelector</code> picks <code>PhysicalJoinAlgorithm.Hash</code> or <code>SortMerge</code> from estimated row counts. Physical <code>EXPLAIN</code> output includes the chosen algorithm on <code>JoinPhysicalPlan</code>.</p>
+<h3 id="b3-prepared-sql-and-compiledsqlcache">B3 — Prepared SQL and CompiledSqlCache</h3>
+<p><code>ISqlCompiler.PrepareAsync</code> compiles SQL with <code>@param</code> placeholders. <code>CompiledSqlCache</code> keys entries by normalized SQL and <code>CatalogSchemaFingerprint</code>; <code>MemoryTable.SchemaVersion</code> changes invalidate affected tables. <code>DefaultSqlCompiler</code> stores non-parameterized plans in the cache after first compile.</p>
+<h3 id="b4-explain-bundle">B4 — EXPLAIN bundle</h3>
+<p>SQL statements <code>EXPLAIN</code>, <code>EXPLAIN LOGICAL</code>, and <code>EXPLAIN PHYSICAL</code> set <code>LogicalPlan.ExplainLevel</code>. Instead of executing data operators, compilation returns <code>ExplainBundlePhysicalPlan</code> with formatted logical and physical text. <code>DefaultQueryExecutor</code> maps that plan to <code>ExplainTextQueryResult</code>.</p>
+<pre><code class="language-csharp">// src/RainDB.Query/Plans/ExplainBundlePhysicalPlan.cs
+public sealed class ExplainBundlePhysicalPlan : IPhysicalPlan
+{
+    public string LogicalText { get; }
+    public string PhysicalText { get; }
+    public SqlExplainLevel Level { get; }
+}
+</code></pre>
+<p><code>EXPLAIN ANALYZE</code> with per-operator timers is not implemented; see Chapter 15 for roadmap placement.</p>
+<h2 id="end-to-end-compile-and-execute-flow">17.14 End-to-end compile and execute flow</h2>
+<pre><code class="language-text">ExecuteSqlAsync / PrepareAsync
+→ SqlParser → LogicalPlan
+→ LogicalRewritePipeline.Optimize
+→ LogicalPlanCompiler + HeuristicJoinAlgorithmSelector → IPhysicalPlan
+     (may be ExplainBundlePhysicalPlan)
+→ DefaultQueryExecutor
+     ├─ SubqueryFilterResolver (uncorrelated IN/EXISTS)
+     ├─ VectorizedScan / Join / HashAggregate / SortTopN / …
+     ├─ UnionAllPhysicalPlan (concat batches)
+     ├─ DistinctPhysicalPlan → DistinctOperator
+     ├─ DerivedTableScanPhysicalPlan → OverlayCatalog + outer plan
+     └─ CorrelatedSubqueryExecutor (per-row on scans)
+</code></pre>
+<h2 id="sample-sql-and-tests">17.15 Sample SQL and tests</h2>
+<p>The RainDB repository ships incremental <code>samples/sql</code> scripts numbered by milestone: expression and <code>CASE</code> (08–09), <code>HAVING</code> and typed <code>MIN</code>/<code>MAX</code> (10–11), left join and <code>UNION ALL</code> (12–13), uncorrelated subqueries (14), derived tables (15), combined D5 analytics (16), deduplicating <code>UNION</code> (17), full outer join (18), <code>SELECT DISTINCT</code> (19), <code>COUNT(DISTINCT)</code> with <code>GROUP BY</code> (20), correlated <code>NOT EXISTS</code> (21), and <code>GROUP BY</code> with <code>WHERE IN</code> (22). <code>RainDB.AnalyticsDemo</code> copies these scripts for local runs.</p>
+<p>Read alongside:</p>
+<table class="table">
+<thead>
+<tr>
+<th>Area</th>
+<th>Tests</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Scalars + HAVING</td>
+<td><code>tests/RainDB.Tests/PhaseD1D2Tests.cs</code></td>
+</tr>
+<tr>
+<td>Outer join + UNION ALL</td>
+<td><code>PhaseD3Tests.cs</code></td>
+</tr>
+<tr>
+<td>Subqueries + derived tables</td>
+<td><code>PhaseD4Tests.cs</code></td>
+</tr>
+<tr>
+<td>DISTINCT, UNION, correlated, grouped sort</td>
+<td><code>PhaseD5Tests.cs</code></td>
+</tr>
+<tr>
+<td>Rewrite, prepare, EXPLAIN</td>
+<td><code>PhaseBSqlPlanningTests.cs</code></td>
+</tr>
+</tbody>
+</table>
+<h2 id="limitations-and-related-chapters">17.16 Limitations and related chapters</h2>
+<ul>
+<li><strong>Correlated subqueries on join outer context</strong> — not supported; compile or execute paths throw or reject unsupported shapes.</li>
+<li><strong>Cost-based optimization, statistics, WAL, LINQ</strong> — roadmap items in Chapter 15.</li>
+<li><strong>Window functions</strong> — Phase E; not in the strict SQL subset yet.</li>
+<li><strong>Spill</strong> — hash agg may emit metrics via <code>ISpillWriter</code>; full external spill is future work.</li>
+</ul>
+<p>Prior chapters supply the operators this layer composes: vectorized scan (8), aggregation (9–10), joins (11), sort/limit (12), compilation basics (13), persistence and mmap (14–16).</p>
+<h2 id="summary">17.17 Summary</h2>
+<p><strong>Part I</strong> covered prepared plans, rule-based rewrites, subquery correlation, set operations, distinct semantics, outer joins, and overlay catalogs as relational concepts. <strong>Part II</strong> mapped RainDB's Phase D analytics surface — scalars, <code>HAVING</code>, outer joins, <code>UNION ALL</code>/<code>UNION</code>, uncorrelated and correlated subqueries, derived tables, and grouped sort/top-N — onto concrete physical plans (<code>DistinctPhysicalPlan</code>, <code>UnionAllPhysicalPlan</code>, <code>DerivedTableScanPhysicalPlan</code>, <code>ExplainBundlePhysicalPlan</code>) and execution helpers (<code>SubqueryFilterResolver</code>, <code>CorrelatedSubqueryExecutor</code>, <code>OverlayCatalog</code>), with Phase B planning and <code>EXPLAIN</code> integrated into the same compile path.</p>
+</div>
+          <footer class="doc-footer">
+            <p>Generated by <strong>hoihky</strong> with <strong>MDWeb</strong> and with assistance from <strong>AI</strong></p>
+
+          </footer>
+        </article>
+
+        
+                <aside class="toc" aria-label="On this page">
+                  <p class="toc-title">On this page</p>
+                  <ul>
+                    
+                        <li class="toc-h1">
+                          <a href="#chapter-17-advanced-sql-and-analytics">Chapter 17: Advanced SQL and Analytics</a>
+                        </li>
+                        
+                        <li class="toc-h1">
+                          <a href="#part-i-concepts">Part I — Concepts</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#171-prepared-statements-and-plan-reuse">17.1 Prepared statements and plan reuse</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#172-rule-based-optimization-without-a-cost-model">17.2 Rule-based optimization (without a cost model)</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#173-subqueries-correlated-and-uncorrelated">17.3 Subqueries: correlated and uncorrelated</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#174-union-versus-union-all">17.4 UNION versus UNION ALL</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#175-distinct-and-countdistinct">17.5 DISTINCT and COUNT(DISTINCT)</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#176-outer-join-semantics">17.6 Outer join semantics</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#177-overlay-catalogs-and-derived-tables">17.7 Overlay catalogs and derived tables</a>
+                        </li>
+                        
+                        <li class="toc-h1">
+                          <a href="#part-ii-raindb">Part II — RainDB</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#178-scalar-expressions-phase-d1">17.8 Scalar expressions (Phase D1)</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#179-having-and-broader-minmax-phase-d2">17.9 HAVING and broader MIN/MAX (Phase D2)</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1710-left-join-and-union-all-phase-d3">17.10 LEFT JOIN and UNION ALL (Phase D3)</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1711-uncorrelated-subqueries-and-derived-tables-phase-d4">17.11 Uncorrelated subqueries and derived tables (Phase D4)</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#subqueryfilterresolver">SubqueryFilterResolver</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#derivedtablescanphysicalplan-and-overlaycatalog">DerivedTableScanPhysicalPlan and OverlayCatalog</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1712-distinct-union-outer-joins-correlated-apply-grouped-sort-phase-d5">17.12 DISTINCT, UNION, outer joins, correlated apply, grouped sort (Phase D5)</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#distinctphysicalplan-and-distinctengine">DistinctPhysicalPlan and DistinctEngine</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#full-outer-and-right-joins">FULL OUTER and RIGHT joins</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#correlatedsubqueryexecutor">CorrelatedSubqueryExecutor</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#group-by-with-order-by-and-limit">GROUP BY with ORDER BY and LIMIT</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1713-planning-and-introspection-phase-b1b4">17.13 Planning and introspection (Phase B1–B4)</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#b1-logicalrewritepipeline">B1 — LogicalRewritePipeline</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#b2-heuristicjoinalgorithmselector">B2 — HeuristicJoinAlgorithmSelector</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#b3-prepared-sql-and-compiledsqlcache">B3 — Prepared SQL and CompiledSqlCache</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#b4-explain-bundle">B4 — EXPLAIN bundle</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1714-end-to-end-compile-and-execute-flow">17.14 End-to-end compile and execute flow</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1715-sample-sql-and-tests">17.15 Sample SQL and tests</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1716-limitations-and-related-chapters">17.16 Limitations and related chapters</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1717-summary">17.17 Summary</a>
+                        </li>
+                        
+                  </ul>
+                </aside>
+                
+      </main>
+    </div>
+  </div>
+  <script src="assets/vendor/mermaid.min.js"></script>
+  <script src="assets/vendor/highlight.min.js"></script>
+  <script src="assets/js/site.js"></script>
+</body>
+</html>

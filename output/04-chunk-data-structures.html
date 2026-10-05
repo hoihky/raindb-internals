@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Chapter 4: Chunk Data Structures · Building an OLAP Database Engine from Scratch with RainDB</title>
-  <meta name="description" content="Theory-first deep guide to OLAP engine design and RainDB internals">
+  <meta name="description" content="Generated documentation site">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -125,6 +125,12 @@
                         <li class="nav-item depth-0">
                           
                             <a href="16-mmap-io.html" class="nav-link">Chapter 16: mmap I/O</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="17-advanced-sql-and-analytics.html" class="nav-link">Chapter 17: Advanced SQL and Analytics</a>
                             
                         </li>
                         
@@ -289,7 +295,7 @@ Dictionary: load index → lookup dictionary → SIMD sum on decoded buffer
 RLE:        expand runs → SIMD sum on expanded buffer
 </code></pre>
 <p>Some engines implement <strong>encoded execution</strong> — operating directly on dictionary indices without full decode (e.g., comparing two dictionary-encoded columns by comparing indices).</p>
-<p>RainDB Phase 1 stores plain bytes. Future phases may add dictionary and RLE encodings per column without changing the batch abstraction.</p>
+<p>RainDB stores plain fixed-width bytes in memory for most types. On disk, <code>RainDbBatchBinaryCodec</code> may rewrite <code>Int32</code> columns as dictionary-encoded kind <code>4</code> when a heuristic saves space. RLE and broader encoded execution remain future work; the batch abstraction stays the same.</p>
 <hr />
 <h2 id="apache-arrow-string-layout-rationale">4.2 Apache Arrow string layout rationale</h2>
 <p><strong>Apache Arrow</strong> defines an in-memory columnar format for zero-copy interchange between systems (Spark, Pandas, DuckDB, Polars). RainDB's <code>Utf8ColumnChunk</code> follows Arrow's string layout philosophy.</p>
@@ -1321,7 +1327,102 @@ BitConverter.GetBytes(value).CopyTo(buffer, offset);
 <h3 id="exercise-4.12">Exercise 4.12</h3>
 <p>Trace <code>PooledFixedWidthColumnChunk.Dispose</code> — what happens to <code>IMemoryOwner</code>?</p>
 <hr />
-<h2 id="chapter-summary">4.22 Chapter summary</h2>
+<h2 id="dictionaryencodedint32columnchunk-lazy-materialization">4.23 DictionaryEncodedInt32ColumnChunk — lazy materialization</h2>
+<p>Low-cardinality <code>Int32</code> columns often persist as <strong>dictionary + indices</strong> (kind <code>4</code> in batch files). In memory, <code>DictionaryEncodedInt32ColumnChunk</code> implements <code>IColumnChunk</code> while keeping dictionary and index bytes separate from a fully expanded value array.</p>
+<pre><code class="language-csharp">// src/RainDB.Core/Columnar/DictionaryEncodedInt32ColumnChunk.cs
+public sealed class DictionaryEncodedInt32ColumnChunk : IColumnChunk
+{
+    public RainDbType PhysicalType =&gt; RainDbType.Int32;
+    public ReadOnlyMemory&lt;int&gt; Dictionary { get; }
+    public ReadOnlyMemory&lt;byte&gt; Indices { get; }
+    public byte IndexWidthBytes { get; }  // 1, 2, or 4 bytes per row index
+
+    public ReadOnlyMemory&lt;byte&gt; Values
+    {
+        get
+        {
+            if (_materializedValues.IsEmpty)
+                _materializedValues = MaterializeValues();
+            return _materializedValues;
+        }
+    }
+}
+</code></pre>
+<h3 id="layout-and-validation">Layout and validation</h3>
+<table class="table">
+<thead>
+<tr>
+<th>Piece</th>
+<th>Role</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>Dictionary</code></td>
+<td>Distinct <code>Int32</code> values, ordinals <code>0 .. dict.Length-1</code></td>
+</tr>
+<tr>
+<td><code>Indices</code></td>
+<td><code>rowCount * indexWidthBytes</code> packed little-endian ordinals</td>
+</tr>
+<tr>
+<td><code>NullBitmap</code></td>
+<td>Same RainDB convention as other chunks (optional)</td>
+</tr>
+<tr>
+<td><code>_materializedValues</code></td>
+<td>Cached <code>rowCount * 4</code> plain bytes; empty until first <code>Values</code> access</td>
+</tr>
+</tbody>
+</table>
+<p>Constructor checks <code>indices.Length == rowCount * indexWidthBytes</code> and <code>indexWidthBytes</code> is 1, 2, or 4. <code>MaterializeValues</code> walks each row, reads an ordinal via <code>ReadIndex</code>, bounds-checks against the dictionary, and writes little-endian <code>Int32</code> into a newly allocated buffer. Out-of-range ordinals throw <code>InvalidDataException</code>.</p>
+<h3 id="why-lazy-values">Why lazy <code>Values</code>?</h3>
+<p>Kernels and plans that only need <code>IColumnChunk</code> often call <code>Values</code> immediately — behavior matches <code>FixedWidthColumnChunk</code>. Code that understands dictionary form can read <code>Dictionary</code> and <code>Indices</code> without expanding. <strong>First <code>Values</code> access pays the decode cost</strong> and retains the materialized array for later reads on the same chunk instance.</p>
+<p><code>Materialize()</code> always builds a <code>FixedWidthColumnChunk</code> with the same null metadata — useful after eviction from mmap budget (Chapter 14) when the table holds a fully heap-backed batch.</p>
+<h3 id="write-path-coupling">Write path coupling</h3>
+<p><code>Int32DictionaryColumnEncoder.TryEncode</code> decides whether to replace a plain <code>FixedWidthColumnChunk</code> at persistence time (minimum four rows, at most 65535 distinct non-null values, encoded size strictly smaller than raw). <code>RainDbBatchBinaryCodec.WriteColumn</code> also accepts an already-encoded <code>DictionaryEncodedInt32ColumnChunk</code>. See Chapter 14 for <code>EnableInt32DictionaryEncoding</code> and on-disk kind <code>4</code> layout.</p>
+<hr />
+<h2 id="mapped-fixed-width-columns-from-batch-mmap">4.24 Mapped fixed-width columns from batch mmap</h2>
+<p>Chapter 16 describes two mmap paths. <strong>Batch-level</strong> hydration maps an entire <code>######.batch</code> file (<code>RNBATCH1</code>) and slices fixed-width payload bytes out of the mapping — no separate <code>RNBFCOL1</code> file per column.</p>
+<p><code>RainDbBatchMmapReader.Open</code> returns <code>MappedColumnarBatch</code>, which pairs:</p>
+<ul>
+<li><code>Batch</code> — a <code>ColumnarBatch</code> whose fixed-width columns use <code>ReadOnlyMemory&lt;byte&gt;</code> slices into the map</li>
+<li>An internal <code>IDisposable</code> that releases the <code>MemoryMappedFile</code>, view accessor, and <code>MemoryManager&lt;byte&gt;</code></li>
+</ul>
+<p>For <strong>kind 1 (fixed-width)</strong> columns, <code>ReadMappedFixed</code> constructs a normal <code>FixedWidthColumnChunk</code> whose <code>Values</code> (and null bitmap, if present) point into mapped memory:</p>
+<pre><code class="language-csharp">var valuesMem = data.Slice(o, valuesLen);
+// ...
+return new FixedWidthColumnChunk(phys, rowCount, valuesMem, nbMem, hasNulls);
+</code></pre>
+<p>Scan kernels see the same <code>IColumnChunk</code> surface as heap chunks; <code>MemoryMarshal.Cast</code> over <code>Values.Span</code> reads file-backed pages after page faults.</p>
+<h3 id="lifetime-rules">Lifetime rules</h3>
+<p>The <code>ColumnarBatch</code> inside a hydrated table is <strong>not</strong> self-owning. <code>MemoryTable.AttachMappedBatch</code> stores the <code>MappedColumnarBatch</code> handle per batch index. <code>RainDbMappedBatchMemoryManager</code> registers segments, enforces an optional byte budget, and disposes the map on LRU eviction (replacing the batch with a decoded copy). <strong>Do not dispose the reader while any scan still holds spans</strong> — eviction and table replacement coordinate lifetime.</p>
+<h3 id="what-stays-copied">What stays copied</h3>
+<p>Within the same mmap reader, <strong>UTF-8</strong> (kinds 2 and 3) and <strong>dictionary Int32</strong> (kind 4) still copy index/dictionary/blob bytes into managed arrays at hydrate time. Only plain fixed-width value regions (and in-map null bitmaps for kind 1) avoid a userspace copy on load.</p>
+<table class="table">
+<thead>
+<tr>
+<th>Chunk after batch mmap</th>
+<th>Values backing</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Kind 1 fixed-width</td>
+<td>Mapped slice</td>
+</tr>
+<tr>
+<td>Kind 2 / 3 UTF-8</td>
+<td>Copied <code>byte[]</code> (+ offsets array for Arrow)</td>
+</tr>
+<tr>
+<td>Kind 4 dict Int32</td>
+<td>Copied dictionary + indices; <code>Values</code> lazy materializes</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="chapter-summary">4.25 Chapter summary</h2>
 <table class="table">
 <thead>
 <tr>
@@ -1335,6 +1436,10 @@ BitConverter.GetBytes(value).CopyTo(buffer, offset);
 <td>Validated immutable storage for numeric/bool columns</td>
 </tr>
 <tr>
+<td><code>DictionaryEncodedInt32ColumnChunk</code></td>
+<td>Int32 dictionary + indices; materializes on <code>Values</code></td>
+</tr>
+<tr>
 <td><code>Utf8ColumnChunk</code></td>
 <td>Offset-indexed UTF-8 blob (Arrow-style)</td>
 </tr>
@@ -1345,6 +1450,10 @@ BitConverter.GetBytes(value).CopyTo(buffer, offset);
 <tr>
 <td><code>PooledFixedWidthColumnChunk</code></td>
 <td>Rented buffers for query output; must dispose</td>
+</tr>
+<tr>
+<td>Mapped kind-1 via <code>RainDbBatchMmapReader</code></td>
+<td><code>FixedWidthColumnChunk</code> slices into <code>.batch</code> mmap</td>
 </tr>
 <tr>
 <td><code>MemoryMarshal.Cast</code></td>
@@ -1790,7 +1899,35 @@ BitConverter.GetBytes(value).CopyTo(buffer, offset);
                         </li>
                         
                         <li class="toc-h2">
-                          <a href="#422-chapter-summary">4.22 Chapter summary</a>
+                          <a href="#423-dictionaryencodedint32columnchunk-lazy-materialization">4.23 DictionaryEncodedInt32ColumnChunk — lazy materialization</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#layout-and-validation">Layout and validation</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#why-lazy">Why lazy ?</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#write-path-coupling">Write path coupling</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#424-mapped-fixed-width-columns-from-batch-mmap">4.24 Mapped fixed-width columns from batch mmap</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#lifetime-rules">Lifetime rules</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#what-stays-copied">What stays copied</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#425-chapter-summary">4.25 Chapter summary</a>
                         </li>
                         
                   </ul>

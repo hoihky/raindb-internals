@@ -64,7 +64,7 @@ Without statistics, CBO collapses to uniform-distribution guesses. Production sy
 - Min/max for range filters
 - Histograms where distributions skew
 
-RainDB has no CBO yet — `DefaultSqlCompiler` always picks hash join. Phase B introduces heuristics; Phase E feeds statistics into better choices.
+RainDB has no CBO yet — `HeuristicJoinAlgorithmSelector` picks hash versus sort-merge from row-count ratio, but there are no histograms or join-order search. Phase E statistics would feed a future cost model; **WAL**, full **LINQ** translation, and **EXPLAIN ANALYZE** timers remain on the roadmap. **Correlated subqueries** work on single-table scan outers; correlated predicates with join outer context are still unsupported.
 
 ## 15.3 Statistics and histograms
 
@@ -234,7 +234,7 @@ These concerns span the roadmap's security track. They need not block core engin
 
 # Part II — RainDB
 
-RainDB is an actively developed embedded OLAP prototype. Much of the execution stack is real — columnar storage, vectorized scan, hash aggregation, inner joins, sort/limit, strict SQL compilation, and directory-backed persistence. Other surfaces are **interfaces and stubs** that document where the engine is headed without pretending the feature ships today.
+RainDB is an actively developed embedded OLAP prototype. The execution stack is real — columnar storage, vectorized scan, hash aggregation, joins (inner and outer), sort/limit, rule-based logical rewrites, prepared SQL, `EXPLAIN`, scalar expressions, `HAVING`, `UNION`/`UNION ALL`, subqueries, `DISTINCT`, mmap batch hydration with an optional memory budget, and partial Int32 dictionary encoding on write. **Interfaces and stubs** remain for WAL, cost-based optimization, LINQ lowering, real spill merge, and `EXPLAIN ANALYZE` timing.
 
 This part collects those extension points: the phased development roadmap, spill infrastructure, the LINQ compiler stub, plan-cache hooks, column encodings, observability plans, and a practical guide for extending this book when new phases land.
 
@@ -305,9 +305,9 @@ BenchmarkDotNet projects for scan, filter+project, hash agg, hash join, sort/top
 
 **Goal:** Reduce per-query overhead without a full cost-based optimizer.
 
-### B1. Logical rewrite (rule-based optimizer v0)
+### B1. Logical rewrite (rule-based optimizer v0) — **IMPLEMENTED**
 
-Single pass over logical IR:
+Single pass over logical IR (`LogicalRewritePipeline` in `SqlCompilationService`):
 
 - Predicate pushdown to scan/join sides
 - Projection pruning (drop unread columns early)
@@ -315,19 +315,13 @@ Single pass over logical IR:
 
 Keep rules testable with golden logical plans before/after rewrite.
 
-### B2. Physical choices (heuristics)
+### B2. Physical choices (heuristics) — **IMPLEMENTED**
 
-Today `DefaultSqlCompiler` hard-codes hash join:
+`HeuristicJoinAlgorithmSelector` chooses hash versus sort-merge from probe/build row-count ratio at physical bind time. `JoinPhysicalPlan.Explain()` includes the selected algorithm. Future CBO would replace ratio heuristics with statistics-driven costs.
 
-```csharp
-LogicalInnerJoin j => LogicalJoinBinder.BindAndLower(j, catalog, PhysicalJoinAlgorithm.Hash, _defaultScanOptions),
-```
+### B3. Prepared execution and plan cache — **IMPLEMENTED**
 
-Future: choose hash vs sort-merge using sorted-input hints or row-count estimates. `IPhysicalPlan.Explain()` must show the choice.
-
-### B3. Prepared execution and plan cache
-
-**Compile once:** parse + bind + optional rewrite → cached `IPhysicalPlan`.
+**Compile once:** parse + bind + rewrite → cached `IPhysicalPlan` via `ISqlCompiler.PrepareAsync` and `CompiledSqlCache` keyed by SQL + `CatalogSchemaFingerprint`.
 
 Cache key candidates:
 
@@ -351,25 +345,13 @@ public int BumpSchemaVersion()
 }
 ```
 
-Prepared statement API sketch (not implemented):
+`IPreparedSqlStatement` binds `@param` values through `LogicalParameterBinder` before execution. Cache invalidation follows `MemoryTable.SchemaVersion` on referenced tables. Second execution skips parse and full bind when the cache hits.
 
-```csharp
-// (planned) src/RainDB.Sql/Compilation/PreparedStatement.cs
-public sealed class PreparedStatement
-{
-    public IPhysicalPlan Plan { get; }
-    public int CompiledAtSchemaVersion { get; }
-    public void BindParameters(IReadOnlyDictionary<string, object> values);
-}
-```
+### B4. Explain and introspection — **IMPLEMENTED**
 
-Second execution of the same prepared statement should skip `SqlParser.Parse` and binder work; only parameter slots in `ColumnCompareFilter` change.
+SQL `EXPLAIN`, `EXPLAIN LOGICAL`, and `EXPLAIN PHYSICAL` compile to `ExplainBundlePhysicalPlan` and return `ExplainTextQueryResult` with formatted logical and physical plan text.
 
-### B4. Explain and introspection
-
-Structured `EXPLAIN` returning logical + physical text. `LogicalTableScan.Explain()` and `HashAggregatePhysicalPlan.Explain()` already produce strings — SQL `EXPLAIN` would surface them.
-
-Optional `EXPLAIN ANALYZE` with operator timers (can start as no-op stubs).
+**Not implemented:** `EXPLAIN ANALYZE` with per-operator timers (roadmap / Phase F observability).
 
 **Phase B out of scope:** Histogram join ordering, adaptive mid-query re-optimization.
 
@@ -384,13 +366,13 @@ Optional `EXPLAIN ANALYZE` with operator timers (can start as no-op stubs).
 - Hydration maps batch files instead of `File.ReadAllBytes` where format allows
 - Scan engine reads through mapped spans without extra copy
 
-### C2. Buffer manager v0
+### C2. Buffer manager v0 — **IMPLEMENTED**
 
-Central policy for mapped regions, pin/unpin, configurable memory cap, naive LRU eviction per table.
+`RainDbMappedBatchMemoryManager` tracks resident mmap bytes; `RainDbFileDatabaseOptions.MappedBatchMemoryBudgetBytes` with `EvictColdBatches` or `Fail`. Scans notify LRU via `IMappedBatchScanObserver` on `RainDbExecutionContext`. See Chapter 16.
 
-### C3. Column encodings
+### C3. Column encodings — **partial (IMPLEMENTED for Int32 dictionary on write)**
 
-Dictionary encoding and lightweight integer compression on write; transparent decode in scan.
+Batch kind `KindDictInt32`: dictionary plus narrow indices for low-cardinality `Int32` columns when smaller than raw; `DictionaryEncodedInt32ColumnChunk` materializes on `Values` access. Toggle with `EnableInt32DictionaryEncoding`. Broader UTF-8 dictionary and integer compression remain future work.
 
 Extension requirements:
 
@@ -418,18 +400,18 @@ Formalize ordering: batch durable before catalog references it (or defined recov
 
 Sequence inside Phase D (each slice: parser → logical IR → binder → physical plan → tests):
 
-| Slice | Features |
-|-------|----------|
-| D1 | Scalar expressions: arithmetic, `CASE`, casts |
-| D2 | `HAVING`, `DISTINCT`, `COUNT(DISTINCT)`, broader `MIN`/`MAX` types |
-| D3 | Outer joins, `UNION ALL` / `UNION` |
-| D4 | Subqueries: `IN`, `EXISTS` (uncorrelated first) |
-| D5 | `ORDER BY` / `LIMIT` with `GROUP BY` |
-| D6 | `DATE`/`TIMESTAMP`, `COALESCE`, `LIKE` |
+| Slice | Features | Status |
+|-------|----------|--------|
+| D1 | Scalar expressions: arithmetic, `CASE`, casts in `WHERE`/`SELECT`/`ORDER BY` | **IMPLEMENTED** — Chapter 17 |
+| D2 | `HAVING`, broader `MIN`/`MAX` types | **IMPLEMENTED** |
+| D3 | Outer joins (`LEFT`/`RIGHT`/`FULL`), `UNION ALL` | **IMPLEMENTED** |
+| D4 | Uncorrelated `IN`/`EXISTS`, derived tables `FROM (SELECT …)` | **IMPLEMENTED** |
+| D5 | `SELECT DISTINCT`, `COUNT(DISTINCT)`, dedup `UNION`, correlated `EXISTS`/`IN` on scans, `GROUP BY` + `ORDER BY`/`LIMIT` | **IMPLEMENTED** (correlated on join outers **not** supported) |
+| D6 | `DATE`/`TIMESTAMP`, `COALESCE`, `LIKE` | planned |
 
-**Exit criteria:** Programming Guide strict SQL section updated; `samples/sql/` grows per milestone.
+**Exit criteria:** Programming Guide strict SQL section updated; `samples/sql/` grows per milestone (through `22_*.sql` for current analytics batch).
 
-**Out of scope:** Window functions (Phase E), nested struct/array types.
+**Out of scope:** Window functions (Phase E), nested struct/array types, correlated subqueries referencing join outer rows as a unit.
 
 ## 15.16 Phase E — Advanced analytics
 
@@ -599,7 +581,7 @@ SQL and LINQ differ only at the front. Once logical IR is built, catalog binding
 
 ## 15.21 Plan cache design notes
 
-No plan cache ships yet. Recommended design when implementing Phase B3:
+`CompiledSqlCache` ships with Phase B3. Design notes for extensions:
 
 ### Cache entry
 
@@ -686,7 +668,7 @@ From the roadmap "all phases" table:
 | Milestone | Indicator |
 |-----------|-----------|
 | Embedded analytics MVP | Prepared SQL + top-N + mmap scans on 100M rows within RAM budget |
-| BI-shaped SQL | Expressions, `HAVING`, outer joins, `UNION ALL` with tests |
+| BI-shaped SQL | Expressions, `HAVING`, outer joins, `UNION`/`UNION ALL`, subqueries — **largely met** (Phase D); correlated join outers still open |
 | Larger than RAM | Spilling hash agg/join passes correctness suite |
 | Production embed | WAL recovery + single-writer / multi-reader documented |
 
@@ -699,7 +681,7 @@ From the roadmap "all phases" table:
 | Phase 0–1 (foundations, read path) | Complete; Phase A extends |
 | Phase 2 (agg, join, sort) | Complete in-memory; A + E2 mature |
 | Phase 2b (directory persistence) | MVP complete; C + F harden |
-| Phase 3 (planning & SQL) | B + D |
+| Phase 3 (planning & SQL) | B + D (**B1–B4, D1–D5 implemented**; D6 and CBO timers remain) |
 | Phase 4 (LINQ) | G1 |
 | Phase 5 (durability & stats) | C4, E3, F |
 
@@ -711,7 +693,7 @@ When a roadmap phase ships substantial code, add material without restructuring 
 
 | Change size | Book action |
 |-------------|-------------|
-| New operator (e.g., window) | New chapter with `order` after 16, or appendix under `content/appendix/` |
+| New operator (e.g., window) | New chapter with `order` after 17, or appendix under `content/appendix/` |
 | Incremental improvement (top-N heap) | Expand existing chapter (e.g., 12) |
 | New storage layer (WAL) | New chapter after persistence / mmap |
 | Stub → real feature | Remove **(planned)** markers; add worked example |
@@ -739,7 +721,8 @@ Each new chapter should include:
 | mmap storage integration | C1 | Ch. 14, Ch. 16 |
 | WAL and MVCC | F | Ch. 14 |
 | LINQ provider | G1 | Ch. 13 |
-| Cost-based optimizer | B2+ | Ch. 7, 13 |
+| Advanced SQL (DISTINCT, subqueries) | D | Ch. 17 |
+| Cost-based optimizer | E3+ | Ch. 7, 13, 15 |
 | Window functions | E1 | Ch. 12 |
 | Column encodings | C3 | Ch. 4, 14 |
 | Observability | F3 | Ch. 7 |
@@ -776,4 +759,4 @@ Not absolute machine paths. Match existing chapters 1–12 style.
 
 ## 15.30 Summary
 
-**Part I** surveyed production OLAP requirements: cost-based optimization, statistics and histograms, spill algorithms, observability, format versioning, scheduling, and adaptive execution concepts. **Part II** mapped those ideas onto RainDB's phased roadmap — `ISpillWriter` and `SpillPartialEntryThreshold` wire telemetry today; `DefaultLinqCompiler` marks the LINQ insertion point; `MemoryTable.SchemaVersion` awaits a plan cache; Phases C and G add mmap, encodings, WAL, and host integration. When features land, extend this book using the chapter map in §15.27 — the narrative from OLAP fundamentals through SQL compilation and persistence remains the spine; new chapters attach at the leaves.
+**Part I** surveyed production OLAP requirements: cost-based optimization, statistics and histograms, spill algorithms, observability, format versioning, scheduling, and adaptive execution concepts — with RainDB still targeting **WAL**, **CBO**, **LINQ**, and **EXPLAIN ANALYZE** timers rather than claiming they ship. **Part II** mapped those ideas onto RainDB's phased roadmap: Phase **B1–B4** and **D1–D5** are implemented (see Chapter 17); **C2** and partial **C3** harden mmap and Int32 dictionary encoding; `ISpillWriter` remains a telemetry hook; `DefaultLinqCompiler` marks the LINQ insertion point. When features land, extend this book using the chapter map in §15.27 — the narrative from OLAP fundamentals through SQL compilation, persistence, and analytics SQL remains the spine; new chapters attach at the leaves.

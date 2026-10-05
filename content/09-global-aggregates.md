@@ -5,9 +5,9 @@ order: 9
 
 # Chapter 9: Global Aggregates
 
-A query like `SELECT SUM(amount) FROM sales WHERE region = 'us'` collapses an entire table (after filtering) into a single scalar. In relational algebra this is aggregation without a grouping key list — one implicit group containing every qualifying row. RainDB handles this path inside `VectorizedScanEngine` rather than spinning up a hash aggregator: there is exactly one group, so a map-reduce over columnar batches is both simpler and faster than maintaining a hash table with one entry.
+A query like `SELECT SUM(amount) FROM sales WHERE region = 'us'` collapses an entire table (after filtering) into a single scalar. In relational algebra this is aggregation without a grouping key list — one implicit group containing every qualifying row. RainDB handles this path inside the vectorized scan operator rather than spinning up a hash aggregator: there is exactly one group, so a map-reduce over columnar batches is both simpler and faster than maintaining a hash table with one entry.
 
-This chapter is split into two parts. **Part I** develops the theory: relational algebra's γ operator, SQL aggregate semantics, algebraic properties that enable parallel partial aggregation, distributed map-reduce patterns, NULL and empty-set behavior, and SIMD reduction. **Part II** walks through RainDB's concrete implementation — `PartialAgg`, `ComputeAggregateAsync`, AVX2 via `AggregateIntrinsics`, and the `IAggregateQueryResult` API boundary.
+This chapter is split into two parts. **Part I** develops the theory: relational algebra's γ operator, SQL aggregate semantics, algebraic properties that enable parallel partial aggregation, distributed map-reduce patterns, NULL and empty-set behavior, and SIMD reduction. **Part II** walks through RainDB's concrete implementation — `PartialAgg`, `ComputeAggregateAsync`, optional SIMD via `ColumnarAggregateIntrinsics`, operator wiring through `VectorizedScanOperator`, and the `IAggregateQueryResult` API boundary.
 
 ---
 
@@ -56,11 +56,11 @@ SQL aggregates consume a **multiset** of values drawn from the group. Duplicates
 | `MIN(expr)` | comparable | same as expr | yes |
 | `MAX(expr)` | comparable | same as expr | yes |
 
-RainDB Phase 1 ships `COUNT`, `SUM`, `MIN`, and `MAX`. You can compute an average yourself with `SUM(x) / COUNT(x)`; there is no dedicated `AVG` opcode yet.
+RainDB ships `COUNT`, `SUM`, `MIN`, and `MAX` on the global scan path. `MIN`/`MAX` on global aggregates are validated for `Float64` measure columns at plan time (grouped hash aggregation supports a wider type set — see Chapter 10). You can compute an average with `SUM(x) / COUNT(x)`; there is no dedicated `AVG` opcode.
 
 ### Set vs bag semantics
 
-`SUM(amount)` over `(10, 10, 5)` is `25`. The engine does not deduplicate unless you ask it to with `COUNT(DISTINCT col)` or similar — not implemented in RainDB today.
+`SUM(amount)` over `(10, 10, 5)` is `25`. The engine does not deduplicate unless you ask with `COUNT(DISTINCT col)` on the grouped path.
 
 ### Filter interaction
 
@@ -136,7 +136,7 @@ The pattern matches distributed frameworks, except the group key is always the e
 
 ### Why not hash for global agg?
 
-A hash table keyed by "the one group" still pays for hashing, pointer chasing, and bucket management. When `|G| = 0`, fusion into the scan wins. `VectorizedScanEngine.ComputeAggregateAsync` is the fused path.
+A hash table keyed by "the one group" still pays for hashing, pointer chasing, and bucket management. When `|G| = 0`, fusion into the scan wins. `VectorizedScanOperator.ComputeAggregateAsync` is the fused path.
 
 ## 9.5 Partial aggregation in distributed systems
 
@@ -156,7 +156,7 @@ RainDB mirrors this inside one process: each columnar batch is a partition, `Par
 ### Two-level parallelism
 
 1. **Morsel parallelism** — process batches on different threads (`Parallel.For` or channel workers).
-2. **Intra-batch SIMD** — AVX2 horizontal sum on dense, null-free `Float64` columns.
+2. **Intra-batch SIMD** — AVX2 horizontal sum/min/max on dense, null-free columns when scan options allow.
 
 Combine stays serial. That is fine when batch count is tiny compared to row count.
 
@@ -170,7 +170,7 @@ Predicates use three-valued logic (`TRUE`, `FALSE`, `UNKNOWN`). Aggregates use a
 |------|--------|-----------------|
 | `COUNT(*)` | rows in group | irrelevant |
 | `COUNT(col)` | rows where `col IS NOT NULL` | excluded |
-| `COUNT(DISTINCT col)` | distinct non-null values | excluded (not in RainDB yet) |
+| `COUNT(DISTINCT col)` | distinct non-null values | grouped path only |
 
 `COUNT(expr)` is never NULL. Zero rows → `0`.
 
@@ -189,7 +189,7 @@ else:
     emit computed value
 ```
 
-RainDB's `PartialAgg.ContributingRows` and `HasMin`/`HasMax` encode this contract.
+RainDB's `PartialAgg.ContributingRows` and `HasMin`/`HasMax` encode this contract on the global path. Grouped aggregates write null bits on output column chunks using the same rules (Chapter 10).
 
 ## 9.7 Empty set semantics
 
@@ -220,64 +220,46 @@ To sum `n` doubles:
 
 Still O(n) work, but higher throughput. On wide analytic columns, memory bandwidth usually caps you before ALU throughput.
 
-### Preconditions for safe SIMD sum
+### Preconditions for safe SIMD aggregates
 
 | Condition | Reason |
 |-----------|--------|
 | No NULLs | Null bitmap needs masking or gather |
 | Dense row order | No selection-vector indirection |
-| Fixed width | Known stride (`sizeof(double)`) |
+| Fixed width | Known stride (`sizeof(double)` / `sizeof(int)`) |
 | Associative FP caveat | Reordering changes rounding bits |
 
-RainDB enables AVX2 only when `!col.HasNulls && selectedRows.IsEmpty && options.UseAvx2DoubleSum`.
+RainDB enables SIMD only when `!col.HasNulls && selectedRows.IsEmpty` and the matching `VectorizedScanExecutionOptions` flag is set (`UseAvx2DoubleSum`, `UseAvx2DoubleMinMax`, or `UseAvx2IntegerSum`).
 
 ### Gather vs contiguous load
 
 A `WHERE` clause builds a **selection vector** of row indices. Contiguous SIMD loads assume row `i` lives at offset `i`. With filtering, you either gather indirectly or stay scalar. RainDB chooses scalar for filtered paths — gather setup often loses on small selections.
 
-### Other SIMD opportunities (not yet in RainDB)
+### SIMD coverage in RainDB
 
-- `MIN`/`MAX` on floats via `vminpd`/`vmaxpd`
-- Integer `SUM` with widening (`vpmovzx` + `vpaddq`)
-- `COUNT` via popcount on known-non-null bitmaps
-
-`AggregateIntrinsics` in RainDB.Core implements AVX2 `SumFloat64` today; min/max helpers exist but run scalar.
+`ColumnarAggregateIntrinsics` in `src/RainDB.Core/Columnar/` implements `SumFloat64`, `MinFloat64`, `MaxFloat64` (AVX2 when available), plus `SumInt32` (Vector128 lanes) and `SumInt64` (AVX2). The scan operator calls these through `QueryOperatorDependencies.Aggregates` when the fast-path preconditions hold.
 
 ---
 
 # Part II: RainDB Implementation
 
-## 9.9 Where global aggregates live
+## 9.9 Operator model and entry point
 
-Global aggregates are not a separate physical operator. The scan physical plan carries an optional `Aggregate` field; when it is set, `ExecuteAsync` routes to `ComputeAggregateAsync` instead of projecting batches.
+Physical execution is organized around **instance operator classes** injected through `IQueryOperatorSuite` / `DefaultQueryOperatorSuite` into `DefaultQueryExecutor`. Global aggregation lives in `VectorizedScanOperator` (`src/RainDB.Query/Execution/VectorizedScanEngine.cs`), which implements `IVectorizedScanOperator`.
+
+Shared columnar helpers — selection, projection, join materialization, sort top-N, group keys, and **`IColumnarAggregateIntrinsics`** — are bundled in internal `QueryOperatorDependencies` (`src/RainDB.Query/Execution/Operators/QueryOperatorDependencies.cs`). The default aggregate implementation is `ColumnarAggregateIntrinsics`.
+
+When `VectorizedScanPhysicalPlan.Aggregate` is set, `ExecuteAsync` routes to `ComputeAggregateAsync` instead of projecting batches:
 
 ```csharp
-// src/RainDB.Query/Execution/VectorizedScanEngine.cs
-public static async ValueTask<IQueryResult> ExecuteAsync(
-    VectorizedScanPhysicalPlan plan,
-    IColumnarTableSource table,
-    IExecutionContext context)
-{
-    ArgumentNullException.ThrowIfNull(plan);
-    ArgumentNullException.ThrowIfNull(table);
-    ArgumentNullException.ThrowIfNull(context);
-    ValidatePlan(plan, table);
-
-    if (plan.Aggregate is { } agg)
-        return await ComputeAggregateAsync(plan, table, agg, context).ConfigureAwait(false);
-
-    var batches = await ProjectAllBatchesAsync(plan, table, context).ConfigureAwait(false);
-    return new ColumnarMaterializedQueryResult(batches);
-}
+// src/RainDB.Query/Execution/VectorizedScanEngine.cs — VectorizedScanOperator.ExecuteAsync
+if (plan.Aggregate is { } agg)
+    return await ComputeAggregateAsync(plan, table, agg, context).ConfigureAwait(false);
 ```
 
-The result type changes: callers receive `IAggregateQueryResult` (wrapped in `IQueryResult`) rather than `IColumnarQueryResult`. The scalar value and a `ValueIsNull` flag encode SQL semantics at the API boundary.
+Callers receive `IAggregateQueryResult` (as `IQueryResult`) rather than `IColumnarQueryResult`. The scalar value and `ValueIsNull` encode SQL semantics at the API boundary.
 
-`DefaultQueryExecutor` dispatches `VectorizedScanPhysicalPlan` to this engine without inspecting aggregate presence — the engine branches internally.
-
-## 9.10 AggregateSpec and physical plan
-
-`AggregateSpec` is defined alongside `VectorizedScanPhysicalPlan`:
+## 9.10 AggregateSpec and execution options
 
 ```csharp
 // src/RainDB.Query/Plans/VectorizedScanPhysicalPlan.cs
@@ -289,30 +271,13 @@ public readonly record struct AggregateSpec(int SourceColumnIndex, AggregateKind
 | `SourceColumnIndex` | Column to measure; **-1** means `COUNT(*)` |
 | `Kind` | `Count`, `Sum`, `Min`, or `Max` |
 
-`AggregateKind` lives in `src/RainDB.Abstractions/Execution/AggregateKind.cs`:
+`AggregateKind` is defined in `src/RainDB.Abstractions/Execution/AggregateKind.cs`. `ValidatePlan` enforces type/kind compatibility before parallel work:
 
-```csharp
-public enum AggregateKind
-{
-    None,
-    Sum,
-    Min,
-    Max,
-    /// <summary>COUNT(*) uses SourceColumnIndex -1; COUNT(col) uses the column index.</summary>
-    Count,
-}
-```
+- `Sum` → `Int32`, `Int64`, or `Float64`
+- `Min` / `Max` → **`Float64` only** on the global scan path
+- `Count` → any column type, or index -1 for star
 
-Validation in `ValidatePlan` enforces type/kind compatibility before any parallel work begins:
-
-- `Sum` requires `Int32`, `Int64`, or `Float64`
-- `Min` / `Max` require `Float64` only
-- `Count` accepts any column type (or -1 for star)
-- A negative `SourceColumnIndex` is rejected unless `Kind == Count`
-
-The SQL binder (`LogicalTableScanBinder` in `src/RainDB.Sql/Compilation/`) produces these specs from `SELECT SUM(x), COUNT(*), ...` without a `GROUP BY` clause.
-
-### Execution options
+The SQL binder (`LogicalTableScanBinder` in `src/RainDB.Sql/Compilation/`) produces these specs from `SELECT` without `GROUP BY`.
 
 ```csharp
 // src/RainDB.Query/Plans/VectorizedScanPhysicalPlan.cs
@@ -321,425 +286,105 @@ public readonly record struct VectorizedScanExecutionOptions
     public int MaxDegreeOfParallelism { get; init; }  // -1 = ProcessorCount
     public bool UseChannelScheduler { get; init; }
     public bool UseAvx2DoubleSum { get; init; }
+    public bool UseAvx2DoubleMinMax { get; init; }
+    public bool UseAvx2IntegerSum { get; init; }
 }
 ```
+
+`UseAvx2DoubleMinMax` gates full-column, null-free `Min`/`Max` on `Float64`. `UseAvx2IntegerSum` gates the same shape of fast path for `Sum` on `Int32`/`Int64`.
 
 ## 9.11 ComputeAggregateAsync: map-reduce over batches
 
+`ComputeAggregateAsync` allocates one `PartialAgg` per source batch, fills them in parallel (when `MaxDegreeOfParallelism` allows), then folds with `PartialAgg.Combine` and `ToResult`.
+
+Empty table short-circuits to `EmptyAggregate` before any partial work — `COUNT` returns 0 with `ValueIsNull: false`; `SUM`/`MIN`/`MAX` return placeholders with `ValueIsNull: true`.
+
+Scheduling mirrors non-aggregate projection: sequential loop, `Parallel.For`, or `RunChannelMorselsAsync` when `UseChannelScheduler` is true. Each worker writes to `partials[i]` with no locking.
+
+## 9.12 PartialAgg accumulator
+
+`PartialAgg` is a private `readonly struct` inside `VectorizedScanOperator` holding:
+
+- `ContributingRows` — non-null operands for `SUM` / `MIN` / `MAX`
+- `FloatSum`, `IntSum` — numeric sums
+- `FloatMin`, `FloatMax`, `HasMin`, `HasMax` — `Float64` extrema
+- `CountAgg` — `COUNT(*)` and `COUNT(col)`
+
+`Combine` is associative per `AggregateKind`. `CombineMinMax` treats a side with `HasMin == false` as identity so an all-null batch does not poison a merge.
+
+## 9.13 Per-batch accumulation and filters
+
+`AccumulateAggregateBatch` distinguishes `COUNT(*)` (filtered row count) from `COUNT(col)` (non-null count via null bitmap). When `plan.Filters` is non-empty, `SelectionEvaluator.FillSelectedRowsConjunctive` fills a rented `int[]` selection buffer; when filters are absent, iteration is dense (`selectedRows` empty, `k = batch.RowCount`).
+
+`FromColumn` dispatches `Sum` / `Min` / `Max` by physical type. Integer sums widen into `long` in `IntSum`.
+
+## 9.14 SIMD fast paths
+
+Fast paths share the same predicate: **no selection vector, no nulls, option flag enabled**.
+
+**Float64 sum** — `deps.Aggregates.SumFloat64(values, allowAvx2: true)` when `UseAvx2DoubleSum`.
+
+**Float64 min/max** — `MinFloat64` / `MaxFloat64` when `UseAvx2DoubleMinMax`:
+
 ```csharp
-// src/RainDB.Query/Execution/VectorizedScanEngine.cs
-private static async ValueTask<IAggregateQueryResult> ComputeAggregateAsync(
-    VectorizedScanPhysicalPlan plan,
-    IColumnarTableSource table,
-    AggregateSpec spec,
-    IExecutionContext context)
+// src/RainDB.Query/Execution/VectorizedScanEngine.cs — MinMaxFloat64 (excerpt)
+if (selectedRows.IsEmpty && !col.HasNulls && options.UseAvx2DoubleMinMax)
 {
-    var batches = table.Batches;
-    var n = batches.Count;
-    var ct = context.CancellationToken;
-    if (n == 0)
-        return EmptyAggregate(spec, table.Schema);
-
-    var dop = EffectiveDop(plan.Options.MaxDegreeOfParallelism);
-    var partials = new PartialAgg[n];
-    if (dop <= 1 || n == 1)
-    {
-        for (var i = 0; i < n; i++)
-            partials[i] = AccumulateAggregateBatch(plan, batches[i], spec, plan.Options);
-    }
-    else if (plan.Options.UseChannelScheduler)
-    {
-        await RunChannelMorselsAsync(
-            n, dop,
-            i => partials[i] = AccumulateAggregateBatch(plan, batches[i], spec, plan.Options),
-            ct).ConfigureAwait(false);
-    }
-    else
-    {
-        Parallel.For(
-            0, n,
-            new ParallelOptions { MaxDegreeOfParallelism = dop, CancellationToken = ct },
-            i => partials[i] = AccumulateAggregateBatch(plan, batches[i], spec, plan.Options));
-    }
-
-    var combined = partials[0];
-    for (var i = 1; i < n; i++)
-        combined = PartialAgg.Combine(combined, partials[i], spec.Kind);
-
-    var resultType = spec.SourceColumnIndex >= 0
-        ? table.Schema.Columns[spec.SourceColumnIndex].Type
-        : RainDbType.Int64;
-    return combined.ToResult(resultType, spec.Kind);
+    var x = kind == AggregateKind.Min
+        ? deps.Aggregates.MinFloat64(values, allowAvx2: true)
+        : deps.Aggregates.MaxFloat64(values, allowAvx2: true);
+    // PartialAgg with HasMin/HasMax set, ContributingRows = selectedCount
 }
 ```
 
-**Map:** `AccumulateAggregateBatch` per batch index.
+**Int32 / Int64 sum** — `SumInt32` / `SumInt64` when `UseAvx2IntegerSum`.
 
-**Reduce:** sequential `PartialAgg.Combine` fold.
+Otherwise scalar loops skip nulls via `deps.Selection.IsNull`. Filtered batches always take the scalar path.
 
-**Empty table:** `EmptyAggregate` before any partial allocation.
+`ColumnarAggregateIntrinsics` (`src/RainDB.Core/Columnar/ColumnarAggregateIntrinsics.cs`) uses AVX2 `Add`/`Min`/`Max` on `Vector256<double>` with a scalar tail. Integer `SumInt32` uses Vector128 loads; `SumInt64` uses AVX2 add. Hardware absence or `allowAvx2: false` falls back to scalar loops in the same class.
 
-## 9.12 EmptyAggregate: SQL empty-input rules
+## 9.15 ToResult and AggregateQueryResult
 
-```csharp
-private static IAggregateQueryResult EmptyAggregate(AggregateSpec spec, TableSchema schema)
-{
-    var columnType = spec.SourceColumnIndex >= 0
-        ? schema.Columns[spec.SourceColumnIndex].Type
-        : RainDbType.Int64;
-    return spec.Kind switch
-    {
-        AggregateKind.Count =>
-            new AggregateQueryResult(RainDbType.Int64, 0d, 0L, 0, valueIsNull: false),
-        AggregateKind.Sum when columnType == RainDbType.Float64 =>
-            new AggregateQueryResult(RainDbType.Float64, 0d, 0L, 0, valueIsNull: true),
-        AggregateKind.Sum =>
-            new AggregateQueryResult(RainDbType.Int64, 0d, 0L, 0, valueIsNull: true),
-        AggregateKind.Min or AggregateKind.Max when columnType == RainDbType.Float64 =>
-            new AggregateQueryResult(RainDbType.Float64, 0d, 0L, 0, valueIsNull: true),
-        _ => throw new InvalidOperationException("Unsupported empty aggregate."),
-    };
-}
-```
+`AggregateQueryResult` (`src/RainDB.Query/Results/ColumnarAndAggregateResults.cs`) always reports `RowCount = 1`. `ToResult` sets `ValueIsNull` when:
 
-| Aggregate | Empty table | `ValueIsNull` |
-|-----------|-------------|---------------|
-| `COUNT(*)` / `COUNT(col)` | `0` | `false` |
-| `SUM` / `MIN` / `MAX` | placeholder | `true` |
+- `SUM`: `ContributingRows == 0`
+- `MIN`/`MAX`: `!HasMin` / `!HasMax`
+- `COUNT`: never null
 
-## 9.13 PartialAgg: private accumulator struct
+`EmptyAggregate` handles zero batches before any partial exists — distinct from "rows exist but all measures are null."
 
-```csharp
-private readonly struct PartialAgg
-{
-    public readonly long ContributingRows;
-    public readonly double FloatSum;
-    public readonly double FloatMin;
-    public readonly double FloatMax;
-    public readonly long IntSum;
-    public readonly bool HasMin;
-    public readonly bool HasMax;
-    public readonly long CountAgg;
-}
-```
+## 9.16 Global vs grouped aggregates
 
-| Field | Used by |
-|-------|---------|
-| `ContributingRows` | `SUM`, `MIN`, `MAX` — non-null value count |
-| `FloatSum` | `SUM` on `Float64` |
-| `IntSum` | `SUM` on `Int32` / `Int64` |
-| `FloatMin` / `HasMin` | `MIN` on `Float64` |
-| `FloatMax` / `HasMax` | `MAX` on `Float64` |
-| `CountAgg` | `COUNT(*)` and `COUNT(col)` |
+| Aspect | Global (`PartialAgg`) | Grouped (`AggregateAccumulator`, Ch. 10) |
+|--------|------------------------|------------------------------------------|
+| Scope | One combined result | One accumulator per group key |
+| `MIN`/`MAX` types | `Float64` only (scan validation) | `Int32`, `Int64`, `Float64`, `Utf8` |
+| NULL output | `IAggregateQueryResult.ValueIsNull` | Null bits on aggregate columns in `ColumnarBatch` |
+| Operator | `VectorizedScanOperator` | `HashAggregateOperator` |
 
-One struct for all kinds avoids virtual dispatch. `readonly struct` enables stack allocation and copy-by-value combine without heap churn.
+Grouped null semantics: `ShouldEmitAggregateNull` in hash aggregation mirrors `ToResult` — all-null measure values in a group yield NULL for `SUM`/`MIN`/`MAX`, while `COUNT(col)` stays `0` without a null bit and `COUNT(*)` counts rows in the group.
 
-### Factory methods
-
-**`FromCountStar`** — filtered row count only:
-
-```csharp
-public static PartialAgg FromCountStar(int selectedRowCount) =>
-    new PartialAgg(0, 0d, 0d, 0d, 0L, false, false, selectedRowCount);
-```
-
-**`FromCountColumn`** — skips nulls via null bitmap:
-
-```csharp
-public static PartialAgg FromCountColumn(IColumnChunk col, ReadOnlySpan<int> selectedRows, int selectedCount)
-{
-    var nb = col.HasNulls ? col.NullBitmap.Span : ReadOnlySpan<byte>.Empty;
-    long c = 0;
-    for (var i = 0; i < selectedCount; i++)
-    {
-        var r = Row(selectedRows, i);
-        if (!SelectionEvaluator.IsNull(nb, r, col.HasNulls))
-            c++;
-    }
-    return new PartialAgg(0, 0d, 0d, 0d, 0L, false, false, c);
-}
-```
-
-**`FromColumn`** — dispatches `Sum` / `Min` / `Max` by `col.PhysicalType`.
-
-Helper `Row(selectedRows, i)` returns `i` when `selectedRows` is empty (dense iteration).
-
-## 9.14 AccumulateAggregateBatch and filters
-
-```csharp
-private static PartialAgg AccumulateAggregateBatch(
-    VectorizedScanPhysicalPlan plan,
-    IColumnarBatch batch,
-    AggregateSpec spec,
-    VectorizedScanExecutionOptions options)
-{
-    if (spec.Kind == AggregateKind.Count && spec.SourceColumnIndex < 0)
-        return AccumulateFilteredRowCount(plan, batch);
-
-    if (spec.Kind == AggregateKind.Count)
-    {
-        // rent int[] selection buffer → FromCountColumn
-    }
-
-    // rent int[] selection buffer → FromColumn(measureCol, spec.Kind, sel, k, options)
-}
-```
-
-When `plan.Filters` is non-empty, `SelectionEvaluator.FillSelectedRowsConjunctive` writes qualifying row indices into a rented `ArrayPool<int>` buffer. When no filters exist, `k = batch.RowCount` and `selectedRows` is empty — dense path.
-
-Semantic distinction:
-
-- **`COUNT(*)`** — counts rows surviving `WHERE`
-- **`COUNT(col)`** — counts non-null `col` among those rows
-
-## 9.15 PartialAgg.Combine
-
-```csharp
-public static PartialAgg Combine(PartialAgg a, PartialAgg b, AggregateKind kind) =>
-    kind switch
-    {
-        AggregateKind.Sum => new PartialAgg(
-            a.ContributingRows + b.ContributingRows,
-            a.FloatSum + b.FloatSum,
-            0d, 0d,
-            a.IntSum + b.IntSum,
-            false, false, 0),
-        AggregateKind.Count => new PartialAgg(
-            0, 0d, 0d, 0d, 0L, false, false,
-            a.CountAgg + b.CountAgg),
-        AggregateKind.Min => CombineMinMax(a, b, isMin: true),
-        AggregateKind.Max => CombineMinMax(a, b, isMin: false),
-        _ => throw new ArgumentOutOfRangeException(nameof(kind), kind, null),
-    };
-```
-
-`CombineMinMax` handles identity (no extremum yet):
-
-```csharp
-if (!a.HasMin) return b;
-if (!b.HasMin) return a;
-return new PartialAgg(rows, 0d, Math.Min(a.FloatMin, b.FloatMin), 0d, 0L, true, false, 0);
-```
-
-If both sides are empty, combined partial has `HasMin == false` → `ToResult` emits NULL.
-
-## 9.16 ToResult and AggregateQueryResult
-
-```csharp
-// src/RainDB.Query/Results/ColumnarAndAggregateResults.cs
-public sealed class AggregateQueryResult : IAggregateQueryResult
-{
-    public AggregateQueryResult(
-        RainDbType resultType,
-        double float64Value,
-        long int64Value,
-        long contributingRowCount,
-        bool valueIsNull = false)
-    {
-        ResultType = resultType;
-        Float64Value = float64Value;
-        Int64Value = int64Value;
-        ContributingRowCount = contributingRowCount;
-        ValueIsNull = valueIsNull;
-        RowCount = 1;
-    }
-
-    public bool ValueIsNull { get; }
-    public long ContributingRowCount { get; }
-    // Float64Value / Int64Value — read based on ResultType
-}
-```
-
-`ToResult` mapping:
-
-```csharp
-AggregateKind.Sum when columnType == RainDbType.Float64 =>
-    new AggregateQueryResult(RainDbType.Float64, FloatSum, 0L, ContributingRows,
-        valueIsNull: ContributingRows == 0),
-AggregateKind.Min when columnType == RainDbType.Float64 =>
-    new AggregateQueryResult(RainDbType.Float64, HasMin ? FloatMin : 0d, 0L, ContributingRows,
-        valueIsNull: !HasMin),
-```
-
-`ContributingRows == 0` after combine means all-null or all-filtered measure column — not the empty-table path (handled by `EmptyAggregate`).
-
-## 9.17 SUM on Float64: scalar and AVX2 paths
-
-```csharp
-private static PartialAgg SumFloat64(
-    IColumnChunk col,
-    ReadOnlySpan<int> selectedRows,
-    int selectedCount,
-    ReadOnlySpan<byte> nb,
-    ReadOnlySpan<byte> values,
-    VectorizedScanExecutionOptions options)
-{
-    if (selectedCount == 0)
-        return new PartialAgg(0, 0d, 0d, 0d, 0L, false, false, 0);
-
-    if (selectedRows.IsEmpty && !col.HasNulls && options.UseAvx2DoubleSum)
-    {
-        var sum = AggregateIntrinsics.SumFloat64(values, allowAvx2: true);
-        return new PartialAgg(selectedCount, sum, 0d, 0d, 0L, false, false, 0);
-    }
-
-    double s = 0;
-    long contrib = 0;
-    for (var i = 0; i < selectedCount; i++)
-    {
-        var r = Row(selectedRows, i);
-        if (SelectionEvaluator.IsNull(nb, r, col.HasNulls))
-            continue;
-        var bits = BinaryPrimitives.ReadInt64LittleEndian(
-            values.Slice(r * sizeof(double), sizeof(double)));
-        s += BitConverter.Int64BitsToDouble(bits);
-        contrib++;
-    }
-    return new PartialAgg(contrib, s, 0d, 0d, 0L, false, false, 0);
-}
-```
-
-AVX2 activates when: no selection vector, no nulls, `UseAvx2DoubleSum == true`.
-
-Integer sums (`SumInt32`, `SumInt64`) always use scalar loops with null skipping; `Int32` widens into `long` accumulator.
-
-## 9.18 AggregateIntrinsics.SumFloat64
-
-```csharp
-// src/RainDB.Core/Columnar/AggregateIntrinsics.cs
-public static double SumFloat64(ReadOnlySpan<byte> valuesLittleEndian, bool allowAvx2 = true)
-{
-    if (valuesLittleEndian.Length % sizeof(double) != 0)
-        throw new ArgumentException("Length must be multiple of 8.", nameof(valuesLittleEndian));
-    var doubles = MemoryMarshal.Cast<byte, double>(valuesLittleEndian);
-    if (doubles.IsEmpty)
-        return 0d;
-    if (allowAvx2 && Avx2.IsSupported && doubles.Length >= Vector256<double>.Count)
-        return SumDoubleAvx2(doubles);
-    return SumDoubleScalar(doubles);
-}
-```
-
-AVX2 kernel:
-
-```csharp
-private static unsafe double SumDoubleAvx2(ReadOnlySpan<double> values)
-{
-    fixed (double* p = values)
-    {
-        var n = values.Length;
-        var i = 0;
-        var acc = Vector256<double>.Zero;
-        var limit = n - (n % Vector256<double>.Count);
-        for (; i < limit; i += Vector256<double>.Count)
-            acc = Avx2.Add(acc, Avx2.LoadVector256(p + i));
-
-        var lo = acc.GetLower();
-        var hi = acc.GetUpper();
-        var s128 = lo + hi;
-        var sum = s128.GetElement(0) + s128.GetElement(1);
-        for (; i < n; i++)
-            sum += p[i];
-        return sum;
-    }
-}
-```
-
-`MemoryMarshal.Cast<byte, double>` reinterprets the column buffer without copy. FP addition order differs from scalar path — acceptable for analytics; document for financial determinism requirements.
-
-`MinFloat64` / `MaxFloat64` exist in `AggregateIntrinsics` but global MIN/MAX use inline `MinMaxFloat64` in `PartialAgg`.
-
-## 9.19 MIN and MAX on Float64
-
-```csharp
-private static PartialAgg MinMaxFloat64(
-    AggregateKind kind,
-    ReadOnlySpan<int> selectedRows,
-    int selectedCount,
-    bool hasNulls,
-    ReadOnlySpan<byte> nb,
-    ReadOnlySpan<byte> values)
-{
-    double? cur = null;
-    long contrib = 0;
-    for (var i = 0; i < selectedCount; i++)
-    {
-        var r = Row(selectedRows, i);
-        if (SelectionEvaluator.IsNull(nb, r, hasNulls))
-            continue;
-        var bits = BinaryPrimitives.ReadInt64LittleEndian(
-            values.Slice(r * sizeof(double), sizeof(double)));
-        var v = BitConverter.Int64BitsToDouble(bits);
-        cur = cur.HasValue
-            ? kind == AggregateKind.Min ? Math.Min(cur.Value, v) : Math.Max(cur.Value, v)
-            : v;
-        contrib++;
-    }
-
-    if (!cur.HasValue)
-        return new PartialAgg(0, 0d, 0d, 0d, 0L, false, false, 0);
-    // ...
-}
-```
-
-## 9.20 Morsel parallelism
-
-`EffectiveDop` maps `MaxDegreeOfParallelism`: negative → `Environment.ProcessorCount`, zero → 1, positive → explicit cap.
-
-Three scheduling modes mirror non-aggregate projection:
-
-1. Sequential loop (`dop <= 1 || n == 1`)
-2. `Parallel.For` over batch indices
-3. `RunChannelMorselsAsync` — bounded channel work queue
-
-Each worker writes to `partials[i]` — no locks. `PartialAgg` is a value type; array slots are independent.
-
-## 9.21 Global vs grouped aggregates
-
-| Aspect | `PartialAgg` (global) | `AggregateAccumulator` (hash, Ch. 10) |
-|--------|------------------------|----------------------------------------|
-| Scope | One per batch → one combined | One per group key per batch |
-| Combine | `PartialAgg.Combine` | `AggregateRowOps.Combine` |
-| COUNT field | `CountAgg` | `Count` |
-| Output | `IAggregateQueryResult` | `FixedWidthColumnChunk` in batch |
-| Operator | `VectorizedScanEngine` | `HashAggregateEngine` |
-
-`ShouldEmitAggregateNull` in hash aggregation mirrors `ToResult` null rules for per-group output columns.
-
-## 9.22 COUNT semantics reference
-
-| Scenario | `COUNT(*)` | `COUNT(col)` | `SUM(col)` |
-|----------|------------|--------------|------------|
-| Empty table | 0, not null | 0, not null | NULL |
-| All rows filtered | 0, not null | 0, not null | NULL |
-| Rows exist, all col null | row count | 0, not null | NULL |
-| Normal | row count | non-null count | sum |
-
-Tests: `SqlGroupByTests`, `Phase1ReadPathTests` in `tests/RainDB.Tests/`.
-
-## 9.23 End-to-end trace
+## 9.17 End-to-end trace
 
 Query: `SELECT SUM(amount) FROM sales WHERE region_id = 3`
 
-Physical plan: `VectorizedScanPhysicalPlan` with filter on `region_id`, `Aggregate = (SourceColumnIndex: amount_ix, Kind: Sum)`.
+Physical plan: `VectorizedScanPhysicalPlan` with filter on `region_id`, `Aggregate = (amount_ix, Sum)`.
 
 ```
-ExecuteAsync
+DefaultQueryExecutor → _operators.Scan.ExecuteAsync
   → ComputeAggregateAsync
-      batch 0: AccumulateAggregateBatch → PartialAgg(IntSum=1200, ContributingRows=40)
-      batch 1: AccumulateAggregateBatch → PartialAgg(IntSum=800, ContributingRows=25)
-      Combine → PartialAgg(IntSum=2000, ContributingRows=65)
-      ToResult → AggregateQueryResult(Int64, int64Value=2000, valueIsNull=false)
+      per batch: AccumulateAggregateBatch → PartialAgg
+      Combine → ToResult → AggregateQueryResult
 ```
 
-## 9.24 Summary
+## 9.18 Summary
 
-Global aggregation in RainDB is a disciplined map-reduce over immutable columnar batches:
+Global aggregation in RainDB is map-reduce over immutable columnar batches, fused into the scan operator:
 
-1. **Plan** — `VectorizedScanPhysicalPlan.Aggregate` selects kind and column via `AggregateSpec`.
-2. **Map** — `AccumulateAggregateBatch` produces `PartialAgg` per batch, honoring filters and COUNT vs COUNT(col).
-3. **Reduce** — `PartialAgg.Combine` folds partials associatively.
-4. **Materialize** — `ToResult` or `EmptyAggregate` exposes SQL-correct scalars via `ValueIsNull`.
-5. **Accelerate** — `AggregateIntrinsics.SumFloat64` optional AVX2 when column is dense and null-free.
+1. **Plan** — `AggregateSpec` on `VectorizedScanPhysicalPlan`.
+2. **Map** — `PartialAgg` per batch with filter-aware selection.
+3. **Reduce** — `PartialAgg.Combine`.
+4. **Materialize** — `ToResult` / `EmptyAggregate` with SQL-correct `ValueIsNull`.
+5. **Accelerate** — `ColumnarAggregateIntrinsics` behind `UseAvx2DoubleSum`, `UseAvx2DoubleMinMax`, and `UseAvx2IntegerSum` on dense null-free columns.
 
-The design keeps aggregation colocated with the scan operator that already owns filter evaluation and batch iteration — avoiding hash table overhead when the group count is exactly one.
+The design avoids hash-table overhead when the group count is exactly one, while sharing intrinsics and selection code with the rest of the operator suite via `QueryOperatorDependencies`.

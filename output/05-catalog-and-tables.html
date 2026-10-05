@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Chapter 5: Catalog and Tables · Building an OLAP Database Engine from Scratch with RainDB</title>
-  <meta name="description" content="Theory-first deep guide to OLAP engine design and RainDB internals">
+  <meta name="description" content="Generated documentation site">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -125,6 +125,12 @@
                         <li class="nav-item depth-0">
                           
                             <a href="16-mmap-io.html" class="nav-link">Chapter 16: mmap I/O</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="17-advanced-sql-and-analytics.html" class="nav-link">Chapter 17: Advanced SQL and Analytics</a>
                             
                         </li>
                         
@@ -968,23 +974,26 @@ internal sealed class EphemeralColumnarTableSource : IColumnarTableSource
     public IReadOnlyList&lt;IColumnarBatch&gt; Batches { get; }
 }
 </code></pre>
-<p><code>DefaultQueryExecutor</code> uses it in the <code>GroupedJoinPhysicalPlan</code> branch:</p>
-<pre><code class="language-csharp">var joinResult = await JoinExecutionEngine.ExecuteAsync(...);
-var ephemeral = new EphemeralColumnarTableSource(
-    grouped.Aggregate.TableId,
-    &quot;_grouped_join_&quot;,
-    grouped.Join.OutputSchema,
-    colResult.Batches);
-return await HashAggregateEngine.ExecuteAsync(grouped.Aggregate, ephemeral, context);
+<p><code>DefaultQueryExecutor</code> still uses ephemerals where a second operator needs a table-shaped input:</p>
+<ul>
+<li><strong><code>DerivedTableScanPhysicalPlan</code></strong> — materialize the subquery, wrap batches in <code>EphemeralColumnarTableSource</code>, register it through <strong><code>OverlayCatalog</code></strong> on a scoped session, then run the outer plan.</li>
+<li><strong><code>GroupedSortTopNPhysicalPlan</code> / grouped sort after join</strong> — aggregate output is wrapped temporarily so <code>SortTopNOperator</code> can run over a uniform <code>IColumnarTableSource</code>.</li>
+</ul>
+<p><strong>Grouped join without a giant intermediate table:</strong> <code>GroupedJoinOperator</code> (see Chapter 11) streams join output batches into hash aggregation instead of building one full join result and re-wrapping it as a table. The older join-then-ephemeral-then-agg pattern remains a useful mental model for derived tables, not for the default grouped-join fast path.</p>
+<pre><code class="language-csharp">// src/RainDB.Core/Catalog/OverlayCatalog.cs — overlay wins on name/id lookup
+public bool TryGetTable(string name, out ITableSource? table)
+{
+    if (_byName.TryGetValue(name, out table))
+        return true;
+    return _base.TryGetTable(name, out table);
+}
 </code></pre>
 <p><strong>Why this exists:</strong></p>
 <ul>
-<li><code>HashAggregateEngine</code> expects an <code>IColumnarTableSource</code>, not a raw <code>IQueryResult</code>.</li>
-<li>The join output schema (<code>Join.OutputSchema</code>) defines column indices for group keys and aggregates.</li>
-<li>The ephemeral id comes from <code>grouped.Aggregate.TableId</code> — a synthetic id assigned at plan construction, not registered in <code>ICatalog</code>.</li>
-<li><code>Name</code> is <code>&quot;_grouped_join_&quot;</code> for debugging only; SQL never references it.</li>
+<li>Hash and sort operators expect an <code>IColumnarTableSource</code>, not a raw <code>IQueryResult</code>.</li>
+<li>Derived-table aliases must resolve in the catalog for the outer <code>FROM</code> clause without persisting data.</li>
+<li><code>SchemaVersion =&gt; 0</code> on ephemerals signals that plan caches should not treat them like durable tables.</li>
 </ul>
-<p><strong>Lifetime:</strong> Join result batches are borrowed until hash aggregate completes. The executor disposes <code>joinResult</code> in a <code>finally</code> block after aggregation starts — callers must not retain join batches past the grouped-join operation.</p>
 <hr />
 <h2 id="end-to-end-catalog-flows">5.21 End-to-end catalog flows</h2>
 <h3 id="in-memory-engine-bootstrap">In-memory engine bootstrap</h3>
@@ -1059,12 +1068,17 @@ throw new InvalidOperationException(
 <tr>
 <td><code>SchemaVersion</code> event</td>
 <td>Extensibility for plan cache</td>
-<td>Not yet enforced by compiler</td>
+<td>Compiler cache uses catalog fingerprint today</td>
 </tr>
 <tr>
 <td><code>EphemeralColumnarTableSource</code></td>
-<td>Reuses hash aggregate engine</td>
-<td>Extra materialization for grouped joins</td>
+<td>Derived tables, grouped sort</td>
+<td>Grouped join often streams without holding full join rowset</td>
+</tr>
+<tr>
+<td><code>OverlayCatalog</code></td>
+<td>Scoped derived-table names</td>
+<td>Extra catalog layer per derived-table query</td>
 </tr>
 </tbody>
 </table>

@@ -5,7 +5,7 @@ order: 16
 
 # Chapter 16: mmap I/O
 
-Memory-mapped I/O is how analytical engines avoid copying entire column files into the heap before scanning them. This chapter begins with virtual memory, the `mmap` syscall, page caches, and zero-copy philosophy. Part II documents RainDB's `RNBFCOL1` column file format, `ColumnarFixedWidthMmapReader`, and integration plans with batch persistence.
+Memory-mapped I/O is how analytical engines avoid copying entire column files into the heap before scanning them. This chapter begins with virtual memory, the `mmap` syscall, page caches, and zero-copy philosophy. Part II documents batch-level `RNBATCH1` mmap (`RainDbBatchMmapReader`), per-column `RNBFCOL1` files (`ColumnarFixedWidthMmapReader`), LRU scan observation, and lifetime rules.
 
 ---
 
@@ -216,7 +216,7 @@ Table holds List<MmapHandle>
   eviction unmaps only when ref count == 0
 ```
 
-RainDB Phase C2 will add formal pin/unpin in the buffer manager. Until then, tests must scope readers manually.
+`RainDbMappedBatchMemoryManager` enforces an optional byte budget with LRU eviction (Chapter 14). `ColumnarFixedWidthMmapReader` remains manual `using` scope in standalone tests.
 
 ### GC and finalizers
 
@@ -226,30 +226,73 @@ Do not depend on finalizers for prompt unmap — call `Dispose` explicitly. Long
 
 # Part II — RainDB
 
-RainDB's default persistence path (Chapter 14) reads entire batch files into managed `byte[]` arrays during hydration. That is correct and simple, but it copies every fixed-width value through the heap before the scan engine touches it. For large analytic tables where numeric columns dominate, **memory-mapped column files** offer a zero-copy alternative: the operating system maps file pages into the process address space, and scan kernels read values directly from mapped spans.
+RainDB uses memory mapping in two complementary ways. **Batch-level** mmap (`RNBATCH1` `.batch` files via `RainDbBatchMmapReader`) is the default hydration path for persistent tables when `PreferMmapBatchHydration` is true — fixed-width columns read directly from the mapped file. **Column-level** mmap (`RNBFCOL1` via `ColumnarFixedWidthMmapReader`) remains a standalone single-column file format for tools and experiments. Both avoid copying fixed-width payload bytes on the hot path; UTF-8 and dictionary-encoded Int32 columns still copy on batch hydrate.
 
-## 16.10 Scope and limitations
+## 16.10 Two mmap readers — when to use which
 
-The mmap stack today supports **only fixed-width** `IColumnChunk` columns:
+| | `RainDbBatchMmapReader` | `ColumnarFixedWidthMmapReader` |
+|--|-------------------------|--------------------------------|
+| File magic | `RNBATCH1` | `RNBFCOL1` |
+| Granularity | Entire table batch (all columns) | One fixed-width column |
+| Wired into `RainDbFileDatabase` | Yes (`LoadBatchesIntoTable`) | No (utility / tests) |
+| Chunk types produced | Kind 1: `FixedWidthColumnChunk` slices; kinds 2–4: copied payloads | `MappedFixedWidthColumnChunk` only |
+| Return type | `MappedColumnarBatch` (batch + mmap lifetime) | `ColumnarFixedWidthMmapReader` (reader + `Chunk`) |
+| UTF-8 | Supported in file; **copied** into heap chunks on open | N/A (fixed-width only) |
 
-- `Boolean`, `Int32`, `Int64`, `Float64` (per `ColumnTypeSizes.IsFixedWidth`)
-- **Not** `Utf8` or variable-length types in this file format
+Use batch mmap for normal persistent tables. Use column mmap when exporting or benchmarking a single numeric column without batch framing.
 
-Magic string: `RNBFCOL1` (RainDB Fixed COLumn, version 1).
+## 16.11 Batch-level mmap — RNBATCH1
 
-UTF-8 columns remain in `RainDbBatchBinaryCodec` batch files until a variable-length mmap layout is designed (Phase C, likely separate from fixed-width column files).
+`RainDbBatchMmapReader.Open` maps the full `.batch` file read-only, wraps bytes in an unsafe `MemoryManager<byte>`, and parses the v1 header without allocating a file-sized `byte[]`.
 
-## 16.11 Why mmap for OLAP?
+```csharp
+// src/RainDB.Core/Persistence/RainDbBatchMmapReader.cs
+public MappedColumnarBatch Open(string path)
+{
+    var mmf = MemoryMappedFile.CreateFromFile(path, FileMode.Open, null, 0, MemoryMappedFileAccess.Read);
+    var accessor = mmf.CreateViewAccessor(0, 0, MemoryMappedFileAccess.Read);
+    var manager = new MmapBytesMemoryManager(accessor, (int)accessor.Capacity);
+    var batch = DecodeMappedBatch(manager.Memory);
+    return new MappedColumnarBatch(batch, new MmapLifetime(mmf, accessor, manager));
+}
+```
+
+`MappedColumnarBatch` exposes `Batch` and disposes the map when evicted or when the database releases the handle (Chapter 14).
+
+### Fixed-width columns stay in the map
+
+`ReadMappedFixed` slices value and null-bitmap bytes from the `ReadOnlyMemory<byte>` covering the file:
+
+```csharp
+var valuesMem = data.Slice(o, valuesLen);
+return new FixedWidthColumnChunk(phys, rowCount, valuesMem, nbMem, hasNulls);
+```
+
+Kernels use the same `IColumnChunk` APIs as heap-backed chunks; the OS page cache backs `Values.Span`.
+
+### UTF-8 and dictionary Int32 are still copied
+
+Variable-length and dictionary layouts are not sliced for mmap in v1:
+
+- **Kind 2 / 3 UTF-8:** offsets, blob, and null bitmap copied with `.ToArray()` into `Utf8ColumnChunk` or `Utf8LengthPrefixedColumnChunk`.
+- **Kind 4 dict Int32:** dictionary, indices, and null bitmap copied; `DictionaryEncodedInt32ColumnChunk.Values` may still lazy-materialize on first access (Chapter 4).
+
+So batch mmap removes the large fixed-width copy; string and dictionary columns still pay hydrate allocation cost.
+
+### Fallback hydration
+
+If mmap fails (`IOException`, `UnauthorizedAccessException`), `RainDbFileDatabase` reads the entire file and `RainDbBatchBinaryCodec.DecodeBatch` — all columns land in managed arrays.
+
+## 16.12 Why mmap for OLAP?
 
 | Approach | Pros | Cons |
 |----------|------|------|
-| `File.ReadAllBytes` + `FixedWidthColumnChunk` | Simple; full ownership of bytes; works everywhere | 2× memory pressure during hydrate (file cache + managed copy); copy cost on load |
-| mmap + `MappedFixedWidthColumnChunk` | Zero-copy scan; OS page cache shared across processes | Lifetime tied to `MemoryMappedFile`; unsafe pointer management; fixed layout only |
-| In-memory append-only batches | Fastest writes; no IO during query | Lost on process exit without persistence |
+| `ReadAllBytes` + decode | Works everywhere; simplest lifetime | Copies all column payloads |
+| Batch mmap (`RainDbBatchMmapReader`) | Zero-copy kind-1; one map per segment | Lifetime + LRU budget; UTF-8/dict still copied |
+| Column mmap (`ColumnarFixedWidthMmapReader`) | Zero-copy single column file | One column per path; not table-integrated |
+| In-memory batches only | Fastest writes | No durability |
 
-RainDB's Phase C1 goal: **wire mmap chunks into table storage** so file-backed tables query without hydrating full byte arrays. The types in this chapter are the building blocks; `LoadBatchesIntoTable` still uses `ReadAllBytes` until integration lands.
-
-## 16.12 ColumnarFixedWidthFileFormat — on-disk layout
+## 16.13 ColumnarFixedWidthFileFormat — on-disk layout
 
 `ColumnarFixedWidthFileFormat` in `src/RainDB.Core/IO/ColumnarFixedWidthFileFormat.cs` defines a single-column file.
 
@@ -261,7 +304,7 @@ public static class ColumnarFixedWidthFileFormat
 }
 ```
 
-### 16.12.1 File structure overview
+### 16.13.1 File structure overview
 
 ```text
 ┌────────────────────────────────────────┐
@@ -281,7 +324,7 @@ nullBytes = hasNulls ? NullBitmapBytes(rowCount) : 0
 valuesBytes = rowCount * FixedWidthBytes(physicalType)
 ```
 
-### 16.12.2 Header — byte by byte
+### 16.13.2 Header — byte by byte
 
 All multi-byte integers are **little-endian**.
 
@@ -311,7 +354,7 @@ BinaryPrimitives.WriteInt32LittleEndian(header.AsSpan(24), valuesBytes);
 
 Bytes at offsets 18–19 and 28–31 are zero unless future versions assign them (e.g., checksum, compression codec id).
 
-### 16.12.3 Payload layout
+### 16.13.3 Payload layout
 
 After the header:
 
@@ -330,7 +373,7 @@ Null bitmap packing matches in-memory chunks: one bit per row, LSB-first within 
 
 Values are tightly packed little-endian physical representation (same as `FixedWidthColumnChunk.Values`).
 
-### 16.12.4 WriteFile implementation
+### 16.13.4 WriteFile implementation
 
 ```csharp
 public static void WriteFile(string path, IColumnChunk chunk)
@@ -359,7 +402,7 @@ public static void WriteFile(string path, IColumnChunk chunk)
 
 **Not embedded in file:** column name, table id, batch id — the path or catalog must carry metadata. Column files are dumb payloads.
 
-### 16.12.5 Example hex dump (conceptual)
+### 16.13.5 Example hex dump (conceptual)
 
 `Float64` column, 2 rows, no nulls, values `1.0` and `2.0`:
 
@@ -377,11 +420,11 @@ Offset  Hex (abbreviated)     Meaning
 0x28    00 00 00 00 00 00 00 40  2.0 IEEE754 LE
 ```
 
-## 16.13 ColumnarFixedWidthMmapReader.Open
+## 16.14 ColumnarFixedWidthMmapReader.Open
 
 `ColumnarFixedWidthMmapReader` maps an existing file read-only and exposes `Chunk` as `IColumnChunk`.
 
-### 16.13.1 Open sequence
+### 16.14.1 Open sequence
 
 ```csharp
 public static ColumnarFixedWidthMmapReader Open(string path)
@@ -395,7 +438,7 @@ public static ColumnarFixedWidthMmapReader Open(string path)
 
 `CreateViewAccessor(0, 0, Read)` maps the **entire file** (0 size means to end of file).
 
-### 16.13.2 Validation steps (mirrors WriteFile)
+### 16.14.2 Validation steps (mirrors WriteFile)
 
 ```csharp
 if (capacity > int.MaxValue)
@@ -435,7 +478,7 @@ if (span.Length < total)
 
 Strict validation prevents silent misreads if files are hand-edited or truncated.
 
-### 16.13.3 Slicing mapped memory
+### 16.14.3 Slicing mapped memory
 
 ```csharp
 var payloadStart = ColumnarFixedWidthFileFormat.HeaderSizeBytes;
@@ -457,7 +500,7 @@ var chunk = new MappedFixedWidthColumnChunk(type, rowCount, hasNulls, nullMem, v
 
 `bytes` is `ReadOnlyMemory<byte>` from `MmapBytesMemoryManager` covering the **whole file**. Slices are offsets into the map — no allocation for value data.
 
-### 16.13.4 Dispose lifecycle
+### 16.14.4 Dispose lifecycle
 
 ```csharp
 public void Dispose()
@@ -470,7 +513,7 @@ public void Dispose()
 
 Callers must dispose the reader (or wrap in `using`) before deleting or replacing the underlying file on disk. Undefined behavior if the file shrinks while mapped.
 
-## 16.14 MmapBytesMemoryManager — unsafe pointer bridge
+## 16.15 MmapBytesMemoryManager — unsafe pointer bridge
 
 .NET's `ReadOnlyMemory<byte>` over mmap requires a custom `MemoryManager<byte>`:
 
@@ -526,7 +569,7 @@ private sealed unsafe class MmapBytesMemoryManager : MemoryManager<byte>
 
 Forces consumers down the span path. Code that assumes `MemoryMarshal.TryGetArray` will fail — by design, so accidental heap copies are not silently introduced.
 
-## 16.15 MappedFixedWidthColumnChunk — zero-copy IColumnChunk
+## 16.16 MappedFixedWidthColumnChunk — zero-copy IColumnChunk
 
 ```csharp
 private sealed class MappedFixedWidthColumnChunk : IColumnChunk
@@ -561,7 +604,8 @@ Implements the same `IColumnChunk` surface as `FixedWidthColumnChunk`. Scan and 
 SQL query
   → VectorizedScanPhysicalPlan
   → VectorizedScanEngine.ProcessOneBatch
-  → batch.Columns[i] is MappedFixedWidthColumnChunk
+  → batch.Columns[i] is MappedFixedWidthColumnChunk (RNBFCOL1)
+     or FixedWidthColumnChunk backed by RNBATCH1 mmap slices
   → FixedWidthSelectionKernels read Values.Span (mapped)
   → ProjectGather copies only selected rows to pooled output (if projection narrows rows)
 ```
@@ -577,7 +621,7 @@ SQL query
 | Writable | Can construct for append | Read-only |
 | Scan API | `IColumnChunk` | `IColumnChunk` |
 
-## 16.16 End-to-end usage example
+## 16.17 End-to-end usage example (RNBFCOL1)
 
 Write a column file from an in-memory chunk, then mmap it back:
 
@@ -611,73 +655,32 @@ var batch = new ColumnarBatch(mapped.RowCount, new IColumnChunk[] { mapped });
 
 **Lifetime rule:** Keep `ColumnarFixedWidthMmapReader` alive while any scan references `mapped`.
 
-## 16.17 Integration roadmap with persistence
+## 16.18 IMappedBatchScanObserver and LRU budget
 
-Current persistence (Chapter 14) uses monolithic `.batch` files. mmap integration options:
-
-### Option A — sidecar column files per batch
-
-```text
-tables/{tableId}/
-  000000.batch          # manifest or UTF-8 columns only
-  000000.col0           # mmap Float64 amount
-  000000.col1           # mmap Int32 quantity
-```
-
-Hydration:
-
-1. Read small `.batch` manifest listing column types and sidecar paths
-2. mmap each fixed-width sidecar → `MappedFixedWidthColumnChunk`
-3. Load UTF-8 columns from batch body as today
-
-### Option B — column-major table directory
-
-```text
-tables/{tableId}/
-  meta.json
-  columns/
-    amount.rnbfcol
-    quantity.rnbfcol
-    region.batch-utf8
-```
-
-Append becomes column-append or new segment files per column. Harder for atomic multi-column append; better for read-heavy workloads.
-
-### Option C — hybrid hydrate
-
-On `LoadBatchesIntoTable`:
+Persistent databases register each mmap-hydrated batch with `RainDbMappedBatchMemoryManager`. The manager implements `IMappedBatchScanObserver`:
 
 ```csharp
-// (future sketch)
-if (File.Exists(fixedWidthSidecar))
-    chunks[i] = ColumnarFixedWidthMmapReader.Open(sidecar).Chunk;
-else
-    chunks[i] = DecodeColumnFromBatch(bytes, i);
-```
-
-Minimal change surface: only replace `ReadAllBytes` + `DecodeBatch` for eligible columns.
-
-### Catalog changes
-
-`catalog.json` might gain optional `storageMode: "mmap" | "batch"` per table. Default remains batch for compatibility.
-
-### Buffer manager (Phase C2)
-
-Long-lived maps need pin/unpin when memory cap exceeded:
-
-```csharp
-// (planned)
-interface IMappedColumnHandle
+// src/RainDB.Abstractions/Persistence/IMappedBatchScanObserver.cs
+public interface IMappedBatchScanObserver
 {
-    IColumnChunk Chunk { get; }
-    void Pin();
-    void Unpin();
+    void OnBatchScanned(TableId tableId, int batchIndex);
 }
 ```
 
-`ColumnarFixedWidthMmapReader` becomes internal to handle implementation.
+`RainDbEngine` passes `fileDb.MappedBatchScanObserver` into `RainDbExecutionContext`. `VectorizedScanEngine` calls `OnBatchScanned` when a table batch participates in a scan — moving that batch to the **front** of an internal LRU list.
 
-## 16.18 When to use mmap vs in-memory bytes
+When `MappedBatchMemoryBudgetBytes` is finite:
+
+| `MappedBatchBudgetExceededBehavior` | Behavior |
+|-------------------------------------|----------|
+| `EvictColdBatches` (default) | While registering a new map, evict LRU tail batches until `ResidentBytes + newSegment ≤ budget`. Eviction decodes the `.batch` file into RAM, swaps the table slot, disposes `MappedColumnarBatch`. |
+| `Fail` | `RegisterMappedBatch` throws if the new segment would exceed budget. |
+
+Byte estimates sum `Values.Length + NullBitmap.Length` per column (minimum 4096 per segment). This is a charging heuristic, not exact OS resident page accounting.
+
+Scans on evicted batches still work — data is heap-backed after decode. Hot batches stay mapped and avoid fixed-width copy on hydrate.
+
+## 16.19 When to use mmap vs in-memory bytes
 
 ### Prefer mmap when
 
@@ -703,14 +706,14 @@ interface IMappedColumnHandle
 | Cold sealed batches | mmap column files |
 | UTF-8 dimensions | Batch codec or future UTF-8 mmap layout |
 
-RainDB has not implemented tiering yet; Phase C1 starts with "hydrate to mmap instead of copy" for whole fixed-width columns.
+Tiering (hot in-memory vs cold mmap) is not automatic yet — every hydrated batch attempts mmap when options allow.
 
-## 16.19 Interaction with RainDbBatchBinaryCodec
+## 16.20 Interaction with RainDbBatchBinaryCodec
 
-| Format | Magic | Granularity | UTF-8 | mmap-friendly |
-|--------|-------|-------------|-------|---------------|
-| Batch v1 | `RNBATCH1` | Whole batch, all columns | Yes | Poor (decode copies) |
-| Column v1 | `RNBFCOL1` | Single fixed-width column | No | Yes |
+| Format | Magic | Granularity | UTF-8 | mmap-friendly (fixed-width) |
+|--------|-------|-------------|-------|----------------------------|
+| Batch v1 | `RNBATCH1` | Whole batch, all columns | Yes (copied on mmap hydrate) | Kind 1: slices; kinds 2–4: copy |
+| Column v1 | `RNBFCOL1` | Single fixed-width column | No | Full column payload mapped |
 
 Converting batch → column files (export tool):
 
@@ -729,7 +732,7 @@ void ExportFixedColumns(IColumnarBatch batch, string dir)
 
 Round-trip for fixed-width: `WriteFile` → `Open` → compare spans.
 
-## 16.20 Error handling and security
+## 16.21 Error handling and security
 
 | Condition | Result |
 |-----------|--------|
@@ -741,19 +744,18 @@ Round-trip for fixed-width: `WriteFile` → `Open` → compare spans.
 
 For hostile files, validation before pointer exposure prevents out-of-bounds slice on header fields. Do not mmap untrusted paths without size caps at open time in hosted scenarios.
 
-## 16.21 Testing recommendations
+## 16.22 Testing recommendations
 
-When integration lands, add tests for:
+Coverage in `PhaseC2C3StorageTests` and persistence tests includes:
 
-1. WriteFile → Open → row count and value equality
-2. Null bitmap round-trip with `hasNulls = true`
-3. Dispose reader → ensure no use-after-free if scan held spans (document as unsupported)
-4. Persistence reopen with mmap chunks + SQL `SELECT SUM(col)`
-5. Mixed batch: one mmap column + one UTF-8 in-memory column in same batch
+1. `ColumnarFixedWidthFileFormat` write → `ColumnarFixedWidthMmapReader.Open` equality
+2. Mmap budget with `EvictColdBatches` and `Fail`
+3. Persistent reopen with `PreferMmapBatchHydration` and SQL aggregates
+4. Mixed batches: mmap-backed fixed-width plus UTF-8 columns in one `RNBATCH1` file
 
-Property: `valuesBytes == rowCount * FixedWidthBytes(type)` for all valid files.
+Property: `valuesBytes == rowCount * FixedWidthBytes(type)` for all valid `RNBFCOL1` files.
 
-## 16.22 Performance notes
+## 16.23 Performance notes
 
 - **First scan** after open may page-fault; subsequent scans hit OS cache
 - **SIMD kernels** work on mapped spans if pinned spans are contiguous (they are)
@@ -769,7 +771,7 @@ Scan SUM(amount) where amount > 0:
   in-memory chunk vs mapped chunk (should be near parity after warm-up)
 ```
 
-## 16.23 Future header versions
+## 16.24 Future header versions
 
 Reserved header bytes (18–19, 28–31) enable:
 
@@ -779,6 +781,6 @@ Reserved header bytes (18–19, 28–31) enable:
 
 Readers must reject unknown versions (as today for `version != 1`).
 
-## 16.24 Summary
+## 16.25 Summary
 
-**Part I** covered virtual memory, mmap semantics, page cache interaction, demand paging, TLB effects, zero-copy philosophy, mmap vs `read()` tradeoffs, column file design principles, and mapped memory lifetime rules. **Part II** showed how RainDB implements these ideas: `ColumnarFixedWidthFileFormat` writes a 32-byte `RNBFCOL1` header; `ColumnarFixedWidthMmapReader.Open` validates and constructs `MappedFixedWidthColumnChunk` via unsafe `MmapBytesMemoryManager`; scan pipelines consume mapped chunks through the same `IColumnChunk` interface as heap-backed columns. UTF-8 and multi-column batches still use `RainDbBatchBinaryCodec` until Phase C wires sidecar column files and buffer management into `RainDbFileDatabase`.
+**Part I** covered virtual memory, mmap semantics, page cache interaction, demand paging, TLB effects, zero-copy philosophy, mmap vs `read()` tradeoffs, column file design principles, and mapped memory lifetime rules. **Part II** described RainDB's two mmap paths: `RainDbBatchMmapReader` maps `RNBATCH1` table segments (zero-copy kind-1 fixed-width; UTF-8 and dict Int32 copied on hydrate); `ColumnarFixedWidthMmapReader` maps standalone `RNBFCOL1` column files to `MappedFixedWidthColumnChunk`. `MappedColumnarBatch` ties batch lifetime to `MemoryTable` and `RainDbMappedBatchMemoryManager`; scans touch LRU via `IMappedBatchScanObserver`. See Chapter 14 for atomic persistence, options, and eviction behavior.

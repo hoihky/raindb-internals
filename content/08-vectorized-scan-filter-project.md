@@ -351,18 +351,17 @@ Phase 1 scan/filter/project/aggregate lives in **`VectorizedScanEngine`** over *
 
 ## 8.11 Entry point and control flow
 
+The scan operator is **`VectorizedScanOperator`** in `src/RainDB.Query/Execution/VectorizedScanEngine.cs` (historical file name). **`DefaultQueryOperatorSuite`** exposes it as **`IVectorizedScanOperator.Scan`**.
+
 ```csharp
 // src/RainDB.Query/Execution/VectorizedScanEngine.cs
-public static class VectorizedScanEngine
+public sealed class VectorizedScanOperator : IVectorizedScanOperator
 {
-    public static async ValueTask<IQueryResult> ExecuteAsync(
+    public async ValueTask<IQueryResult> ExecuteAsync(
         VectorizedScanPhysicalPlan plan,
         IColumnarTableSource table,
         IExecutionContext context)
     {
-        ArgumentNullException.ThrowIfNull(plan);
-        ArgumentNullException.ThrowIfNull(table);
-        ArgumentNullException.ThrowIfNull(context);
         ValidatePlan(plan, table);
 
         if (plan.Aggregate is { } agg)

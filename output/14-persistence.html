@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Chapter 14: Persistence · Building an OLAP Database Engine from Scratch with RainDB</title>
-  <meta name="description" content="Theory-first deep guide to OLAP engine design and RainDB internals">
+  <meta name="description" content="Generated documentation site">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -125,6 +125,12 @@
                         <li class="nav-item depth-0">
                           
                             <a href="16-mmap-io.html" class="nav-link">Chapter 16: mmap I/O</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="17-advanced-sql-and-analytics.html" class="nav-link">Chapter 17: Advanced SQL and Analytics</a>
                             
                         </li>
                         
@@ -425,21 +431,21 @@ OS / device (block I/O, mmap, direct I/O)
 <p>RainDB exposes <code>ExportCatalog</code> and <code>ImportCatalog</code> for snapshot workflows; import does not require a running engine instance.</p>
 <hr />
 <h1 id="part-ii-raindb">Part II — RainDB</h1>
-<p>An embedded OLAP engine is only useful if data survives process restarts. RainDB's persistence MVP stores <strong>catalog metadata as JSON</strong> and <strong>columnar batches as self-describing binary files</strong>, wiring append hooks into <code>MemoryTable</code> so in-memory tables and on-disk segments stay aligned during normal operation.</p>
+<p>An embedded OLAP engine is only useful if data survives process restarts. RainDB stores <strong>catalog metadata as JSON</strong> and <strong>columnar batches as self-describing <code>RNBATCH1</code> files</strong>, wiring append hooks into <code>MemoryTable</code> so in-memory tables and on-disk segments stay aligned. Atomic replace-on-write avoids torn committed files; optional mmap hydration avoids copying fixed-width columns on open.</p>
 <h2 id="design-goals">14.10 Design goals</h2>
-<p>RainDB persistence today optimizes for:</p>
+<p>RainDB persistence optimizes for:</p>
 <ol>
-<li><strong>Simplicity.</strong> One JSON catalog plus numbered batch files per table. No custom page cache yet.</li>
-<li><strong>Round-trip fidelity.</strong> Every supported <code>IColumnChunk</code> kind encodes and decodes without loss (null bitmaps, UTF-8 layouts).</li>
-<li><strong>Transparent append.</strong> <code>MemoryTable.AppendBatch</code> triggers <code>IRainDbBatchPersistence.OnBatchAppended</code> when wired.</li>
-<li><strong>Hydration without rewrite.</strong> Loading from disk uses <code>AppendHydratedBatch</code> so reopening does not re-persist existing segments.</li>
+<li><strong>Simplicity.</strong> One JSON catalog plus numbered <code>.batch</code> files per table under <code>tables/{tableId}/</code>.</li>
+<li><strong>Round-trip fidelity.</strong> Supported chunk kinds encode and decode without loss (null bitmaps, UTF-8 layouts, dictionary Int32).</li>
+<li><strong>Transparent append.</strong> <code>MemoryTable.AppendBatch</code> invokes <code>IRainDbBatchPersistence.OnBatchAppended</code>, which writes the batch and refreshes the catalog.</li>
+<li><strong>Hydration without rewrite.</strong> <code>AppendHydratedBatch</code> loads existing segments without re-persisting them.</li>
+<li><strong>Optional zero-copy fixed-width reads.</strong> When <code>PreferMmapBatchHydration</code> is true, <code>RainDbBatchMmapReader</code> maps each batch file and slices kind-1 columns from the mapping (Chapter 16).</li>
 </ol>
-<p>Non-goals in the MVP:</p>
+<p>Still out of scope:</p>
 <ul>
-<li>Memory-mapped segments (Chapter 16; Phase C1)</li>
 <li>Write-ahead logging (Phase F)</li>
-<li>Concurrent writers</li>
-<li>Incremental catalog updates per column (whole-catalog rewrite on <code>FlushCatalog</code>)</li>
+<li>Documented multi-writer concurrency</li>
+<li>Per-column incremental catalog updates (each <code>FlushCatalog</code> rewrites the full JSON document)</li>
 </ul>
 <h2 id="on-disk-directory-layout">14.11 On-disk directory layout</h2>
 <p>A RainDB database root looks like this:</p>
@@ -475,24 +481,82 @@ public const string TablesDirectoryName = &quot;tables&quot;;
 </tr>
 <tr>
 <td><code>*.batch</code></td>
-<td>Binary columnar batch (format v1, magic <code>RNBATCH1</code>)</td>
+<td>Committed binary columnar batch (format v1, magic <code>RNBATCH1</code>)</td>
 </tr>
 <tr>
 <td><code>*.tmp</code></td>
-<td>Atomic write staging files (catalog and batches)</td>
+<td>Staging files during atomic writes — <strong>ignored</strong> on open and batch enumeration</td>
 </tr>
 </tbody>
 </table>
 <p><code>TableId</code> is a 128-bit GUID stored without dashes in JSON (<code>&quot;N&quot;</code> format) and as the directory name under <code>tables/</code>.</p>
-<h2 id="opening-a-persistent-database">14.12 Opening a persistent database</h2>
-<h3 id="raindbfiledatabase.open">14.12.1 RainDbFileDatabase.Open</h3>
-<pre><code class="language-csharp">public static RainDbFileDatabase Open(string rootDirectory)
+<p>Committed paths are recognized explicitly: <code>RainDbAtomicFileWriter.IsCommittedBatchFileName</code> accepts <code>######.batch</code> but rejects names ending in <code>.tmp</code> (so a crashed <code>000000.batch.tmp</code> is never loaded). Catalog reads use <code>TryReadCommittedCatalogJson</code>, which reads only <code>catalog.json</code>, not <code>catalog.json.tmp</code>.</p>
+<h2 id="raindbatomicfilewriter">14.12 RainDbAtomicFileWriter</h2>
+<p>All durable catalog and batch replacements go through <code>RainDbAtomicFileWriter</code>:</p>
+<pre><code class="language-csharp">// src/RainDB.Core/Persistence/RainDbAtomicFileWriter.cs
+public void WriteAllText(string targetPath, string content)
+{
+    var tmp = targetPath + &quot;.tmp&quot;;
+    File.WriteAllText(tmp, content);
+    File.Move(tmp, targetPath, overwrite: true);
+}
+
+public void WriteStream(string targetPath, Action&lt;Stream&gt; writeBody)
+{
+    var tmp = targetPath + &quot;.tmp&quot;;
+    using (var fs = File.Create(tmp))
+        writeBody(fs);
+    File.Move(tmp, targetPath, overwrite: true);
+}
+</code></pre>
+<p>Crash mid-write leaves a <code>.tmp</code> sibling; the previous committed file (if any) remains visible. Readers never treat <code>.tmp</code> as authoritative.</p>
+<h2 id="raindbfiledatabaseoptions">14.13 RainDbFileDatabaseOptions</h2>
+<pre><code class="language-csharp">// src/RainDB.Core/Persistence/RainDbFileDatabaseOptions.cs
+public sealed class RainDbFileDatabaseOptions
+{
+    public bool PreferMmapBatchHydration { get; init; } = true;
+    public long MappedBatchMemoryBudgetBytes { get; init; } = long.MaxValue;
+    public MappedBatchBudgetExceededBehavior MappedBatchBudgetExceededBehavior { get; init; } =
+        MappedBatchBudgetExceededBehavior.EvictColdBatches;
+    public bool EnableInt32DictionaryEncoding { get; init; } = true;
+}
+</code></pre>
+<table class="table">
+<thead>
+<tr>
+<th>Option</th>
+<th>Effect</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>PreferMmapBatchHydration</code></td>
+<td>Try <code>RainDbBatchMmapReader.Open</code> per <code>.batch</code>; fall back to <code>ReadAllBytes</code> + <code>DecodeBatch</code> on IO errors</td>
+</tr>
+<tr>
+<td><code>MappedBatchMemoryBudgetBytes</code></td>
+<td>Charged bytes for registered mmap segments (<code>long.MaxValue</code> = unlimited)</td>
+</tr>
+<tr>
+<td><code>MappedBatchBudgetExceededBehavior</code></td>
+<td><code>EvictColdBatches</code> (default) or <code>Fail</code> when registration would exceed budget</td>
+</tr>
+<tr>
+<td><code>EnableInt32DictionaryEncoding</code></td>
+<td>Passed to <code>RainDbBatchBinaryCodec</code> on append — may emit kind <code>4</code> for qualifying Int32 columns</td>
+</tr>
+</tbody>
+</table>
+<p>Pass options to <code>RainDbFileDatabase.Open(root, options)</code>.</p>
+<h2 id="opening-a-persistent-database">14.14 Opening a persistent database</h2>
+<h3 id="raindbfiledatabase.open">14.14.1 RainDbFileDatabase.Open</h3>
+<pre><code class="language-csharp">public static RainDbFileDatabase Open(string rootDirectory, RainDbFileDatabaseOptions? options = null)
 {
     ArgumentException.ThrowIfNullOrWhiteSpace(rootDirectory);
     var root = Path.GetFullPath(rootDirectory);
     Directory.CreateDirectory(root);
     var catalog = new InMemoryCatalog();
-    var db = new RainDbFileDatabase(root, catalog);
+    var db = new RainDbFileDatabase(root, catalog, options ?? new RainDbFileDatabaseOptions());
     db.HydrateFromDiskIfPresent();
     return db;
 }
@@ -501,10 +565,10 @@ public const string TablesDirectoryName = &quot;tables&quot;;
 <ol>
 <li>Normalize path to full path (stable regardless of working directory)</li>
 <li>Create root directory if missing (fresh database)</li>
-<li>Construct empty <code>InMemoryCatalog</code></li>
-<li>If <code>catalog.json</code> exists, deserialize and load all tables + batches</li>
+<li>Construct empty <code>InMemoryCatalog</code> and mmap budget manager from options</li>
+<li>If committed <code>catalog.json</code> exists, deserialize and load all tables + batches</li>
 </ol>
-<h3 id="raindbengine.openpersistent">14.12.2 RainDbEngine.OpenPersistent</h3>
+<h3 id="raindbengine.openpersistent">14.14.2 RainDbEngine.OpenPersistent</h3>
 <p>The driver wraps file database + default engine collaborators:</p>
 <pre><code class="language-csharp">// src/RainDB.Driver/RainDbEngine.cs
 public static RainDbEngine OpenPersistent(string directoryPath)
@@ -514,39 +578,30 @@ public static RainDbEngine OpenPersistent(string directoryPath)
 }
 </code></pre>
 <p><code>RainDbEngine.FileDatabase</code> holds a reference to the <code>RainDbFileDatabase</code> instance so it is not collected while the engine runs. Queries use <code>fileDb.Catalog</code> — the same catalog object mutated by hydration and new table registration.</p>
-<h3 id="hydratefromdiskifpresent">14.12.3 HydrateFromDiskIfPresent</h3>
+<h3 id="hydratefromdiskifpresent">14.14.3 HydrateFromDiskIfPresent</h3>
 <pre><code class="language-csharp">private void HydrateFromDiskIfPresent()
 {
-    var catalogPath = Path.Combine(RootDirectory, CatalogFileName);
-    if (!File.Exists(catalogPath))
+    if (!RainDbAtomicFileWriter.TryReadCommittedCatalogJson(RootDirectory, out var json))
         return;
     lock (_ioLock)
     {
-        var json = File.ReadAllText(catalogPath);
         var doc = JsonSerializer.Deserialize&lt;RainDbCatalogDocument&gt;(json, JsonOptions)
             ?? throw new InvalidDataException(&quot;catalog.json could not be deserialized.&quot;);
-        if (doc.FormatVersion != 1)
-            throw new NotSupportedException($&quot;catalog formatVersion {doc.FormatVersion} is not supported.&quot;);
-        foreach (var t in doc.Tables ?? [])
-        {
-            var schema = ToTableSchema(t);
-            var id = TableId.From(Guid.ParseExact(t.Id, &quot;N&quot;));
-            var opts = new MemoryTableOptions(BatchPersistence: this);
-            var table = new MemoryTable(t.Name, schema, id, opts);
-            LoadBatchesIntoTable(RootDirectory, table);
-            Catalog.Register(table);
-        }
+        // ... foreach table: MemoryTable with BatchPersistence: this ...
+        LoadBatchesIntoTable(table, _options.PreferMmapBatchHydration);
+        Catalog.Register(table);
     }
 }
 </code></pre>
 <p>Important behaviors:</p>
 <ul>
-<li><strong>Persistence hook is wired on hydrated tables.</strong> New appends after reopen will persist as <code>00000N.batch</code> where N is the next index.</li>
+<li><strong>Persistence hook is wired on hydrated tables.</strong> New appends after reopen persist as the next <code>######.batch</code>.</li>
 <li><strong><code>TableId</code> is restored from catalog</strong>, not regenerated — batch directory paths remain stable.</li>
-<li><strong>IO lock</strong> serializes hydration with catalog flush and batch writes.</li>
+<li><strong><code>_ioLock</code></strong> serializes hydration, catalog flush, and batch writes.</li>
+<li><strong>Mmap path</strong> registers each mapped batch with <code>RainDbMappedBatchMemoryManager</code> and <code>MemoryTable.AttachMappedBatch</code>.</li>
 </ul>
-<h2 id="catalog.json-format">14.13 catalog.json format</h2>
-<h3 id="document-types">14.13.1 Document types</h3>
+<h2 id="catalog.json-format">14.15 catalog.json format</h2>
+<h3 id="document-types">14.15.1 Document types</h3>
 <pre><code class="language-csharp">internal sealed class RainDbCatalogDocument
 {
     public int FormatVersion { get; set; }
@@ -566,7 +621,7 @@ internal sealed class RainDbColumnDocument
     public string Type { get; set; } = &quot;&quot;;
 }
 </code></pre>
-<h3 id="example-catalog.json">14.13.2 Example catalog.json</h3>
+<h3 id="example-catalog.json">14.15.2 Example catalog.json</h3>
 <pre><code class="language-json">{
   &quot;formatVersion&quot;: 1,
   &quot;tables&quot;: [
@@ -590,7 +645,7 @@ internal sealed class RainDbColumnDocument
     DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
 };
 </code></pre>
-<h3 id="schema-reconstruction">14.13.3 Schema reconstruction</h3>
+<h3 id="schema-reconstruction">14.15.3 Schema reconstruction</h3>
 <pre><code class="language-csharp">private static TableSchema ToTableSchema(RainDbTableDocument t)
 {
     var list = t.Columns ?? [];
@@ -608,7 +663,7 @@ internal sealed class RainDbColumnDocument
 }
 </code></pre>
 <p>Column type strings must match <code>RainDbType</code> enum names exactly (<code>Utf8</code>, <code>Int32</code>, <code>Float64</code>, …). Case-sensitive parse is intentional — corrupt catalogs fail loudly.</p>
-<h3 id="flushcatalog">14.13.4 FlushCatalog</h3>
+<h3 id="flushcatalog">14.15.4 FlushCatalog</h3>
 <pre><code class="language-csharp">public void FlushCatalog()
 {
     lock (_ioLock)
@@ -617,20 +672,16 @@ internal sealed class RainDbColumnDocument
         WriteCatalogAtomic(doc);
     }
 }
-</code></pre>
-<p><code>BuildCatalogDocument</code> includes only <code>MemoryTable</code> entries (other <code>ITableSource</code> implementations are skipped). Tables are ordered by name (case-insensitive) for deterministic JSON.</p>
-<p>Atomic catalog write:</p>
-<pre><code class="language-csharp">private static void WriteCatalogAtomicToRoot(string root, RainDbCatalogDocument doc)
+
+private void WriteCatalogAtomic(RainDbCatalogDocument doc)
 {
-    var catalogPath = Path.Combine(root, CatalogFileName);
-    var tmp = catalogPath + &quot;.tmp&quot;;
+    var catalogPath = Path.Combine(RootDirectory, CatalogFileName);
     var json = JsonSerializer.Serialize(doc, JsonOptions);
-    File.WriteAllText(tmp, json);
-    File.Move(tmp, catalogPath, overwrite: true);
+    _atomicWriter.WriteAllText(catalogPath, json);
 }
 </code></pre>
-<p>Write-temp-then-rename avoids readers seeing partial JSON. Phase C4 will formalize ordering between catalog and batch durability.</p>
-<h2 id="creating-persistent-tables">14.14 Creating persistent tables</h2>
+<p><code>BuildCatalogDocument</code> includes only <code>MemoryTable</code> entries. Table names are sorted case-insensitively for deterministic JSON. <code>ExportCatalog</code> uses the same atomic writer for catalog and batches.</p>
+<h2 id="creating-persistent-tables">14.16 Creating persistent tables</h2>
 <pre><code class="language-csharp">public MemoryTable CreateMemoryTable(string name, TableSchema schema, TableId? id = null, bool strictVectorChunkRows = false)
 {
     var opts = new MemoryTableOptions(strictVectorChunkRows, BatchPersistence: this);
@@ -647,8 +698,8 @@ internal sealed class RainDbColumnDocument
 <li>Write <code>catalog.json</code> immediately so the table exists on disk even before first batch</li>
 </ol>
 <p>Optional <code>TableId</code> parameter supports deterministic IDs in tests or migrations.</p>
-<h2 id="memorytable-append-hooks">14.15 MemoryTable append hooks</h2>
-<h3 id="appendcore">14.15.1 AppendCore</h3>
+<h2 id="memorytable-append-hooks">14.17 MemoryTable append hooks</h2>
+<h3 id="appendcore">14.17.1 AppendCore</h3>
 <pre><code class="language-csharp">// src/RainDB.Core/Tables/MemoryTable.cs
 private void AppendCore(IColumnarBatch batch, bool notifyPersistence)
 {
@@ -672,7 +723,7 @@ private void AppendCore(IColumnarBatch batch, bool notifyPersistence)
 }
 </code></pre>
 <p><strong>Rollback on persistence failure.</strong> If disk write throws, the in-memory batch is removed so memory and disk cannot diverge silently within the process.</p>
-<h3 id="append-vs-appendhydratedbatch">14.15.2 Append vs AppendHydratedBatch</h3>
+<h3 id="append-vs-appendhydratedbatch">14.17.2 Append vs AppendHydratedBatch</h3>
 <table class="table">
 <thead>
 <tr>
@@ -698,7 +749,7 @@ private void AppendCore(IColumnarBatch batch, bool notifyPersistence)
 internal void AppendHydratedBatch(IColumnarBatch batch) =&gt; AppendCore(batch, notifyPersistence: false);
 </code></pre>
 <p>Hydration loads existing files without rewriting them.</p>
-<h3 id="iraindbbatchpersistence">14.15.3 IRainDbBatchPersistence</h3>
+<h3 id="iraindbbatchpersistence-batch-then-catalog">14.17.3 IRainDbBatchPersistence — batch then catalog</h3>
 <pre><code class="language-csharp">void IRainDbBatchPersistence.OnBatchAppended(TableId tableId, string tableName, int zeroBasedBatchIndex, IColumnarBatch batch)
 {
     var path = GetBatchPath(tableId, zeroBasedBatchIndex);
@@ -706,50 +757,61 @@ internal void AppendHydratedBatch(IColumnarBatch batch) =&gt; AppendCore(batch, 
     {
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
         WriteBatchFile(path, batch);
+        FlushCatalog();
     }
 }
 </code></pre>
+<p>Each successful append writes the new <code>.batch</code> atomically, then rewrites <code>catalog.json</code>. The catalog does not list individual batch files (only table schema and id), but flushing keeps on-disk metadata consistent with registered tables after every durable segment — including batch count implied by filesystem layout and any future catalog fields.</p>
 <p>Batch path pattern:</p>
 <pre><code class="language-csharp">private string GetBatchPath(TableId tableId, int zeroBasedBatchIndex) =&gt;
 Path.Combine(RootDirectory, TablesDirectoryName, tableId.ToString(), $&quot;{zeroBasedBatchIndex:D6}.batch&quot;);
 </code></pre>
 <p>Six-digit zero padding keeps lexical sort order aligned with append order.</p>
-<h3 id="atomic-batch-write">14.15.4 Atomic batch write</h3>
-<pre><code class="language-csharp">private static void WriteBatchFile(string path, IColumnarBatch batch)
+<h3 id="atomic-batch-write-and-codec-options">14.17.4 Atomic batch write and codec options</h3>
+<pre><code class="language-csharp">private void WriteBatchFile(string path, IColumnarBatch batch)
 {
-    var tmp = path + &quot;.tmp&quot;;
-    using (var fs = File.Create(tmp))
-        RainDbBatchBinaryCodec.WriteBatch(fs, batch);
-    File.Move(tmp, path, overwrite: true);
+    var codecOptions = new RainDbBatchCodecOptions
+    {
+        EnableInt32DictionaryEncoding = _options.EnableInt32DictionaryEncoding,
+    };
+    _atomicWriter.WriteStream(path, fs =&gt; RainDbBatchBinaryCodec.WriteBatch(fs, batch, codecOptions));
 }
 </code></pre>
-<p>Same temp-rename pattern as catalog. A crash mid-write leaves either old batch or complete new batch, never a truncated final file (assuming atomic <code>File.Move</code> on the host FS).</p>
-<h2 id="raindbbatchbinarycodec-overview">14.16 RainDbBatchBinaryCodec overview</h2>
+<h2 id="raindbbatchbinarycodec-overview">14.18 RainDbBatchBinaryCodec overview</h2>
 <p><code>RainDbBatchBinaryCodec</code> in <code>src/RainDB.Core/Persistence/RainDbBatchBinaryCodec.cs</code> implements batch format <strong>version 1</strong>, little-endian throughout.</p>
-<p>Supported chunk kinds:</p>
+<p>Supported column kinds:</p>
 <table class="table">
 <thead>
 <tr>
 <th>Kind byte</th>
-<th>Chunk type</th>
+<th>Name</th>
+<th>In-memory type</th>
 </tr>
 </thead>
 <tbody>
 <tr>
 <td><code>1</code></td>
+<td>Fixed</td>
 <td><code>FixedWidthColumnChunk</code></td>
 </tr>
 <tr>
 <td><code>2</code></td>
-<td><code>Utf8ColumnChunk</code> (Arrow-style offsets + blob)</td>
+<td>UTF-8 Arrow</td>
+<td><code>Utf8ColumnChunk</code></td>
 </tr>
 <tr>
 <td><code>3</code></td>
+<td>UTF-8 length-prefixed</td>
 <td><code>Utf8LengthPrefixedColumnChunk</code></td>
+</tr>
+<tr>
+<td><code>4</code></td>
+<td>Dict Int32</td>
+<td><code>DictionaryEncodedInt32ColumnChunk</code></td>
 </tr>
 </tbody>
 </table>
-<h3 id="batch-header">14.16.1 Batch header</h3>
+<h3 id="batch-header">14.18.1 Batch header</h3>
 <pre><code class="language-text">Offset  Size  Field
 ------  ----  -----
 0       8     Magic &quot;RNBATCH1&quot;
@@ -773,12 +835,15 @@ Path.Combine(RootDirectory, TablesDirectoryName, tableId.ToString(), $&quot;{zer
 <pre><code class="language-csharp">if (o != data.Length)
 throw new InvalidDataException($&quot;Batch buffer has {data.Length - o} trailing byte(s) after column data.&quot;);
 </code></pre>
-<h3 id="column-payloads-by-kind">14.16.2 Column payloads by kind</h3>
-<p><strong>Kind 1 — fixed-width:</strong> <code>kind</code>, <code>physicalType</code>, <code>hasNulls</code>, <code>rowCount</code>, <code>valuesLength</code>, raw values (<code>rowCount * typeWidth</code>), optional null bitmap.</p>
-<p><strong>Kind 2 — UTF-8 Arrow:</strong> <code>kind</code>, <code>hasNulls</code>, <code>rowCount</code>, <code>offsetsLength</code> (must equal <code>rowCount + 1</code>), offset table, <code>blobLength</code>, UTF-8 blob, optional null bitmap.</p>
-<p><strong>Kind 3 — UTF-8 length-prefixed:</strong> <code>kind</code>, <code>hasNulls</code>, <code>rowCount</code>, <code>payloadLength</code>, concatenated <code>[int32 len][bytes]</code> payloads, optional null bitmap.</p>
-<p><code>WriteColumn</code> dispatches on chunk runtime type; <code>ReadColumn</code> validates row counts and offset lengths before constructing chunks. Null bitmaps are omitted when <code>hasNulls</code> is false; otherwise <code>ColumnTypeSizes.NullBitmapBytes(rowCount)</code> bytes are written.</p>
-<h3 id="encodebatch-helper">14.16.3 EncodeBatch helper</h3>
+<h3 id="column-payloads-by-kind">14.18.2 Column payloads by kind</h3>
+<p><strong>Kind 1 — fixed-width:</strong> <code>kind</code>, <code>physicalType</code>, <code>hasNulls</code>, <code>rowCount</code>, <code>valuesLength</code>, raw values, optional null bitmap.</p>
+<p><strong>Kind 2 — UTF-8 Arrow:</strong> <code>kind</code>, <code>hasNulls</code>, <code>rowCount</code>, <code>offsetsLength</code>, offset table, <code>blobLength</code>, blob, optional null bitmap.</p>
+<p><strong>Kind 3 — UTF-8 length-prefixed:</strong> <code>kind</code>, <code>hasNulls</code>, <code>rowCount</code>, <code>payloadLength</code>, payload, optional null bitmap.</p>
+<p><strong>Kind 4 — dictionary Int32 (<code>KindDictInt32</code>):</strong> <code>kind</code>, <code>hasNulls</code>, <code>rowCount</code>, <code>dictLength</code>, dictionary <code>Int32</code> values, <code>indexWidthBytes</code> (1/2/4), <code>indicesLength</code>, index bytes, optional null bitmap.</p>
+<p>On write, plain <code>FixedWidthColumnChunk</code> with <code>RainDbType.Int32</code> may be rewritten to kind <code>4</code> when <code>EnableInt32DictionaryEncoding</code> is true and <code>Int32DictionaryColumnEncoder.TryEncode</code> succeeds (heuristic: at least four rows, dictionary size ≤ 65535, encoded bytes strictly smaller than raw). Already-encoded <code>DictionaryEncodedInt32ColumnChunk</code> instances write kind <code>4</code> directly.</p>
+<h3 id="int32dictionarycolumnencoder-summary">14.18.3 Int32DictionaryColumnEncoder (summary)</h3>
+<p>The encoder scans non-null values, builds a distinct-value map, chooses 1- or 2-byte indices when dictionary size permits, and compares total encoded size against <code>rowCount * 4</code>. Null rows still participate in the null bitmap; index slots for null rows are zero-filled and ignored by decode semantics for null bits.</p>
+<h3 id="encodebatch-helper">14.18.4 EncodeBatch helper</h3>
 <pre><code class="language-csharp">public static byte[] EncodeBatch(IColumnarBatch batch)
 {
     using var ms = new MemoryStream();
@@ -787,28 +852,65 @@ throw new InvalidDataException($&quot;Batch buffer has {data.Length - o} trailin
 }
 </code></pre>
 <p>Tests and in-memory round-trips use <code>EncodeBatch</code> / <code>DecodeBatch</code> without touching the filesystem.</p>
-<h2 id="loading-batches-from-disk">14.17 Loading batches from disk</h2>
-<pre><code class="language-csharp">private static void LoadBatchesIntoTable(string root, MemoryTable table)
+<h2 id="loading-batches-mmap-and-fallback">14.19 Loading batches — mmap and fallback</h2>
+<pre><code class="language-csharp">private void LoadBatchesIntoTable(MemoryTable table, bool preferMmap)
 {
-    var dir = Path.Combine(root, TablesDirectoryName, table.Id.ToString());
+    var dir = Path.Combine(RootDirectory, TablesDirectoryName, table.Id.ToString());
     if (!Directory.Exists(dir))
         return;
     foreach (var file in Directory.GetFiles(dir, &quot;*.batch&quot;).OrderBy(f =&gt; f, StringComparer.Ordinal))
     {
+        if (!RainDbAtomicFileWriter.IsCommittedBatchFileName(Path.GetFileName(file)))
+            continue;
+        if (preferMmap)
+        {
+            try
+            {
+                var mapped = _mmapReader.Open(file);
+                table.AppendHydratedBatch(mapped.Batch);
+                _mappedBatchMemory.RegisterMappedBatch(table, table.Batches.Count - 1, mapped, file);
+                continue;
+            }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+        }
+
         var bytes = File.ReadAllBytes(file);
-        var batch = RainDbBatchBinaryCodec.DecodeBatch(bytes);
-        table.AppendHydratedBatch(batch);
+        table.AppendHydratedBatch(RainDbBatchBinaryCodec.DecodeBatch(bytes));
     }
 }
 </code></pre>
-<p>Notes:</p>
+<h3 id="raindbbatchmmapreader-and-mappedcolumnarbatch">RainDbBatchMmapReader and MappedColumnarBatch</h3>
+<p><code>RainDbBatchMmapReader.Open(path)</code> memory-maps the entire <code>.batch</code> file, parses the <code>RNBATCH1</code> header in-place, and builds a <code>ColumnarBatch</code>. Fixed-width columns (kind 1) expose <code>Values</code> and null bitmaps as slices into the map. UTF-8 and dictionary Int32 columns copy their variable portions into managed arrays (see Chapter 16).</p>
+<p><code>MappedColumnarBatch</code> wraps:</p>
 <ul>
-<li><strong>Full file read into RAM</strong> today (<code>File.ReadAllBytes</code>). Chapter 16 describes mmap replacement for fixed-width columns.</li>
-<li><strong>Lexical sort</strong> on file paths matches numeric batch order when names are zero-padded.</li>
-<li><strong>Missing batch directory</strong> is tolerated (empty table with schema from catalog).</li>
+<li><code>Batch</code> — the hydrated <code>IColumnarBatch</code> held in <code>MemoryTable._batches</code></li>
+<li>A private <code>IDisposable</code> that releases the mmap view when disposed</li>
 </ul>
-<h2 id="export-and-import">14.18 Export and import</h2>
-<h3 id="exportcatalog">14.18.1 ExportCatalog</h3>
+<p><code>MemoryTable.AttachMappedBatch(batchIndex, mapped)</code> keeps the handle alive while the table references mapped slices. <strong>Scans must not outlive an evicted map</strong> — the memory manager coordinates eviction.</p>
+<p><code>ImportCatalog</code> uses a static loader with <code>preferMmap: true</code> but does not attach the database memory manager (no budget/LRU until you open via <code>RainDbFileDatabase</code>).</p>
+<h2 id="raindbmappedbatchmemorymanager">14.20 RainDbMappedBatchMemoryManager</h2>
+<p>The manager implements <code>IMappedBatchScanObserver</code> and tracks resident mmap bytes per database.</p>
+<pre><code class="language-csharp">public void RegisterMappedBatch(MemoryTable table, int batchIndex, MappedColumnarBatch mapped, string batchFilePath)
+{
+    // Charge byte estimate (sum of column Values + NullBitmap lengths, min 4096)
+    // If budget exceeded:
+    //   Fail → throw InvalidOperationException
+    //   EvictColdBatches → evict LRU tail until under budget
+    table.AttachMappedBatch(batchIndex, mapped);
+}
+
+public void OnBatchScanned(TableId tableId, int batchIndex)
+{
+    // Move entry to front of LRU (touch)
+}
+</code></pre>
+<p><strong>EvictColdBatches:</strong> remove the least-recently scanned mapped batch, <code>DecodeBatch(ReadAllBytes(path))</code> into RAM, <code>ReplaceHydratedBatchAt</code>, dispose <code>MappedColumnarBatch</code>, <code>DetachMappedBatch</code>. SQL results stay correct; only the backing store changes from mmap to heap.</p>
+<p><strong>Fail:</strong> <code>RegisterMappedBatch</code> throws if adding the segment would exceed <code>MappedBatchMemoryBudgetBytes</code>.</p>
+<p><code>RainDbEngine</code> wires <code>fileDb.MappedBatchScanObserver</code> into <code>RainDbExecutionContext</code>; <code>VectorizedScanEngine</code> calls <code>OnBatchScanned</code> when a persistent table batch is scanned.</p>
+<p>Expose metrics via <code>fileDb.MappedBatchMemory.ResidentBytes</code> and <code>BudgetBytes</code>.</p>
+<h2 id="export-and-import">14.21 Export and import</h2>
+<h3 id="exportcatalog">14.21.1 ExportCatalog</h3>
 <p>Creates a fresh on-disk snapshot from any <code>ICatalog</code>:</p>
 <pre><code class="language-csharp">public static void ExportCatalog(ICatalog catalog, string rootDirectory)
 {
@@ -826,25 +928,24 @@ throw new InvalidDataException($&quot;Batch buffer has {data.Length - o} trailin
         for (var i = 0; i &lt; col.Batches.Count; i++)
         {
             var batchPath = Path.Combine(tableDir, $&quot;{i:D6}.batch&quot;);
-            WriteBatchFile(batchPath, col.Batches[i]);
+            writer.WriteStream(batchPath, fs =&gt; RainDbBatchBinaryCodec.WriteBatch(fs, col.Batches[i]));
         }
     }
-    WriteCatalogAtomicToRoot(root, doc);
+    writer.WriteAllText(catalogPath, JsonSerializer.Serialize(doc, JsonOptions));
 }
 </code></pre>
-<p>Export <strong>wipes</strong> existing <code>tables/</code> under the target root. Use for backup clones, CI fixtures, and &quot;serialize entire dataset&quot; tooling.</p>
-<h3 id="importcatalog">14.18.2 ImportCatalog</h3>
+<p>Export <strong>wipes</strong> existing <code>tables/</code> under the target root. Batch writes use the same atomic stream helper as live appends.</p>
+<h3 id="importcatalog">14.21.2 ImportCatalog</h3>
 <pre><code class="language-csharp">public static InMemoryCatalog ImportCatalog(string rootDirectory)
 {
-    // read catalog.json
-    // for each table: MemoryTable without persistence hook
-    // LoadBatchesIntoTable
-    // catalog.Register(table)
+    if (!RainDbAtomicFileWriter.TryReadCommittedCatalogJson(root, out var json))
+        throw new FileNotFoundException(...);
+    // MemoryTable without BatchPersistence; LoadBatchesIntoTableStatic(..., preferMmap: true)
     return catalog;
 }
 </code></pre>
-<p>Import returns an in-memory catalog <strong>without</strong> automatic persistence. Pair with <code>RainDbFileDatabase.Open</code> or manually wire <code>BatchPersistence</code> if you want continued durability.</p>
-<h2 id="end-to-end-persistence-test-pattern">14.19 End-to-end persistence test pattern</h2>
+<p>Import returns an in-memory catalog <strong>without</strong> automatic persistence or mmap budget tracking.</p>
+<h2 id="end-to-end-persistence-test-pattern">14.22 End-to-end persistence test pattern</h2>
 <p>From <code>src/RainDB.Tests/RainDbPersistenceTests.cs</code>:</p>
 <pre><code class="language-csharp">[Fact]
 public async Task OpenPersistent_append_then_reopen_restores_batches()
@@ -864,7 +965,7 @@ public async Task OpenPersistent_append_then_reopen_restores_batches()
 }
 </code></pre>
 <p>Codec unit test covers all three UTF-8/fixed chunk kinds independently of filesystem.</p>
-<h2 id="io-locking-model">14.20 IO locking model</h2>
+<h2 id="io-locking-model">14.23 IO locking model</h2>
 <p><code>RainDbFileDatabase</code> uses a single <code>_ioLock</code> for:</p>
 <ul>
 <li>Hydration</li>
@@ -872,70 +973,63 @@ public async Task OpenPersistent_append_then_reopen_restores_batches()
 <li>Batch append writes</li>
 </ul>
 <p>Concurrent appends from multiple threads will serialize on this lock. Concurrent <strong>reads</strong> through <code>MemoryTable.Batches</code> during append are safe for RainDB's single-writer assumption but not a documented multi-writer contract.</p>
-<h2 id="memory-and-performance-characteristics">14.21 Memory and performance characteristics</h2>
+<h2 id="memory-and-performance-characteristics">14.24 Memory and performance characteristics</h2>
 <table class="table">
 <thead>
 <tr>
 <th>Operation</th>
-<th>Cost today</th>
-<th>Future (Phase C)</th>
+<th>Default behavior</th>
+<th>Fallback</th>
 </tr>
 </thead>
 <tbody>
 <tr>
 <td>Open / hydrate</td>
-<td>Read entire batch files into managed byte arrays</td>
-<td>mmap fixed-width columns</td>
+<td>mmap <code>.batch</code>; kind-1 columns zero-copy in process</td>
+<td><code>ReadAllBytes</code> + <code>DecodeBatch</code> on mmap failure</td>
 </tr>
 <tr>
 <td>Append</td>
-<td>Serialize batch to stream + rename</td>
-<td>Optional async IO queue</td>
+<td>Atomic batch write + <code>FlushCatalog</code></td>
+<td>—</td>
 </tr>
 <tr>
 <td>Catalog update</td>
-<td>Rewrite full <code>catalog.json</code></td>
-<td>Incremental table metadata</td>
+<td>Full JSON rewrite (atomic)</td>
+<td>—</td>
 </tr>
 <tr>
 <td>Query</td>
-<td>Scans in-memory chunks</td>
-<td>Scan mapped spans (zero-copy)</td>
+<td>Scan mapped or heap chunks; LRU touch on mmap batches</td>
+<td>Evicted batches are fully decoded in RAM</td>
 </tr>
 </tbody>
 </table>
-<p>For datasets larger than RAM, hydration-as-<code>ReadAllBytes</code> is the primary bottleneck. That is intentional MVP scope — mmap integration is designed but not yet wired into <code>LoadBatchesIntoTable</code>.</p>
-<h2 id="durability-semantics-mvp">14.22 Durability semantics (MVP)</h2>
+<p>Dictionary Int32 columns still allocate index/dictionary bytes on mmap hydrate; accessing <code>Values</code> may materialize a full Int32 array (Chapter 4).</p>
+<h2 id="durability-semantics">14.25 Durability semantics</h2>
 <p>What you can rely on today:</p>
 <ul>
-<li>Temp-file + rename for catalog and batches</li>
-<li>In-memory rollback if batch write fails after append</li>
+<li><code>RainDbAtomicFileWriter</code> temp-rename for catalog and batches; <code>.tmp</code> files ignored on read</li>
+<li>Catalog flush after each persisted batch append (same lock as batch write)</li>
+<li>In-memory rollback if persistence throws after <code>AppendBatch</code></li>
 <li>Stable <code>TableId</code> and batch indices across reopen</li>
 </ul>
-<p>What is <strong>not</strong> guaranteed yet:</p>
+<p>What is <strong>not</strong> fully specified yet:</p>
 <ul>
-<li>Crash between batch write and catalog update (or vice versa) recovery rules</li>
-<li>fsync / flush policy documentation</li>
-<li>Detection of missing batch files referenced by catalog</li>
+<li>fsync / media flush policy</li>
+<li>Automated repair for orphan or missing batch files</li>
 </ul>
-<p>Phase C4 and Phase F address these explicitly in <code>docs/Development-Roadmap.md</code>.</p>
-<h2 id="relationship-to-column-file-format">14.23 Relationship to column file format</h2>
-<p><code>ColumnarFixedWidthFileFormat</code> (Chapter 16) is a <strong>per-column</strong> mmap-oriented layout with magic <code>RNBFCOL1</code>. Batch files (<code>RNBATCH1</code>) are <strong>whole-batch</strong> containers with multiple columns and UTF-8 encodings.</p>
-<p>Roadmap path:</p>
-<ol>
-<li>Keep batch format for mixed-type tables and UTF-8</li>
-<li>Optionally decompose fixed-width columns into sidecar <code>.col</code> files for mmap</li>
-<li>Teach hydration to construct <code>MappedFixedWidthColumnChunk</code> instead of copying bytes</li>
-</ol>
-<p>The codecs are complementary, not competing.</p>
-<h2 id="operational-recipes">14.24 Operational recipes</h2>
+<p>WAL and stronger cross-file transactional guarantees remain Phase F (Chapter 15).</p>
+<h2 id="relationship-to-rnbfcol1-column-files">14.26 Relationship to RNBFCOL1 column files</h2>
+<p><code>ColumnarFixedWidthFileFormat</code> (<code>RNBFCOL1</code>, Chapter 16) mmap <strong>one column per file</strong>. <code>RNBATCH1</code> mmap <strong>one multi-column segment per file</strong> and only avoids copying kind-1 payloads. Sidecar column files remain optional tooling — batch persistence is the primary table storage path.</p>
+<h2 id="operational-recipes">14.27 Operational recipes</h2>
 <ul>
 <li><strong>Backup:</strong> <code>RainDbFileDatabase.ExportCatalog(engine.Catalog, path)</code> or copy the database root while idle</li>
 <li><strong>Clone in-memory → disk:</strong> <code>ExportCatalog</code> then <code>RainDbEngine.OpenPersistent</code></li>
 <li><strong>Inspect batch:</strong> <code>RainDbBatchBinaryCodec.DecodeBatch(File.ReadAllBytes(&quot;tables/{id}/000000.batch&quot;))</code></li>
 <li><strong>Fresh DB:</strong> <code>RainDbEngine.OpenPersistent(tempDir)</code> + <code>FileDatabase.CreateMemoryTable</code></li>
 </ul>
-<h2 id="errors-and-format-evolution">14.25 Errors and format evolution</h2>
+<h2 id="errors-and-format-evolution">14.28 Errors and format evolution</h2>
 <table class="table">
 <thead>
 <tr>
@@ -967,8 +1061,8 @@ public async Task OpenPersistent_append_then_reopen_restores_batches()
 </tbody>
 </table>
 <p>When changing on-disk formats: bump <code>formatVersion</code>, keep decode for prior version or ship a migration tool, add <code>RainDbPersistenceTests</code> round-trips, and assign new column kind bytes without reusing old IDs.</p>
-<h2 id="summary">14.26 Summary</h2>
-<p><strong>Part I</strong> covered storage engine layering, WAL and checkpoint theory, page vs log-structured organizations, industry columnar formats, catalog durability, crash recovery, and snapshot import/export concepts. <strong>Part II</strong> showed RainDB's directory-backed MVP: <code>catalog.json</code> describes tables; <code>tables/{TableId}/######.batch</code> stores append-ordered columnar segments; <code>RainDbFileDatabase</code> hydrates on open and wires <code>IRainDbBatchPersistence</code> into <code>MemoryTable</code> with atomic temp-rename writes. The next storage increment — mmap-backed fixed-width columns — builds on this foundation without replacing the catalog model (see Chapter 16).</p>
+<h2 id="summary">14.29 Summary</h2>
+<p><strong>Part I</strong> covered storage engine layering, WAL and checkpoint theory, page vs log-structured organizations, industry columnar formats, catalog durability, crash recovery, and snapshot import/export concepts. <strong>Part II</strong> described RainDB's current directory-backed engine: <code>RainDbAtomicFileWriter</code> commits <code>catalog.json</code> and <code>######.batch</code> files while ignoring <code>*.tmp</code>; <code>RainDbFileDatabaseOptions</code> controls mmap hydration, Int32 dictionary encoding on write, and mmap memory budget (<code>EvictColdBatches</code> vs <code>Fail</code>); <code>RainDbBatchMmapReader</code> and <code>MappedColumnarBatch</code> tie batch lifetime to <code>MemoryTable</code> and <code>RainDbMappedBatchMemoryManager</code>; scans refresh LRU via <code>IMappedBatchScanObserver</code>. See Chapter 16 for mmap mechanics and the distinction from per-column <code>RNBFCOL1</code> files.</p>
 </div>
           <footer class="doc-footer">
             <p>Generated by <strong>hoihky</strong> with <strong>MDWeb</strong> and with assistance from <strong>AI</strong></p>
@@ -1110,127 +1204,147 @@ public async Task OpenPersistent_append_then_reopen_restores_batches()
                         </li>
                         
                         <li class="toc-h2">
-                          <a href="#1412-opening-a-persistent-database">14.12 Opening a persistent database</a>
-                        </li>
-                        
-                        <li class="toc-h3">
-                          <a href="#14121-raindbfiledatabaseopen">14.12.1 RainDbFileDatabase.Open</a>
-                        </li>
-                        
-                        <li class="toc-h3">
-                          <a href="#14122-raindbengineopenpersistent">14.12.2 RainDbEngine.OpenPersistent</a>
-                        </li>
-                        
-                        <li class="toc-h3">
-                          <a href="#14123-hydratefromdiskifpresent">14.12.3 HydrateFromDiskIfPresent</a>
+                          <a href="#1412-raindbatomicfilewriter">14.12 RainDbAtomicFileWriter</a>
                         </li>
                         
                         <li class="toc-h2">
-                          <a href="#1413-catalogjson-format">14.13 catalog.json format</a>
-                        </li>
-                        
-                        <li class="toc-h3">
-                          <a href="#14131-document-types">14.13.1 Document types</a>
-                        </li>
-                        
-                        <li class="toc-h3">
-                          <a href="#14132-example-catalogjson">14.13.2 Example catalog.json</a>
-                        </li>
-                        
-                        <li class="toc-h3">
-                          <a href="#14133-schema-reconstruction">14.13.3 Schema reconstruction</a>
-                        </li>
-                        
-                        <li class="toc-h3">
-                          <a href="#14134-flushcatalog">14.13.4 FlushCatalog</a>
+                          <a href="#1413-raindbfiledatabaseoptions">14.13 RainDbFileDatabaseOptions</a>
                         </li>
                         
                         <li class="toc-h2">
-                          <a href="#1414-creating-persistent-tables">14.14 Creating persistent tables</a>
-                        </li>
-                        
-                        <li class="toc-h2">
-                          <a href="#1415-memorytable-append-hooks">14.15 MemoryTable append hooks</a>
+                          <a href="#1414-opening-a-persistent-database">14.14 Opening a persistent database</a>
                         </li>
                         
                         <li class="toc-h3">
-                          <a href="#14151-appendcore">14.15.1 AppendCore</a>
+                          <a href="#14141-raindbfiledatabaseopen">14.14.1 RainDbFileDatabase.Open</a>
                         </li>
                         
                         <li class="toc-h3">
-                          <a href="#14152-append-vs-appendhydratedbatch">14.15.2 Append vs AppendHydratedBatch</a>
+                          <a href="#14142-raindbengineopenpersistent">14.14.2 RainDbEngine.OpenPersistent</a>
                         </li>
                         
                         <li class="toc-h3">
-                          <a href="#14153-iraindbbatchpersistence">14.15.3 IRainDbBatchPersistence</a>
+                          <a href="#14143-hydratefromdiskifpresent">14.14.3 HydrateFromDiskIfPresent</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1415-catalogjson-format">14.15 catalog.json format</a>
                         </li>
                         
                         <li class="toc-h3">
-                          <a href="#14154-atomic-batch-write">14.15.4 Atomic batch write</a>
-                        </li>
-                        
-                        <li class="toc-h2">
-                          <a href="#1416-raindbbatchbinarycodec-overview">14.16 RainDbBatchBinaryCodec overview</a>
+                          <a href="#14151-document-types">14.15.1 Document types</a>
                         </li>
                         
                         <li class="toc-h3">
-                          <a href="#14161-batch-header">14.16.1 Batch header</a>
+                          <a href="#14152-example-catalogjson">14.15.2 Example catalog.json</a>
                         </li>
                         
                         <li class="toc-h3">
-                          <a href="#14162-column-payloads-by-kind">14.16.2 Column payloads by kind</a>
+                          <a href="#14153-schema-reconstruction">14.15.3 Schema reconstruction</a>
                         </li>
                         
                         <li class="toc-h3">
-                          <a href="#14163-encodebatch-helper">14.16.3 EncodeBatch helper</a>
+                          <a href="#14154-flushcatalog">14.15.4 FlushCatalog</a>
                         </li>
                         
                         <li class="toc-h2">
-                          <a href="#1417-loading-batches-from-disk">14.17 Loading batches from disk</a>
+                          <a href="#1416-creating-persistent-tables">14.16 Creating persistent tables</a>
                         </li>
                         
                         <li class="toc-h2">
-                          <a href="#1418-export-and-import">14.18 Export and import</a>
+                          <a href="#1417-memorytable-append-hooks">14.17 MemoryTable append hooks</a>
                         </li>
                         
                         <li class="toc-h3">
-                          <a href="#14181-exportcatalog">14.18.1 ExportCatalog</a>
+                          <a href="#14171-appendcore">14.17.1 AppendCore</a>
                         </li>
                         
                         <li class="toc-h3">
-                          <a href="#14182-importcatalog">14.18.2 ImportCatalog</a>
+                          <a href="#14172-append-vs-appendhydratedbatch">14.17.2 Append vs AppendHydratedBatch</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#14173-iraindbbatchpersistence-batch-then-catalog">14.17.3 IRainDbBatchPersistence — batch then catalog</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#14174-atomic-batch-write-and-codec-options">14.17.4 Atomic batch write and codec options</a>
                         </li>
                         
                         <li class="toc-h2">
-                          <a href="#1419-end-to-end-persistence-test-pattern">14.19 End-to-end persistence test pattern</a>
+                          <a href="#1418-raindbbatchbinarycodec-overview">14.18 RainDbBatchBinaryCodec overview</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#14181-batch-header">14.18.1 Batch header</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#14182-column-payloads-by-kind">14.18.2 Column payloads by kind</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#14183-int32dictionarycolumnencoder-summary">14.18.3 Int32DictionaryColumnEncoder (summary)</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#14184-encodebatch-helper">14.18.4 EncodeBatch helper</a>
                         </li>
                         
                         <li class="toc-h2">
-                          <a href="#1420-io-locking-model">14.20 IO locking model</a>
+                          <a href="#1419-loading-batches-mmap-and-fallback">14.19 Loading batches — mmap and fallback</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#raindbbatchmmapreader-and-mappedcolumnarbatch">RainDbBatchMmapReader and MappedColumnarBatch</a>
                         </li>
                         
                         <li class="toc-h2">
-                          <a href="#1421-memory-and-performance-characteristics">14.21 Memory and performance characteristics</a>
+                          <a href="#1420-raindbmappedbatchmemorymanager">14.20 RainDbMappedBatchMemoryManager</a>
                         </li>
                         
                         <li class="toc-h2">
-                          <a href="#1422-durability-semantics-mvp">14.22 Durability semantics (MVP)</a>
+                          <a href="#1421-export-and-import">14.21 Export and import</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#14211-exportcatalog">14.21.1 ExportCatalog</a>
+                        </li>
+                        
+                        <li class="toc-h3">
+                          <a href="#14212-importcatalog">14.21.2 ImportCatalog</a>
                         </li>
                         
                         <li class="toc-h2">
-                          <a href="#1423-relationship-to-column-file-format">14.23 Relationship to column file format</a>
+                          <a href="#1422-end-to-end-persistence-test-pattern">14.22 End-to-end persistence test pattern</a>
                         </li>
                         
                         <li class="toc-h2">
-                          <a href="#1424-operational-recipes">14.24 Operational recipes</a>
+                          <a href="#1423-io-locking-model">14.23 IO locking model</a>
                         </li>
                         
                         <li class="toc-h2">
-                          <a href="#1425-errors-and-format-evolution">14.25 Errors and format evolution</a>
+                          <a href="#1424-memory-and-performance-characteristics">14.24 Memory and performance characteristics</a>
                         </li>
                         
                         <li class="toc-h2">
-                          <a href="#1426-summary">14.26 Summary</a>
+                          <a href="#1425-durability-semantics">14.25 Durability semantics</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1426-relationship-to-rnbfcol1-column-files">14.26 Relationship to RNBFCOL1 column files</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1427-operational-recipes">14.27 Operational recipes</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1428-errors-and-format-evolution">14.28 Errors and format evolution</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#1429-summary">14.29 Summary</a>
                         </li>
                         
                   </ul>

@@ -7,7 +7,7 @@ order: 0
 
 **Using RainDB as a working example**
 
-This book teaches you how to design and implement an embedded columnar OLAP database engine step by step. RainDB is an experimental .NET engine that stores data in columnar batches, executes queries with vectorized operators, and compiles a strict SQL subset into physical plans. Every chapter walks through one layer of the stack.
+This book teaches you how to design and implement an embedded columnar OLAP database engine step by step. RainDB is an experimental .NET engine that stores data in columnar batches, runs vectorized operators through a pluggable operator suite, and compiles a growing SQL surface (aggregates, joins, subqueries, prepared statements, and EXPLAIN) into physical plans. Every chapter walks through one layer of the stack.
 
 ## Theory-first structure
 
@@ -69,6 +69,20 @@ Each chapter corresponds to one implementation step you would take when building
 | [14. Persistence](14-persistence.md) | Catalog JSON, batch codec | WAL, checkpointing, crash recovery, columnar file formats |
 | [15. Future Extensions](15-future-extensions.md) | Roadmap and stubs | Production OLAP requirements, CBO, statistics, observability |
 | [16. mmap I/O](16-mmap-io.md) | `RNBFCOL1` column files | Virtual memory, page cache, zero-copy, mmap vs read |
+| [17. Advanced SQL and Analytics](17-advanced-sql-and-analytics.md) | DISTINCT, subqueries, UNION, EXPLAIN | Prepared plans, rule-based rewrite, correlation, outer joins, overlay catalogs |
+
+## What RainDB does today
+
+This book is aligned with the RainDB codebase and `docs/Implementation-Status.md` as of the latest Phase D analytics batch. At a glance:
+
+- **Storage** — Columnar batches (`MemoryTable`), fixed-width and UTF-8 chunks, optional Int32 dictionary encoding on durable batch write, directory-backed `catalog.json` plus `######.batch` segments (not a WAL).
+- **Execution** — Vectorized scan/filter/project, morsel parallelism, global and hash `GROUP BY`, hash and sort-merge equi-joins (inner and outer), sort/top-N, hash aggregation with optional spill **metrics** via `ISpillWriter`.
+- **SQL** — Strict subset: expressions in `WHERE`/`SELECT`/`ORDER BY`, `HAVING`, `LEFT`/`RIGHT`/`FULL` joins, `UNION ALL` and deduplicating `UNION`, `SELECT DISTINCT` and `COUNT(DISTINCT)`, uncorrelated and scan-correlated `IN`/`EXISTS`, derived tables, `GROUP BY` with `ORDER BY`/`LIMIT`, `@param` prepared statements, and `EXPLAIN` / `EXPLAIN LOGICAL` / `EXPLAIN PHYSICAL`.
+- **Planning** — `LogicalRewritePipeline` (predicate partition, projection pruning), `HeuristicJoinAlgorithmSelector`, `CompiledSqlCache` with schema-version invalidation.
+- **I/O** — mmap batch hydration with optional mapped-memory budget and LRU eviction (Chapter 16).
+- **Not yet** — WAL and MVCC, cost-based optimization and statistics, `EXPLAIN ANALYZE` timers, LINQ translation beyond `ExplainOnlyPhysicalPlan`, real spill merge, window functions, and correlated subqueries whose outer context is a join row.
+
+Chapter 15 tracks roadmap gaps; Chapter 17 documents the implemented analytics and planning surface in depth.
 
 ## How to read this book
 
@@ -78,7 +92,7 @@ Read chapters in order for the full build narrative. Later chapters assume earli
 - **Part II in every chapter** walks through RainDB's current implementation with source references.
 - **Chapter 15** is best read after 13–16 when you want the full roadmap map, not just today's code.
 
-RainDB is actively developed. Sections marked **(planned)** describe interfaces or stubs that exist today but are not fully implemented. Chapter 15 collects extension points; Chapter 16 documents mmap code that is implemented but not yet wired into default persistence hydration.
+RainDB is actively developed. Sections marked **(planned)** describe interfaces or stubs that exist today but are not fully implemented. Chapter 15 collects extension points; Chapters 16–17 reflect persistence mmap integration and the current Phase B/D SQL surface. When Implementation Status moves, update this index and the affected chapters together.
 
 ## A minimal end-to-end example
 

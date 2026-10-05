@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Chapter 2: Architecture and Modules · Building an OLAP Database Engine from Scratch with RainDB</title>
-  <meta name="description" content="Theory-first deep guide to OLAP engine design and RainDB internals">
+  <meta name="description" content="Generated documentation site">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -125,6 +125,12 @@
                         <li class="nav-item depth-0">
                           
                             <a href="16-mmap-io.html" class="nav-link">Chapter 16: mmap I/O</a>
+                            
+                        </li>
+                        
+                        <li class="nav-item depth-0">
+                          
+                            <a href="17-advanced-sql-and-analytics.html" class="nav-link">Chapter 17: Advanced SQL and Analytics</a>
                             
                         </li>
                         
@@ -431,7 +437,7 @@ options: dop=4, avx2_sum=true
 6. Choose cheapest → physical plan
 7. Compile → executable code
 </code></pre>
-<p>RainDB Phase 1 runs a <strong>pared-down</strong> pipeline: parse → bind → lower, with little cost-based optimization. Still, the <strong>two-IR architecture</strong> follows System R's separation even without a full cost model.</p>
+<p>RainDB follows the same <strong>stages</strong> at a smaller scale: parse → <strong>logical rewrite</strong> (<code>LogicalRewritePipeline</code>) → physical bind → execute. Join <strong>algorithm</strong> choice uses row-count heuristics rather than a full System R-style cost model, but the <strong>two-IR architecture</strong> (logical names vs physical ids and algorithms) matches the System R template.</p>
 <h3 id="algebraic-rewrite-example">Algebraic rewrite example</h3>
 <p>Original:</p>
 <pre><code class="language-text">π_{name}(σ_{age&gt;30}(σ_{city='NYC'}(employees)))
@@ -459,9 +465,9 @@ Physical: SortMergeJoin(Sort(Scan(A)), Sort(Scan(B)))
 <h3 id="cascades-versus-raindb">Cascades versus RainDB</h3>
 <p>RainDB does not implement a full Cascades memo table. Instead:</p>
 <ul>
-<li><strong>Binders</strong> (<code>LogicalTableScanBinder</code>, <code>LogicalJoinBinder</code>) perform name resolution and direct lowering</li>
-<li><strong>Physical plan types</strong> are explicit classes, not rule-generated</li>
-<li><strong>Extension</strong> happens by adding new <code>IPhysicalPlan</code> types and executor dispatch branches</li>
+<li><strong><code>LogicalRewritePipeline</code></strong> applies ordered <strong><code>ILogicalRewriteRule</code></strong> implementations before physical binding</li>
+<li><strong><code>LogicalPlanCompiler</code></strong> composes binders that lower logical roots to explicit <strong><code>IPhysicalPlan</code></strong> classes</li>
+<li><strong><code>IQueryOperatorSuite</code></strong> maps physical plans to vectorized operator instances; <strong><code>DefaultQueryExecutor</code></strong> dispatches plan types</li>
 </ul>
 <p>The Cascades lesson still applies: <strong>keep logical rewrites separate from physical implementation choices</strong> so each can evolve independently.</p>
 <h3 id="extensibility-pattern-from-cascades">Extensibility pattern from Cascades</h3>
@@ -482,17 +488,17 @@ Physical: SortMergeJoin(Sort(Scan(A)), Sort(Scan(B)))
 <tr>
 <td>Add physical algorithm</td>
 <td>New implementation rule</td>
-<td>New <code>IPhysicalPlan</code> + engine</td>
+<td>New <code>IPhysicalPlan</code> + operator + executor branch</td>
 </tr>
 <tr>
 <td>Add rewrite rule</td>
 <td>Transformation rule</td>
-<td>Binder / optimizer pass</td>
+<td><code>ILogicalRewriteRule</code> in <code>LogicalRewritePipeline</code></td>
 </tr>
 <tr>
 <td>Add cost function</td>
 <td>Cost method on physical expr</td>
-<td>Future: <code>IOptimizer</code></td>
+<td>Future: statistics-driven CBO (heuristics today)</td>
 </tr>
 </tbody>
 </table>
@@ -761,6 +767,8 @@ GROUP BY region
 <p>Identify the composition root in a web application using RainDB. What would you inject for integration tests versus production?</p>
 <h3 id="exercise-2.6-extension-scenario">Exercise 2.6 — Extension scenario</h3>
 <p>You need to add a <code>ParquetTableSource</code> that reads Apache Parquet files. Which projects do you modify? Which interfaces do you implement?</p>
+<h3 id="bridge-from-part-i-to-raindb-modules">Bridge from Part I to RainDB modules</h3>
+<p>The theory sections above describe how large DBMSes layer parsers, optimizers, catalogs, and executors. RainDB implements that split across six projects: <strong><code>SqlCompilationService</code></strong> owns parse → optimize → bind; <strong><code>DefaultQueryExecutor</code></strong> plus <strong><code>DefaultQueryOperatorSuite</code></strong> own execution; <strong><code>OverlayCatalog</code></strong> and <strong><code>RainDbExecutionContext.NestedExecutor</code></strong> connect derived tables and subqueries without a second engine type. Part II maps each module to those responsibilities.</p>
 <hr />
 <h1 id="part-ii-raindb-implementation">Part II: RainDB Implementation</h1>
 <hr />
@@ -857,22 +865,22 @@ GROUP BY region
 </code></pre>
 <p><code>AllowUnsafeBlocks</code> enables pointer arithmetic in aligned buffer rent and mmap readers.</p>
 <h3 id="raindb.query">RainDB.Query</h3>
-<p><strong>Purpose:</strong> Physical operator plans and execution engines (Open/Closed Principle — add operators without changing compiler interfaces).</p>
+<p><strong>Purpose:</strong> Physical operator plans, vectorized execution, and the default query executor.</p>
 <p><strong>Key types:</strong></p>
 <ul>
-<li>Plans: <code>VectorizedScanPhysicalPlan</code>, <code>HashAggregatePhysicalPlan</code>, <code>JoinPhysicalPlan</code>, <code>SortTopNPhysicalPlan</code>, <code>JoinSortTopNPhysicalPlan</code>, <code>GroupedJoinPhysicalPlan</code></li>
-<li>Engines: <code>VectorizedScanEngine</code>, <code>HashAggregateEngine</code>, <code>JoinExecutionEngine</code>, <code>SortTopNEngine</code></li>
+<li>Plans: <code>VectorizedScanPhysicalPlan</code>, <code>HashAggregatePhysicalPlan</code>, <code>JoinPhysicalPlan</code>, <code>SortTopNPhysicalPlan</code>, <code>JoinSortTopNPhysicalPlan</code>, <code>GroupedJoinPhysicalPlan</code>, <code>GroupedJoinSortTopNPhysicalPlan</code>, <code>GroupedSortTopNPhysicalPlan</code>, <code>DerivedTableScanPhysicalPlan</code>, <code>DistinctPhysicalPlan</code>, <code>UnionAllPhysicalPlan</code>, <code>ExplainBundlePhysicalPlan</code></li>
+<li>Operators: <code>VectorizedScanOperator</code>, <code>HashAggregateOperator</code>, <code>JoinOperator</code>, <code>SortTopNOperator</code>, <code>GroupedJoinOperator</code>, <code>DistinctOperator</code> via <strong><code>IQueryOperatorSuite</code></strong> / <strong><code>DefaultQueryOperatorSuite</code></strong></li>
+<li>Shared kernels: internal <strong><code>QueryOperatorDependencies</code></strong> (selection, project, join materialize, sort selection, group keys, aggregate intrinsics)</li>
 <li>Runtime: <code>RainDbExecutionContext</code>, <code>DefaultQueryExecutor</code></li>
-<li>Vectorized kernels: <code>FixedWidthSelectionKernels</code>, <code>ProjectGather</code>, <code>PooledFixedWidthColumnChunk</code></li>
+<li>Catalog overlay: execution uses <strong><code>OverlayCatalog</code></strong> from Core when derived tables or grouped sort need ephemeral tables</li>
 </ul>
-<p><strong>Dependencies:</strong> Abstractions + Core (needs concrete chunk types for validation and materialization).</p>
+<p><strong>Dependencies:</strong> Abstractions + Core (concrete batches/chunks for validation and materialization).</p>
 <h3 id="raindb.sql">RainDB.Sql</h3>
-<p><strong>Purpose:</strong> Interface Segregation — SQL compilation is separate from LINQ.</p>
-<p><strong>Pipeline:</strong> <code>string</code> → <code>SqlParser</code> → <code>LogicalPlan</code> → binders → <code>IPhysicalPlan</code></p>
+<p><strong>Purpose:</strong> SQL front end — parse, logical optimization, physical binding, caching, and prepared statements.</p>
+<p><strong>Pipeline:</strong> <code>string</code> → <strong><code>LogicalPlanCompiler.Parse</code></strong> → <strong><code>LogicalRewritePipeline.Optimize</code></strong> → join heuristics → <strong><code>LogicalPlanCompiler.CompilePhysical</code></strong> → <code>IPhysicalPlan</code></p>
+<p><strong>Facade:</strong> <strong><code>SqlCompilationService</code></strong> composes the optimizer, <strong><code>HeuristicJoinAlgorithmSelector</code></strong>, parameter binder, and explain formatter. <strong><code>DefaultSqlCompiler</code></strong> implements <strong><code>ISqlCompiler</code></strong> with <strong><code>CompiledSqlCache</code></strong> and <strong><code>CatalogSchemaFingerprint</code></strong>.</p>
+<p><strong>Test entry:</strong> <strong><code>StrictSqlSubset.Shared</code></strong> uses the same compiler graph without <strong><code>ISqlCompiler</code></strong>.</p>
 <p><strong>Dependencies:</strong> Abstractions, Core, Query (binders emit physical plans defined in Query).</p>
-<pre><code class="language-xml">&lt;!-- src/RainDB.Sql/RainDB.Sql.csproj --&gt;
-&lt;Description&gt;Strict SQL subset: parse → RainDB.Logical → VectorizedScanPhysicalPlan&lt;/Description&gt;
-</code></pre>
 <h3 id="raindb.linq">RainDB.Linq</h3>
 <p><strong>Purpose:</strong> Expression-tree-based compilation for <code>IQueryable</code> scenarios.</p>
 <p><strong>Dependencies:</strong> Abstractions + Query only (no direct Core reference — uses catalog interfaces).</p>
@@ -966,7 +974,7 @@ public static RainDbEngine CreateDefault(ICatalog catalog)
 {
     ArgumentNullException.ThrowIfNull(catalog);
     var buffers = new HybridBufferPool();
-    var executor = new DefaultQueryExecutor();
+    var executor = new DefaultQueryExecutor(new DefaultQueryOperatorSuite());
     var sql = new DefaultSqlCompiler();
     var linq = new DefaultLinqCompiler();
     return new RainDbEngine(catalog, buffers, buffers, executor, sql, linq, NoOpSpillWriter.Instance);
@@ -984,11 +992,19 @@ public static RainDbEngine CreateDefault(ICatalog catalog)
 <p><code>FileDatabase</code> is held on the engine so the backing store is not garbage-collected while queries run.</p>
 <h3 id="execution-entry-points">Execution entry points</h3>
 <pre><code class="language-csharp">public IExecutionContext CreateSession(CancellationToken cancellationToken = default) =&gt;
-    new RainDbExecutionContext(Catalog, BufferPool, AlignedBufferPool, SpillWriter, cancellationToken);
+    CreateSessionWithExecutor(cancellationToken);
+
+private RainDbExecutionContext CreateSessionWithExecutor(CancellationToken cancellationToken = default) =&gt;
+    new RainDbExecutionContext(
+        Catalog, BufferPool, AlignedBufferPool, SpillWriter, cancellationToken,
+        FileDatabase?.MappedBatchScanObserver)
+    {
+        NestedExecutor = Executor,
+    };
 
 public async ValueTask&lt;IQueryResult&gt; ExecuteSqlAsync(string sql, CancellationToken cancellationToken = default)
 {
-    var ctx = CreateSession(cancellationToken);
+    var ctx = CreateSessionWithExecutor(cancellationToken);
     var plan = await SqlCompiler.CompileAsync(sql, Catalog, cancellationToken).ConfigureAwait(false);
     return await Executor.ExecuteAsync(plan, ctx).ConfigureAwait(false);
 }
@@ -996,7 +1012,7 @@ public async ValueTask&lt;IQueryResult&gt; ExecuteSqlAsync(string sql, Cancellat
 public async ValueTask&lt;IQueryResult&gt; ExecutePhysicalAsync(IPhysicalPlan plan, CancellationToken cancellationToken = default)
 {
     ArgumentNullException.ThrowIfNull(plan);
-    var ctx = CreateSession(cancellationToken);
+    var ctx = CreateSessionWithExecutor(cancellationToken);
     return await Executor.ExecuteAsync(plan, ctx).ConfigureAwait(false);
 }
 </code></pre>
@@ -1012,13 +1028,15 @@ public sealed class RainDbExecutionContext : IExecutionContext
         IBufferPool bufferPool,
         IAlignedBufferPool alignedBufferPool,
         ISpillWriter spillWriter,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        IMappedBatchScanObserver? mappedBatchScanObserver = null)
     {
         Catalog = catalog;
         BufferPool = bufferPool;
         AlignedBufferPool = alignedBufferPool;
         SpillWriter = spillWriter ?? NoOpSpillWriter.Instance;
         CancellationToken = cancellationToken;
+        MappedBatchScanObserver = mappedBatchScanObserver;
     }
 
     public ICatalog Catalog { get; }
@@ -1026,6 +1044,8 @@ public sealed class RainDbExecutionContext : IExecutionContext
     public IAlignedBufferPool AlignedBufferPool { get; }
     public ISpillWriter SpillWriter { get; }
     public CancellationToken CancellationToken { get; }
+    public IMappedBatchScanObserver? MappedBatchScanObserver { get; }
+    public IQueryExecutor? NestedExecutor { get; init; }
 }
 </code></pre>
 <h3 id="what-each-property-provides">What each property provides</h3>
@@ -1040,8 +1060,8 @@ public sealed class RainDbExecutionContext : IExecutionContext
 <tbody>
 <tr>
 <td><code>Catalog</code></td>
-<td>All engines</td>
-<td>Resolve <code>TableId</code> → <code>IColumnarTableSource</code></td>
+<td>All operators</td>
+<td>Resolve <code>TableId</code> → <code>IColumnarTableSource</code> (may be <strong><code>OverlayCatalog</code></strong>)</td>
 </tr>
 <tr>
 <td><code>BufferPool</code></td>
@@ -1063,6 +1083,16 @@ public sealed class RainDbExecutionContext : IExecutionContext
 <td>Parallel loops, channels</td>
 <td>Abort long scans</td>
 </tr>
+<tr>
+<td><code>MappedBatchScanObserver</code></td>
+<td>Vectorized scan on mmap batches</td>
+<td>Notify file DB memory manager on batch access</td>
+</tr>
+<tr>
+<td><code>NestedExecutor</code></td>
+<td>Subquery / correlated paths</td>
+<td>Execute nested <code>IPhysicalPlan</code> without re-entering SQL compile</td>
+</tr>
 </tbody>
 </table>
 <h3 id="extension-without-modifying-operators">Extension without modifying operators</h3>
@@ -1079,27 +1109,48 @@ catalog, buffers, buffers, executor, sql, linq,
 spillWriter: myRecordingSpillWriter);
 </code></pre>
 <hr />
+<h2 id="a-sqlcompilationservice-and-logicalplancompiler">2.16a SqlCompilationService and LogicalPlanCompiler</h2>
+<p><strong><code>SqlCompilationService</code></strong> is the SQL compilation <strong>facade</strong> in <code>RainDB.Sql/Compilation</code>. It wires:</p>
+<ul>
+<li><strong><code>LogicalPlanCompiler</code></strong> — owns <strong><code>SqlParser</code></strong> and binder graph (<code>LogicalTableScanBinder</code>, <code>LogicalJoinBinder</code>, <code>LogicalUnionAllBinder</code>, <code>LogicalDerivedTableScanBinder</code>, <code>UncorrelatedSubqueryBinder</code>)</li>
+<li><strong><code>LogicalRewritePipeline</code></strong> — rule-based logical optimization before bind</li>
+<li><strong><code>HeuristicJoinAlgorithmSelector</code></strong> — hash vs sort-merge for join roots</li>
+<li><strong><code>LogicalParameterBinder</code></strong> — <code>@param</code> placeholders for prepared SQL</li>
+<li><strong><code>SqlExplainFormatter</code></strong> — text bundled into <strong><code>ExplainBundlePhysicalPlan</code></strong></li>
+</ul>
+<p><strong><code>CompilePhysical</code></strong> runs optimize → select join algorithm → <strong><code>LogicalPlanCompiler.CompilePhysical</code></strong>. When the parsed plan includes an explain level, the service returns <strong><code>ExplainBundlePhysicalPlan</code></strong> instead of the executable plan alone.</p>
+<p><strong><code>DefaultSqlCompiler</code></strong> delegates to this service, adds <strong><code>CompiledSqlCache</code></strong> keyed by SQL text and <strong><code>CatalogSchemaFingerprint</code></strong>, and implements <strong><code>PrepareAsync</code></strong> via <strong><code>PreparedSqlStatement</code></strong>.</p>
+<hr />
+<h2 id="b-iqueryoperatorsuite-and-queryoperatordependencies">2.16b IQueryOperatorSuite and QueryOperatorDependencies</h2>
+<p>Execution no longer hard-codes static engine classes in the executor switch. <strong><code>DefaultQueryOperatorSuite</code></strong> implements <strong><code>IQueryOperatorSuite</code></strong> and constructs:</p>
+<ul>
+<li><strong><code>VectorizedScanOperator</code></strong>, <strong><code>HashAggregateOperator</code></strong>, <strong><code>JoinOperator</code></strong>, <strong><code>SortTopNOperator</code></strong>, <strong><code>GroupedJoinOperator</code></strong>, <strong><code>DistinctOperator</code></strong></li>
+</ul>
+<p>All share one <strong><code>QueryOperatorDependencies</code></strong> instance: <strong><code>SelectionEvaluator</code></strong>, <strong><code>ProjectGather</code></strong>, <strong><code>JoinBatchMaterializer</code></strong>, <strong><code>SortTopNRowSelector</code></strong>, group-key factories, and <strong><code>IColumnarAggregateIntrinsics</code></strong>. Custom suites swap individual operators for tests without forking the executor.</p>
+<hr />
+<h2 id="c-overlaycatalog-for-derived-tables">2.16c OverlayCatalog for derived tables</h2>
+<p><strong><code>OverlayCatalog</code></strong> in <code>RainDB.Core/Catalog</code> implements <strong><code>ICatalog</code></strong> by layering ephemeral <strong><code>ITableSource</code></strong> entries over a base catalog. Lookups by name or <strong><code>TableId</code></strong> check overlays first, then the base. <strong><code>Register</code></strong> forwards to the base so application tables remain authoritative.</p>
+<p><strong><code>DefaultQueryExecutor</code></strong> uses an overlay when executing <strong><code>DerivedTableScanPhysicalPlan</code></strong>: materialize the subquery, register an <strong><code>EphemeralColumnarTableSource</code></strong> under the derived alias, run the outer plan in a scoped <strong><code>RainDbExecutionContext</code></strong> whose <strong><code>Catalog</code></strong> is the overlay. The same pattern appears when sorting grouped aggregate output via a temporary table id.</p>
+<hr />
 <h2 id="executor-dispatch-all-physical-plan-types">2.17 Executor dispatch — all physical plan types</h2>
-<p><code>DefaultQueryExecutor</code> is a <strong>typed switch</strong> over <code>IPhysicalPlan</code> implementations:</p>
-<pre><code class="language-csharp">// src/RainDB.Query/Execution/DefaultQueryExecutor.cs
-public sealed class DefaultQueryExecutor : IQueryExecutor
+<p><code>DefaultQueryExecutor</code> accepts <strong><code>IQueryOperatorSuite</code></strong> (default <strong><code>DefaultQueryOperatorSuite</code></strong>) and dispatches <strong><code>IPhysicalPlan</code></strong> types:</p>
+<pre><code class="language-csharp">public sealed class DefaultQueryExecutor : IQueryExecutor
 {
+    private readonly IQueryOperatorSuite _operators;
+
+    public DefaultQueryExecutor(IQueryOperatorSuite? operators = null) =&gt;
+        _operators = operators ?? new DefaultQueryOperatorSuite();
+
     public async ValueTask&lt;IQueryResult&gt; ExecuteAsync(IPhysicalPlan plan, IExecutionContext context)
     {
-        ArgumentNullException.ThrowIfNull(plan);
-        ArgumentNullException.ThrowIfNull(context);
-        ArgumentNullException.ThrowIfNull(context.AlignedBufferPool);
         _ = plan.Explain();
-
-        if (plan is VectorizedScanPhysicalPlan vs) { /* VectorizedScanEngine */ }
-        if (plan is HashAggregatePhysicalPlan ha) { /* HashAggregateEngine */ }
-        if (plan is JoinPhysicalPlan join) { /* JoinExecutionEngine */ }
-        if (plan is SortTopNPhysicalPlan st) { /* SortTopNEngine table path */ }
-        if (plan is JoinSortTopNPhysicalPlan jst) { /* SortTopNEngine join path */ }
-        if (plan is GroupedJoinPhysicalPlan grouped) { /* Join then HashAggregate */ }
-
-        IQueryResult r = new EmptyQueryResult(0);
-        return r;
+        if (plan is VectorizedScanPhysicalPlan vs)
+            return await _operators.Scan.ExecuteAsync(vs, RequireColumnarTable(context, vs.TableId), context);
+        // HashAggregate, Join, SortTopN, JoinSortTopN, GroupedJoin — via _operators
+        // DerivedTableScan, UnionAll, Distinct, Grouped*SortTopN — executor composition
+        if (plan is ExplainBundlePhysicalPlan bundle)
+            return new ExplainTextQueryResult(bundle.Explain());
+        throw new NotSupportedException($&quot;Unsupported physical plan type: {plan.GetType().Name}.&quot;);
     }
 }
 </code></pre>
@@ -1108,86 +1159,68 @@ public sealed class DefaultQueryExecutor : IQueryExecutor
 <thead>
 <tr>
 <th>Physical plan</th>
-<th>Engine</th>
-<th>Catalog lookups</th>
+<th>Execution</th>
 </tr>
 </thead>
 <tbody>
 <tr>
 <td><code>VectorizedScanPhysicalPlan</code></td>
-<td><code>VectorizedScanEngine</code></td>
-<td>One table by <code>TableId</code></td>
+<td><code>_operators.Scan</code></td>
 </tr>
 <tr>
 <td><code>HashAggregatePhysicalPlan</code></td>
-<td><code>HashAggregateEngine</code></td>
-<td>One table</td>
+<td><code>_operators.HashAggregate</code></td>
 </tr>
 <tr>
 <td><code>JoinPhysicalPlan</code></td>
-<td><code>JoinExecutionEngine</code></td>
-<td>Probe + build tables</td>
+<td><code>_operators.Join</code></td>
 </tr>
 <tr>
 <td><code>SortTopNPhysicalPlan</code></td>
-<td><code>SortTopNEngine.ExecuteTableAsync</code></td>
-<td>One table</td>
+<td><code>_operators.SortTopN.ExecuteTableAsync</code></td>
 </tr>
 <tr>
 <td><code>JoinSortTopNPhysicalPlan</code></td>
-<td><code>SortTopNEngine.ExecuteJoinAsync</code></td>
-<td>Probe + build</td>
+<td><code>_operators.SortTopN.ExecuteJoinAsync</code></td>
 </tr>
 <tr>
 <td><code>GroupedJoinPhysicalPlan</code></td>
-<td><code>JoinExecutionEngine</code> → <code>EphemeralColumnarTableSource</code> → <code>HashAggregateEngine</code></td>
-<td>Probe + build, then ephemeral</td>
+<td><code>_operators.GroupedJoin</code></td>
+</tr>
+<tr>
+<td><code>GroupedJoinSortTopNPhysicalPlan</code></td>
+<td>Grouped join, then ephemeral + sort</td>
+</tr>
+<tr>
+<td><code>GroupedSortTopNPhysicalPlan</code></td>
+<td>Execute inner aggregate, overlay + sort</td>
+</tr>
+<tr>
+<td><code>DerivedTableScanPhysicalPlan</code></td>
+<td>Materialize subquery; <strong><code>OverlayCatalog</code></strong>; outer plan</td>
+</tr>
+<tr>
+<td><code>DistinctPhysicalPlan</code></td>
+<td><code>_operators.Distinct</code> (recursive child plans)</td>
+</tr>
+<tr>
+<td><code>UnionAllPhysicalPlan</code></td>
+<td>Execute each input; concatenate batches</td>
+</tr>
+<tr>
+<td><code>ExplainBundlePhysicalPlan</code></td>
+<td><strong><code>ExplainTextQueryResult</code></strong></td>
+</tr>
+<tr>
+<td><code>ExplainOnlyPhysicalPlan</code></td>
+<td>Throws if executed (use EXPLAIN SQL)</td>
 </tr>
 </tbody>
 </table>
-<h3 id="vectorizedscanphysicalplan">VectorizedScanPhysicalPlan</h3>
-<pre><code class="language-csharp">if (plan is VectorizedScanPhysicalPlan vs)
-{
-    if (!context.Catalog.TryGetTable(vs.TableId, out var ts) || ts is not IColumnarTableSource cols)
-        throw new InvalidOperationException($&quot;Columnar table {vs.TableId} was not found in the catalog.&quot;);
-    return await VectorizedScanEngine.ExecuteAsync(vs, cols, context).ConfigureAwait(false);
-}
-</code></pre>
-<p>Handles: projection, filter (AND conjunction), global aggregate (<code>AggregateSpec</code>).</p>
-<h3 id="hashaggregatephysicalplan">HashAggregatePhysicalPlan</h3>
-<p>Grouped <code>GROUP BY</code> with hash table. Supports spill hook when <code>SpillPartialEntryThreshold &gt; 0</code>.</p>
-<h3 id="joinphysicalplan">JoinPhysicalPlan</h3>
-<p>Inner equi-join with hash or sort-merge algorithm enum:</p>
-<pre><code class="language-csharp">// src/RainDB.Query/Plans/JoinPhysicalPlan.cs
-public enum PhysicalJoinAlgorithm { Hash, SortMerge }
-</code></pre>
-<p>Resolves probe (left) and build (right) tables separately.</p>
-<h3 id="groupedjoinphysicalplan-pipeline-composition">GroupedJoinPhysicalPlan — pipeline composition</h3>
-<p>The most intricate dispatch path:</p>
-<pre><code class="language-csharp">if (plan is GroupedJoinPhysicalPlan grouped)
-{
-    // ... resolve probe and build tables ...
-    var joinResult = await JoinExecutionEngine.ExecuteAsync(grouped.Join, probeCols2, buildCols2, context);
-    try
-    {
-        if (joinResult is not IColumnarQueryResult colResult)
-            throw new InvalidOperationException(&quot;Join execution must return a columnar result for grouped join.&quot;);
-        var ephemeral = new EphemeralColumnarTableSource(
-            grouped.Aggregate.TableId,
-            &quot;_grouped_join_&quot;,
-            grouped.Join.OutputSchema,
-            colResult.Batches);
-        return await HashAggregateEngine.ExecuteAsync(grouped.Aggregate, ephemeral, context);
-    }
-    finally
-    {
-        await joinResult.DisposeAsync().ConfigureAwait(false);
-    }
-}
-</code></pre>
-<p><strong>Pattern:</strong> Join materializes columnar batches → wrap as ephemeral table source → run hash aggregate. No SQL-visible temp table; purely internal IR.</p>
+<h3 id="derived-table-pattern">Derived table pattern</h3>
+<p>Subquery results become <strong><code>EphemeralColumnarTableSource</code></strong> entries on an <strong><code>OverlayCatalog</code></strong>. Scoped sessions copy <strong><code>NestedExecutor</code></strong>, <strong><code>MappedBatchScanObserver</code></strong>, and buffer pools from the parent session so nested and outer plans share the same executor instance.</p>
 <h3 id="unknown-plans">Unknown plans</h3>
-<p>Unrecognized <code>IPhysicalPlan</code> types fall through to <code>EmptyQueryResult(0)</code>. Custom executors should override <code>IQueryExecutor</code> entirely or extend <code>DefaultQueryExecutor</code> via fork (not virtual in current code).</p>
+<p>Unrecognized plan types throw <strong><code>NotSupportedException</code></strong>. Custom executors can wrap <strong><code>DefaultQueryExecutor</code></strong> and delegate after handling proprietary plans.</p>
 <hr />
 <h2 id="logical-ir-versus-physical-ir">2.18 Logical IR versus physical IR</h2>
 <h3 id="logical-layer-what-not-how">Logical layer — what, not how</h3>
@@ -1247,35 +1280,43 @@ public sealed class VectorizedScanPhysicalPlan : IPhysicalPlan
 <li>Execution options (<code>MaxDegreeOfParallelism</code>, <code>UseAvx2DoubleSum</code>, <code>UseChannelScheduler</code>)</li>
 </ul>
 <h3 id="compilation-bridge">Compilation bridge</h3>
-<pre><code class="language-csharp">// src/RainDB.Sql/Compilation/DefaultSqlCompiler.cs
+<pre><code class="language-csharp">// DefaultSqlCompiler → SqlCompilationService
 public ValueTask&lt;IPhysicalPlan&gt; CompileAsync(string sql, ICatalog catalog, CancellationToken cancellationToken = default)
 {
-    var logical = SqlParser.Parse(sql);
-    IPhysicalPlan plan = logical.Root switch
-    {
-        LogicalTableScan s =&gt; LogicalTableScanBinder.BindAndLower(s, catalog, _defaultScanOptions),
-        LogicalInnerJoin j =&gt; LogicalJoinBinder.BindAndLower(j, catalog, PhysicalJoinAlgorithm.Hash, _defaultScanOptions),
-        _ =&gt; throw new InvalidOperationException($&quot;Unsupported logical root {logical.Root.GetType().Name}.&quot;),
-    };
-    return ValueTask.FromResult(plan);
+    var parsed = _compilation.PhysicalCompiler.Parse(sql);
+    var fingerprint = _schemaFingerprint.Compute(catalog);
+    if (!_compilation.ContainsParameters(parsed)
+        &amp;&amp; _cache.TryGet(sql, fingerprint, out var cached) &amp;&amp; cached is not null)
+        return ValueTask.FromResult(cached);
+
+    var physical = _compilation.CompilePhysical(parsed, catalog);
+    if (!_compilation.ContainsParameters(parsed) &amp;&amp; physical is not ExplainBundlePhysicalPlan)
+        _cache.Store(sql, fingerprint, physical);
+    return ValueTask.FromResult(physical);
 }
 </code></pre>
-<p><strong>Bind</strong> resolves names → <code>TableId</code>, column names → indices, literals → <code>ImmediateBits</code>.</p>
-<p><strong>Lower</strong> chooses physical algorithms (hash join, vectorized scan, hash aggregate).</p>
+<p>Inside <strong><code>SqlCompilationService</code></strong>, <strong><code>CompilePhysical</code></strong> optimizes the logical plan, selects a join algorithm for join roots, and calls <strong><code>LogicalPlanCompiler.CompilePhysical</code></strong>. <strong>Bind</strong> resolves names to <strong><code>TableId</code></strong> and column indices; <strong>lower</strong> emits concrete plan types (scan, hash agg, join, derived table, union, distinct, explain bundle).</p>
 <h3 id="ir-comparison-diagram">IR comparison diagram</h3>
 <pre class="mermaid">flowchart TB
     subgraph logical ["Logical IR (Abstractions)"]
-        LTS["LogicalTableScan&lt;br/>table: order_lines&lt;br/>WHERE amount > 1000"]
-        LJ["LogicalInnerJoin&lt;br/>ON a.k = b.k"]
+        LTS["LogicalTableScan"]
+        LJ["LogicalInnerJoin"]
+    end
+    subgraph compile ["RainDB.Sql"]
+        Opt["LogicalRewritePipeline"]
+        Sel["HeuristicJoinAlgorithmSelector"]
+        LPC["LogicalPlanCompiler"]
     end
     subgraph physical ["Physical IR (Query)"]
-        VS["VectorizedScanPhysicalPlan&lt;br/>tableId: guid&lt;br/>FILTER col2 Gt 1000"]
-        JP["JoinPhysicalPlan&lt;br/>probeKeys: [0]&lt;br/>buildKeys: [0]"]
+        VS["VectorizedScanPhysicalPlan"]
+        JP["JoinPhysicalPlan"]
     end
-    LTS --> Binder["LogicalTableScanBinder"]
-    LJ --> JBinder["LogicalJoinBinder"]
-    Binder --> VS
-    JBinder --> JP
+    LTS --> Opt
+    LJ --> Opt
+    Opt --> Sel
+    Sel --> LPC
+    LPC --> VS
+    LPC --> JP
 </pre>
 <h3 id="why-two-irs">Why two IRs?</h3>
 <ol>
@@ -1311,14 +1352,14 @@ public ValueTask&lt;IPhysicalPlan&gt; CompileAsync(string sql, ICatalog catalog,
 <tr>
 <td>Query execution</td>
 <td><code>IQueryExecutor</code></td>
-<td><code>DefaultQueryExecutor</code></td>
-<td>Add plan types, distributed execution</td>
+<td><code>DefaultQueryExecutor</code> + <code>DefaultQueryOperatorSuite</code></td>
+<td>Inject operators or wrap executor</td>
 </tr>
 <tr>
 <td>SQL compilation</td>
 <td><code>ISqlCompiler</code></td>
-<td><code>DefaultSqlCompiler</code></td>
-<td>Widen SQL subset, different parse</td>
+<td><code>DefaultSqlCompiler</code> / <code>SqlCompilationService</code></td>
+<td>Custom rewrite rules, join selector, cache</td>
 </tr>
 <tr>
 <td>LINQ compilation</td>
@@ -1428,14 +1469,12 @@ dotnet add tests/RainDB.Tests reference src/RainDB.Driver
 <pre class="mermaid">flowchart TB
     App["Application / Demo / Tests"]
     Engine["RainDbEngine&lt;br/>(Driver)"]
-    SQL["DefaultSqlCompiler&lt;br/>(Sql)"]
+    SQL["DefaultSqlCompiler&lt;br/>SqlCompilationService"]
     LINQ["DefaultLinqCompiler&lt;br/>(Linq)"]
     Exec["DefaultQueryExecutor&lt;br/>(Query)"]
+    Suite["DefaultQueryOperatorSuite"]
     Cat["ICatalog&lt;br/>(Core: InMemoryCatalog)"]
     Tables["MemoryTable / FileDb&lt;br/>(Core)"]
-    Scan["VectorizedScanEngine"]
-    Agg["HashAggregateEngine"]
-    Join["JoinExecutionEngine"]
 
     App --> Engine
     Engine --> SQL
@@ -1444,12 +1483,8 @@ dotnet add tests/RainDB.Tests reference src/RainDB.Driver
     Engine --> Cat
     SQL --> Exec
     LINQ --> Exec
-    Exec --> Scan
-    Exec --> Agg
-    Exec --> Join
-    Scan --> Tables
-    Agg --> Tables
-    Join --> Tables
+    Exec --> Suite
+    Suite --> Tables
     Cat --> Tables
 </pre>
 <hr />
@@ -1475,11 +1510,11 @@ await using var result = await engine.ExecuteSqlAsync(
 </code></pre>
 <p>Internal flow:</p>
 <ol>
-<li><code>ExecuteSqlAsync</code> → <code>CreateSession</code></li>
-<li><code>DefaultSqlCompiler.CompileAsync</code> → <code>LogicalTableScan</code> with <code>Aggregate</code></li>
-<li><code>LogicalTableScanBinder</code> → <code>VectorizedScanPhysicalPlan</code></li>
-<li><code>DefaultQueryExecutor</code> → <code>VectorizedScanEngine</code></li>
-<li>Returns <code>IAggregateQueryResult</code></li>
+<li><code>ExecuteSqlAsync</code> → <code>CreateSessionWithExecutor</code> (sets <strong><code>NestedExecutor</code></strong>, optional <strong><code>MappedBatchScanObserver</code></strong>)</li>
+<li><code>DefaultSqlCompiler.CompileAsync</code> → parse, optional cache hit, <strong><code>SqlCompilationService.CompilePhysical</code></strong></li>
+<li><code>LogicalRewritePipeline</code> + <strong><code>LogicalPlanCompiler</code></strong> → e.g. <code>VectorizedScanPhysicalPlan</code></li>
+<li><code>DefaultQueryExecutor</code> → <code>_operators.Scan.ExecuteAsync</code></li>
+<li>Returns <code>IAggregateQueryResult</code> or <code>IColumnarQueryResult</code></li>
 </ol>
 <hr />
 <h2 id="pitfalls">2.23 Pitfalls</h2>
@@ -1489,8 +1524,8 @@ await using var result = await engine.ExecuteSqlAsync(
 <p><code>CreateSession</code> per query. Buffer pools are shared; context state is per execution.</p>
 <h3 id="pitfall-3-forgetting-to-register-tables">Pitfall 3: Forgetting to register tables</h3>
 <p>Compilation binds names via catalog. <code>TryGetTable</code> failure surfaces as <code>InvalidOperationException</code> in executor.</p>
-<h3 id="pitfall-4-assuming-explainonlyphysicalplan-runs-in-default-executor">Pitfall 4: Assuming ExplainOnlyPhysicalPlan runs in default executor</h3>
-<p><code>ExplainOnlyPhysicalPlan</code> exists for diagnostics; default executor returns empty for unknown types.</p>
+<h3 id="pitfall-4-executing-explainonlyphysicalplan-or-expecting-empty-rows-for-explain-sql">Pitfall 4: Executing ExplainOnlyPhysicalPlan or expecting empty rows for EXPLAIN SQL</h3>
+<p><strong><code>ExplainOnlyPhysicalPlan</code></strong> throws if executed directly. <strong><code>EXPLAIN</code></strong> SQL compiles to <strong><code>ExplainBundlePhysicalPlan</code></strong>, which returns <strong><code>ExplainTextQueryResult</code></strong> — not an empty row set.</p>
 <h3 id="pitfall-5-circular-project-references">Pitfall 5: Circular project references</h3>
 <p>If Core accidentally references Query, MSBuild fails. Keep a printed dependency diagram in CONTRIBUTING.</p>
 <h3 id="pitfall-6-linq-needing-core-types-at-compile-time">Pitfall 6: Linq needing Core types at compile time</h3>
@@ -1507,7 +1542,7 @@ await using var result = await engine.ExecuteSqlAsync(
 <p>Write the sequence of <code>await</code> calls for <code>GroupedJoinPhysicalPlan</code> including <code>DisposeAsync</code> on join result.</p>
 <hr />
 <h2 id="chapter-summary">2.25 Chapter summary</h2>
-<p>RainDB's six-project layout enforces clear boundaries: <strong>Abstractions</strong> define contracts, <strong>Core</strong> owns data, <strong>Query</strong> owns execution, <strong>Sql/Linq</strong> own front-ends, <strong>Driver</strong> wires the graph. <code>RainDbEngine</code> is the single entry point; <code>IExecutionContext</code> carries per-query resources; <code>DefaultQueryExecutor</code> dispatches every physical plan type to specialized engines. Logical IR preserves SQL semantics; physical IR enables vectorized performance.</p>
+<p>RainDB's six-project layout enforces clear boundaries: <strong>Abstractions</strong> define contracts, <strong>Core</strong> owns data and <strong><code>OverlayCatalog</code></strong>, <strong>Query</strong> owns physical plans and <strong><code>IQueryOperatorSuite</code></strong> execution, <strong>Sql</strong> owns <strong><code>SqlCompilationService</code></strong> (parse, rewrite, bind, cache, prepare), <strong>Linq</strong> remains a stub front end, <strong>Driver</strong> wires the graph. <code>RainDbEngine</code> is the single entry point; <code>RainDbExecutionContext</code> carries per-query resources including <strong><code>NestedExecutor</code></strong> and optional <strong><code>MappedBatchScanObserver</code></strong>; <code>DefaultQueryExecutor</code> dispatches every physical plan type through injectable operators. Logical IR preserves SQL semantics; physical IR enables vectorized performance; compilation separates rule-based logical optimization from algorithm selection and binding.</p>
 <p>Chapter 3 descends into the columnar storage model — types, validation, and batch construction.</p>
 </div>
           <footer class="doc-footer">
@@ -1729,6 +1764,10 @@ await using var result = await engine.ExecuteSqlAsync(
                           <a href="#exercise-26-extension-scenario">Exercise 2.6 — Extension scenario</a>
                         </li>
                         
+                        <li class="toc-h3">
+                          <a href="#bridge-from-part-i-to-raindb-modules">Bridge from Part I to RainDB modules</a>
+                        </li>
+                        
                         <li class="toc-h1">
                           <a href="#part-ii-raindb-implementation">Part II: RainDB Implementation</a>
                         </li>
@@ -1806,6 +1845,18 @@ await using var result = await engine.ExecuteSqlAsync(
                         </li>
                         
                         <li class="toc-h2">
+                          <a href="#216a-sqlcompilationservice-and-logicalplancompiler">2.16a SqlCompilationService and LogicalPlanCompiler</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#216b-iqueryoperatorsuite-and-queryoperatordependencies">2.16b IQueryOperatorSuite and QueryOperatorDependencies</a>
+                        </li>
+                        
+                        <li class="toc-h2">
+                          <a href="#216c-overlaycatalog-for-derived-tables">2.16c OverlayCatalog for derived tables</a>
+                        </li>
+                        
+                        <li class="toc-h2">
                           <a href="#217-executor-dispatch-all-physical-plan-types">2.17 Executor dispatch — all physical plan types</a>
                         </li>
                         
@@ -1814,19 +1865,7 @@ await using var result = await engine.ExecuteSqlAsync(
                         </li>
                         
                         <li class="toc-h3">
-                          <a href="#vectorizedscanphysicalplan">VectorizedScanPhysicalPlan</a>
-                        </li>
-                        
-                        <li class="toc-h3">
-                          <a href="#hashaggregatephysicalplan">HashAggregatePhysicalPlan</a>
-                        </li>
-                        
-                        <li class="toc-h3">
-                          <a href="#joinphysicalplan">JoinPhysicalPlan</a>
-                        </li>
-                        
-                        <li class="toc-h3">
-                          <a href="#groupedjoinphysicalplan-pipeline-composition">GroupedJoinPhysicalPlan — pipeline composition</a>
+                          <a href="#derived-table-pattern">Derived table pattern</a>
                         </li>
                         
                         <li class="toc-h3">
@@ -1926,7 +1965,7 @@ await using var result = await engine.ExecuteSqlAsync(
                         </li>
                         
                         <li class="toc-h3">
-                          <a href="#pitfall-4-assuming-explainonlyphysicalplan-runs-in-default-executor">Pitfall 4: Assuming ExplainOnlyPhysicalPlan runs in default executor</a>
+                          <a href="#pitfall-4-executing-explainonlyphysicalplan-or-expecting-empty-rows-for-explain-sql">Pitfall 4: Executing ExplainOnlyPhysicalPlan or expecting empty rows for EXPLAIN SQL</a>
                         </li>
                         
                         <li class="toc-h3">
